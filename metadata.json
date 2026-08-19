@@ -1,0 +1,6 @@
+{
+  "name": "Aero Canvas 3D",
+  "description": "A real-time 3D React Three Fiber art studio with a canvas on an easel, realistic aerosol spray and brush physics, dynamic 3D tools, Web Audio sound effects, and mobile phone motion controller.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
