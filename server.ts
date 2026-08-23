@@ -20,7 +20,7 @@ function getGenAI(): GoogleGenAI | null {
   return genAIClient;
 }
 
-// Fallback curated graffiti concepts for seamless offline/503 resilience
+// Fallback curated graffiti concepts
 const CURATED_GRAFFITI_PRESETS = [
   {
     title: "NEON PHANTOM",
@@ -119,6 +119,62 @@ const CURATED_TRANSFORMATIONS: Record<string, any> = {
   },
 };
 
+const DEFAULT_PLAYER_COLORS = ["#FF3D00", "#06B6D4", "#10B981", "#EC4899"];
+
+interface RoomPlayer {
+  id: string;
+  socketId: string;
+  slot: number; // 1 to 4
+  name: string;
+  color: string;
+  tool: "spray" | "brush";
+  mode: "motion" | "projection";
+}
+
+interface RoomState {
+  roomId: string;
+  players: Map<string, RoomPlayer>;
+  activeObject: string;
+}
+
+const activeRooms = new Map<string, RoomState>();
+
+function getOrCreateRoom(roomId: string): RoomState {
+  if (!activeRooms.has(roomId)) {
+    activeRooms.set(roomId, {
+      roomId,
+      players: new Map(),
+      activeObject: "easel",
+    });
+  }
+  return activeRooms.get(roomId)!;
+}
+
+function assignNextPlayerSlot(room: RoomState, socketId: string, customName?: string): RoomPlayer {
+  const usedSlots = new Set(Array.from(room.players.values()).map((p) => p.slot));
+  let slot = 1;
+  while (slot <= 4 && usedSlots.has(slot)) {
+    slot++;
+  }
+  if (slot > 4) slot = ((room.players.size) % 4) + 1;
+
+  const color = DEFAULT_PLAYER_COLORS[(slot - 1) % DEFAULT_PLAYER_COLORS.length];
+  const name = customName || `Tagger ${slot}`;
+
+  const player: RoomPlayer = {
+    id: socketId,
+    socketId,
+    slot,
+    name,
+    color,
+    tool: "spray",
+    mode: "motion",
+  };
+
+  room.players.set(socketId, player);
+  return player;
+}
+
 async function generateGraffitiWithFallback(promptText: string, style: string) {
   const ai = getGenAI();
   if (!ai) {
@@ -153,7 +209,7 @@ Generate a creative street art concept response in JSON format.`,
                 items: { type: Type.STRING },
                 description: "Array of 4 hex color strings",
               },
-              stencilSymbol: { type: Type.STRING, description: "A single unicode iconic stencil symbol (e.g. ⚡, 👑, 💀, ✦, 👁, 🐉, 🕊, 🚀)" },
+              stencilSymbol: { type: Type.STRING, description: "A single unicode iconic stencil symbol" },
               graffitiText: { type: Type.STRING, description: "Stylized lettering word" },
               styleNotes: { type: Type.STRING, description: "1-2 sentence pro spraying tip" },
             },
@@ -183,7 +239,7 @@ async function generateCritiqueWithFallback(objectType: string, dominantColor: s
   if (!ai) {
     return {
       exhibitionTitle: "VIBRATIONS IN LOWER EAST SIDE",
-      curatorCritique: `A bold, kinetic exploration of aerosol velocity and physical gesture across the 3D ${objectType}. The layered overspray creates an electric dialogue between motion and form.`,
+      curatorCritique: `A bold, kinetic exploration of aerosol velocity and physical gesture across the 3D ${objectType}.`,
       estimatedValue: "$24,500 USD",
       auctionHouse: "SOTHEBY'S CONTEMPORARY STREET",
       vibeTags: ["#AerosolExpressionism", "#NeoGraffiti", "#RawEnergy"],
@@ -227,7 +283,7 @@ async function generateCritiqueWithFallback(objectType: string, dominantColor: s
 
   return {
     exhibitionTitle: `CHRONICLES OF ${objectType.toUpperCase()}`,
-    curatorCritique: `A magnificent masterclass in raw physical gesture and aerosol texture. The dynamic ${dominantColor} tones evoke the Golden Age of New York subway writers.`,
+    curatorCritique: `A magnificent masterclass in raw physical gesture and aerosol texture.`,
     estimatedValue: "$32,000 USD",
     auctionHouse: "CHRISTIE'S POST-WAR & URBAN",
     vibeTags: ["#UrbanMasterpiece", "#Wildstyle3D", "#CollectorGrade"],
@@ -263,7 +319,7 @@ Generate artistic transformation parameters and stylized elements in JSON format
               tagLine: { type: Type.STRING, description: "Curator headline" },
               accentColor: { type: Type.STRING, description: "Primary glowing hex color" },
               secondaryColor: { type: Type.STRING, description: "Secondary vibrant hex color" },
-              stencilSymbol: { type: Type.STRING, description: "Unicode symbol: ⚡, 👑, 💀, ✦, 👁, 🐉, 🕊, 🚀, ☣, ☯" },
+              stencilSymbol: { type: Type.STRING, description: "Unicode symbol" },
               tagText: { type: Type.STRING, description: "Stylized calligraphic word" },
               dripIntensity: { type: Type.NUMBER, description: "Value between 0.2 and 1.2" },
               glowRadius: { type: Type.NUMBER, description: "Value between 10 and 40" },
@@ -304,50 +360,110 @@ async function startServer() {
   const httpServer = createServer(app);
   const PORT = 3000;
 
-  app.use(express.json({ limit: "10mb" }));
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-  // Socket.IO Setup
+  // Socket.IO Setup with Multiplayer Relay
   const io = new Server(httpServer, {
     cors: {
       origin: "*",
       methods: ["GET", "POST"],
     },
+    maxHttpBufferSize: 1e8,
   });
 
   io.on("connection", (socket) => {
-    socket.on("join-room", ({ roomId, role }) => {
+    let currentRoomId: string | null = null;
+    let currentRole: string | null = null;
+
+    socket.on("join-room", ({ roomId, role, playerName }) => {
+      currentRoomId = roomId;
+      currentRole = role;
       socket.join(roomId);
-      socket.to(roomId).emit("user-joined", { id: socket.id, role });
+
+      const room = getOrCreateRoom(roomId);
+
+      if (role === "controller") {
+        const player = assignNextPlayerSlot(room, socket.id, playerName);
+        socket.emit("player-assigned", player);
+        io.to(roomId).emit("player-list-update", Array.from(room.players.values()));
+      } else if (role === "canvas") {
+        socket.emit("player-list-update", Array.from(room.players.values()));
+      }
+
+      socket.to(roomId).emit("user-joined", { id: socket.id, role, playerName });
     });
 
-    // Relay controller motion
+    // Multiplayer Motion Relay (with Player ID & Slot)
     socket.on("motion", (data) => {
-      socket.to(data.roomId).emit("motion", data);
+      const room = activeRooms.get(data.roomId);
+      const player = room?.players.get(socket.id);
+      socket.to(data.roomId).emit("motion", {
+        ...data,
+        playerId: socket.id,
+        playerSlot: player?.slot || 1,
+        playerName: player?.name || "Tagger",
+        color: player?.color || data.color,
+      });
     });
 
-    // Relay actions (spray, brush)
+    // Multiplayer Action (Spray / Brush)
     socket.on("action", (data) => {
-      socket.to(data.roomId).emit("action", data);
+      const room = activeRooms.get(data.roomId);
+      const player = room?.players.get(socket.id);
+      if (player && data.color) player.color = data.color;
+      if (player && data.action) player.tool = data.action;
+
+      socket.to(data.roomId).emit("action", {
+        ...data,
+        playerId: socket.id,
+        playerSlot: player?.slot || 1,
+        playerName: player?.name || "Tagger",
+      });
     });
 
-    // Relay Direct Projection Drawing (touch on phone drawn in real-time)
+    // Multiplayer Direct Projection Drawing
     socket.on("projection-draw", (data) => {
-      socket.to(data.roomId).emit("projection-draw", data);
+      const room = activeRooms.get(data.roomId);
+      const player = room?.players.get(socket.id);
+      socket.to(data.roomId).emit("projection-draw", {
+        ...data,
+        playerId: socket.id,
+        playerSlot: player?.slot || 1,
+        playerName: player?.name || "Tagger",
+      });
     });
 
-    // Relay 3D Target Object Change (easel, skateboard, subway, boombox, wall)
+    // Relay 3D Target Object Change
     socket.on("change-object", (data) => {
+      const room = activeRooms.get(data.roomId);
+      if (room && data.objectType) {
+        room.activeObject = data.objectType;
+      }
       socket.to(data.roomId).emit("change-object", data);
+    });
+
+    // Relay Custom 3D Model Uploaded
+    socket.on("custom-3d-uploaded", (data) => {
+      socket.to(data.roomId).emit("custom-3d-uploaded", data);
     });
 
     // Relay calibration
     socket.on("calibrate", (data) => {
-      socket.to(data.roomId).emit("calibrate", data);
+      socket.to(data.roomId).emit("calibrate", { ...data, playerId: socket.id });
     });
 
-    // Relay settings (color, size, active tool)
+    // Relay settings
     socket.on("settings", (data) => {
-      socket.to(data.roomId).emit("settings", data);
+      const room = activeRooms.get(data.roomId);
+      const player = room?.players.get(socket.id);
+      if (player) {
+        if (data.color) player.color = data.color;
+        if (data.tool) player.tool = data.tool;
+        if (data.playerName) player.name = data.playerName;
+        io.to(data.roomId).emit("player-list-update", Array.from(room.players.values()));
+      }
+      socket.to(data.roomId).emit("settings", { ...data, playerId: socket.id });
     });
 
     // Relay clear canvas
@@ -357,7 +473,7 @@ async function startServer() {
 
     // Relay spray can shake / ball bearing rattle
     socket.on("shake", (data) => {
-      socket.to(data.roomId).emit("shake", data);
+      socket.to(data.roomId).emit("shake", { ...data, playerId: socket.id });
     });
 
     // Relay AI graffiti stamp
@@ -365,9 +481,14 @@ async function startServer() {
       socket.to(data.roomId).emit("ai-stamp", data);
     });
 
-    // Relay sound effects
-    socket.on("sound-trigger", (data) => {
-      socket.to(data.roomId).emit("sound-trigger", data);
+    // Handle Disconnect
+    socket.on("disconnect", () => {
+      if (currentRoomId && activeRooms.has(currentRoomId)) {
+        const room = activeRooms.get(currentRoomId)!;
+        room.players.delete(socket.id);
+        io.to(currentRoomId).emit("player-list-update", Array.from(room.players.values()));
+        socket.to(currentRoomId).emit("player-left", { id: socket.id });
+      }
     });
   });
 

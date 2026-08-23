@@ -14,16 +14,23 @@ export const OBJECT_SURFACE_DIMS: Record<TargetObjectType, ObjectSurfaceDim> = {
   subway: { width: 17.6, height: 10.4, zOffset: 0.05 },
   boombox: { width: 16.8, height: 10.0, zOffset: 0.05 },
   wall: { width: 17.2, height: 11.8, zOffset: 0.05 },
+  helmet: { width: 11.0, height: 11.0, zOffset: 0.1 },
+  sneaker: { width: 14.5, height: 8.5, zOffset: 0.1 },
+  vinyltoy: { width: 9.5, height: 14.0, zOffset: 0.1 },
+  sculpture: { width: 10.5, height: 13.5, zOffset: 0.1 },
+  custom3d: { width: 13.0, height: 13.0, zOffset: 0.1 },
 };
 
 interface DecorateObjects3DProps {
   objectType: TargetObjectType;
   canvasTexture: THREE.CanvasTexture | null;
+  custom3DGroup?: THREE.Group | null;
 }
 
 export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
   objectType,
   canvasTexture,
+  custom3DGroup,
 }) => {
   const woodMaterial = useMemo(
     () =>
@@ -84,8 +91,34 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
     []
   );
 
+  const goldMaterial = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: '#f59e0b',
+        roughness: 0.25,
+        metalness: 0.9,
+      }),
+    []
+  );
+
   return (
     <group position={[0, 0, 0]}>
+      {/* ========================================================
+          0. CUSTOM USER-UPLOADED 3D MODEL
+          ======================================================== */}
+      {objectType === 'custom3d' && custom3DGroup && (
+        <group position={[0, 0, 0]}>
+          <primitive object={custom3DGroup} />
+          {/* Gallery Pedestal */}
+          <mesh position={[0, -4.2, 0]} material={concreteMaterial} receiveShadow>
+            <cylinderGeometry args={[4.6, 5.0, 1.2, 32]} />
+          </mesh>
+          <mesh position={[0, -4.9, 0]} material={metalDark} receiveShadow>
+            <cylinderGeometry args={[5.2, 5.5, 0.3, 32]} />
+          </mesh>
+        </group>
+      )}
+
       {/* ========================================================
           1. LARGE STUDIO EASEL & STRETCHED CANVAS (15.2 x 11.2)
           ======================================================== */}
@@ -151,7 +184,7 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             <boxGeometry args={[7.0, 2.2, 0.16]} />
           </mesh>
 
-          {/* Top Truck & Wheels */}
+          {/* Trucks & Wheels */}
           <group position={[0, 4.4, -0.6]}>
             <mesh material={metalDark} castShadow>
               <boxGeometry args={[3.2, 0.7, 0.4]} />
@@ -167,7 +200,6 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </mesh>
           </group>
 
-          {/* Bottom Truck & Wheels */}
           <group position={[0, -4.4, -0.6]}>
             <mesh material={metalDark} castShadow>
               <boxGeometry args={[3.2, 0.7, 0.4]} />
@@ -190,24 +222,20 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
           ======================================================== */}
       {objectType === 'subway' && (
         <group position={[0, 0, 0]}>
-          {/* Main Subway Car Body */}
           <mesh position={[0, 0, 0]} castShadow receiveShadow material={paintableMaterial}>
             <boxGeometry args={[17.6, 10.4, 0.28]} />
           </mesh>
 
-          {/* Stainless Steel Roof Dome */}
           <mesh position={[0, 5.6, -1.8]} material={metalDark} castShadow>
             <boxGeometry args={[18.8, 0.8, 3.8]} />
           </mesh>
 
-          {/* Subway Roof HVAC Vents */}
           {[-5.2, 0, 5.2].map((x, i) => (
             <mesh key={i} position={[x, 6.3, -1.8]} material={chromeMaterial}>
               <boxGeometry args={[2.8, 0.6, 1.8]} />
             </mesh>
           ))}
 
-          {/* Passenger Windows */}
           {[-6.0, -2.0, 2.0, 6.0].map((x, i) => (
             <group key={i} position={[x, 2.4, 0.16]}>
               <mesh>
@@ -221,7 +249,6 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </group>
           ))}
 
-          {/* Sliding Door Seams */}
           <mesh position={[-4.0, -1.8, 0.16]} material={metalDark}>
             <boxGeometry args={[0.12, 6.4, 0.05]} />
           </mesh>
@@ -229,7 +256,6 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             <boxGeometry args={[0.12, 6.4, 0.05]} />
           </mesh>
 
-          {/* Undercarriage & Rails */}
           <mesh position={[0, -5.7, -1.5]} material={metalDark}>
             <boxGeometry args={[18.8, 1.0, 3.6]} />
           </mesh>
@@ -247,12 +273,10 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
           ======================================================== */}
       {objectType === 'boombox' && (
         <group position={[0, 0, 0]}>
-          {/* Main Enclosure */}
           <mesh position={[0, 0, 0]} castShadow receiveShadow material={paintableMaterial}>
             <boxGeometry args={[16.8, 10.0, 2.6]} />
           </mesh>
 
-          {/* Top Carry Handle */}
           <group position={[0, 5.9, 0]}>
             <mesh position={[0, 0, 0]} material={metalDark}>
               <boxGeometry args={[11.5, 0.55, 0.7]} />
@@ -265,7 +289,6 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </mesh>
           </group>
 
-          {/* Left Speaker Grille */}
           <group position={[-5.0, -0.6, 1.4]}>
             <mesh material={metalDark}>
               <cylinderGeometry args={[2.8, 2.8, 0.22, 32]} />
@@ -275,7 +298,6 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </mesh>
           </group>
 
-          {/* Right Speaker Grille */}
           <group position={[5.0, -0.6, 1.4]}>
             <mesh material={metalDark}>
               <cylinderGeometry args={[2.8, 2.8, 0.22, 32]} />
@@ -285,16 +307,13 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </mesh>
           </group>
 
-          {/* Dual Cassette Decks */}
           <mesh position={[0, -1.2, 1.4]} material={metalDark}>
             <boxGeometry args={[4.4, 2.8, 0.18]} />
           </mesh>
-          {/* Radio Equalizer / Tuner Glass */}
           <mesh position={[0, 2.4, 1.4]} material={chromeMaterial}>
             <boxGeometry args={[5.0, 1.8, 0.15]} />
           </mesh>
 
-          {/* Telescopic Antenna */}
           <mesh position={[6.8, 6.8, -1.1]} rotation={[0, 0, -0.35]} material={chromeMaterial}>
             <cylinderGeometry args={[0.11, 0.11, 7.8, 16]} />
           </mesh>
@@ -306,27 +325,22 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
           ======================================================== */}
       {objectType === 'wall' && (
         <group position={[0, 0, 0]}>
-          {/* Main Brick Wall Surface */}
           <mesh position={[0, 0, 0]} castShadow receiveShadow material={paintableMaterial}>
             <boxGeometry args={[17.2, 11.8, 0.6]} />
           </mesh>
 
-          {/* Brick Roof Coping / Top Ledge */}
           <mesh position={[0, 6.3, 0.25]} material={brickMaterial} castShadow>
             <boxGeometry args={[18.8, 0.85, 1.1]} />
           </mesh>
 
-          {/* Concrete Sidewalk Curb */}
           <mesh position={[0, -6.4, 2.2]} material={concreteMaterial} receiveShadow>
             <boxGeometry args={[19.6, 1.1, 4.8]} />
           </mesh>
 
-          {/* Storm Drain Grate */}
           <mesh position={[4.8, -5.8, 2.8]} rotation={[-Math.PI / 2, 0, 0]} material={metalDark}>
             <planeGeometry args={[3.2, 1.8]} />
           </mesh>
 
-          {/* Alley Industrial Gooseneck Lamp */}
           <group position={[-6.8, 3.8, 1.8]}>
             <mesh rotation={[0, 0, 0.3]} material={metalDark}>
               <cylinderGeometry args={[0.15, 0.15, 3.6, 16]} />
@@ -336,6 +350,141 @@ export const DecorateObjects3D: React.FC<DecorateObjects3DProps> = ({
             </mesh>
             <pointLight position={[1.2, 0.7, 0]} color="#fde68a" intensity={3.5} distance={12} />
           </group>
+        </group>
+      )}
+
+      {/* ========================================================
+          6. CYBER MOTORCYCLE / ASTRONAUT HELMET (11.0 x 11.0)
+          ======================================================== */}
+      {objectType === 'helmet' && (
+        <group position={[0, 0, 0]}>
+          {/* Main Paintable Outer Shell Dome */}
+          <mesh position={[0, 0.5, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <sphereGeometry args={[4.8, 48, 48]} />
+          </mesh>
+
+          {/* Chin Guard / Mouth Aerodynamic Filter */}
+          <mesh position={[0, -2.4, 2.8]} rotation={[0.2, 0, 0]} castShadow material={paintableMaterial}>
+            <boxGeometry args={[4.4, 2.2, 2.8]} />
+          </mesh>
+
+          {/* Reflective Dark Gold / Chrome Visor Shield */}
+          <mesh position={[0, 0.6, 2.8]} rotation={[0.12, 0, 0]} castShadow material={goldMaterial}>
+            <boxGeometry args={[6.2, 3.2, 2.2]} />
+          </mesh>
+
+          {/* Pedestal Stand */}
+          <mesh position={[0, -5.8, 0]} material={metalDark} receiveShadow>
+            <cylinderGeometry args={[3.5, 4.2, 1.4, 32]} />
+          </mesh>
+        </group>
+      )}
+
+      {/* ========================================================
+          7. STREETWEAR SNEAKER / HIGH-TOP (14.5 x 8.5)
+          ======================================================== */}
+      {objectType === 'sneaker' && (
+        <group position={[0, -0.5, 0]} rotation={[0, -0.2, 0]}>
+          {/* Main Shoe Upper / Side Panels */}
+          <mesh position={[0, 0.8, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <boxGeometry args={[13.2, 4.4, 5.0]} />
+          </mesh>
+
+          {/* High-Top Ankle Collar */}
+          <mesh position={[-2.8, 3.4, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <cylinderGeometry args={[2.5, 2.7, 3.2, 24]} />
+          </mesh>
+
+          {/* Toe Cap Curve */}
+          <mesh position={[5.4, 0.2, 0]} rotation={[0, 0, -0.3]} castShadow material={paintableMaterial}>
+            <sphereGeometry args={[2.4, 24, 24]} />
+          </mesh>
+
+          {/* Chunky Rubber Sole */}
+          <mesh position={[0, -2.2, 0]} material={concreteMaterial} receiveShadow>
+            <boxGeometry args={[14.2, 1.6, 5.6]} />
+          </mesh>
+
+          {/* Chrome Eyelets */}
+          {[-1, 1, 3].map((x, i) => (
+            <mesh key={i} position={[x, 2.2, 2.6]} material={chromeMaterial}>
+              <sphereGeometry args={[0.22, 12, 12]} />
+            </mesh>
+          ))}
+        </group>
+      )}
+
+      {/* ========================================================
+          8. VINYL URBAN ART TOY / BEARBRICK STYLE (9.5 x 14.0)
+          ======================================================== */}
+      {objectType === 'vinyltoy' && (
+        <group position={[0, -0.6, 0]}>
+          {/* Head */}
+          <mesh position={[0, 3.6, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <sphereGeometry args={[2.8, 36, 36]} />
+          </mesh>
+          {/* Bear Ears */}
+          <mesh position={[-2.2, 5.6, 0]} castShadow material={paintableMaterial}>
+            <sphereGeometry args={[1.2, 24, 24]} />
+          </mesh>
+          <mesh position={[2.2, 5.6, 0]} castShadow material={paintableMaterial}>
+            <sphereGeometry args={[1.2, 24, 24]} />
+          </mesh>
+
+          {/* Torso */}
+          <mesh position={[0, -0.2, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <boxGeometry args={[4.4, 5.2, 2.8]} />
+          </mesh>
+
+          {/* Left Arm */}
+          <mesh position={[-3.0, -0.2, 0]} rotation={[0, 0, 0.2]} castShadow material={paintableMaterial}>
+            <cylinderGeometry args={[0.85, 0.85, 4.4, 16]} />
+          </mesh>
+
+          {/* Right Arm */}
+          <mesh position={[3.0, -0.2, 0]} rotation={[0, 0, -0.2]} castShadow material={paintableMaterial}>
+            <cylinderGeometry args={[0.85, 0.85, 4.4, 16]} />
+          </mesh>
+
+          {/* Legs */}
+          <mesh position={[-1.4, -4.2, 0]} castShadow material={paintableMaterial}>
+            <cylinderGeometry args={[0.95, 0.95, 4.2, 16]} />
+          </mesh>
+          <mesh position={[1.4, -4.2, 0]} castShadow material={paintableMaterial}>
+            <cylinderGeometry args={[0.95, 0.95, 4.2, 16]} />
+          </mesh>
+        </group>
+      )}
+
+      {/* ========================================================
+          9. CLASSICAL ROMAN SCULPTURE BUST (10.5 x 13.5)
+          ======================================================== */}
+      {objectType === 'sculpture' && (
+        <group position={[0, -0.8, 0]}>
+          {/* Sculpted Head */}
+          <mesh position={[0, 3.4, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <sphereGeometry args={[2.5, 32, 32]} />
+          </mesh>
+
+          {/* Hair Curls Volume */}
+          <mesh position={[0, 4.4, -0.4]} castShadow material={paintableMaterial}>
+            <sphereGeometry args={[2.6, 24, 24]} />
+          </mesh>
+
+          {/* Classical Nose & Features */}
+          <mesh position={[0, 3.2, 2.4]} rotation={[0.4, 0, 0]} material={paintableMaterial}>
+            <coneGeometry args={[0.5, 1.2, 8]} />
+          </mesh>
+
+          {/* Torso / Draped Toga Shoulders */}
+          <mesh position={[0, -0.4, 0]} castShadow receiveShadow material={paintableMaterial}>
+            <boxGeometry args={[7.2, 5.0, 3.2]} />
+          </mesh>
+
+          {/* Museum Pedestal Stand */}
+          <mesh position={[0, -4.6, 0]} material={concreteMaterial} receiveShadow>
+            <boxGeometry args={[4.8, 4.0, 4.8]} />
+          </mesh>
         </group>
       )}
     </group>

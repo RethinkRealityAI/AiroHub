@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { QRCodeSVG } from 'qrcode.react';
-import { Smartphone, Monitor, Sparkle, Maximize, Layers } from 'lucide-react';
+import { Smartphone, Monitor, Users, Upload, Box, Wand2 } from 'lucide-react';
 
 export default function Home() {
   const [roomId, setRoomId] = useState('');
@@ -28,28 +28,32 @@ export default function Home() {
           <div className="w-9 h-9 bg-gradient-to-tr from-[#FF3D00] to-[#FFD600] rounded-xl shadow-[0_0_20px_rgba(255,61,0,0.35)]"></div>
           <div>
             <span className="text-3xl font-bold tracking-tighter text-white">
-              AERO•CANVAS <span className="text-[10px] font-mono text-[#555] ml-2 px-2 py-0.5 border border-[#222] rounded align-middle">3D STUDIO</span>
+              AERO•CANVAS <span className="text-[10px] font-mono text-[#555] ml-2 px-2 py-0.5 border border-[#222] rounded align-middle">3D MULTIPLAYER</span>
             </span>
           </div>
         </div>
 
         <p className="text-[#888] text-center mb-6 max-w-xl text-[12px] leading-relaxed">
-          Full-viewport 3D spray studio. Use your mobile phone as a live 3D aerosol spray can & brush or a direct real-time projection drawing canvas. Decorate 3D easels, skateboards, subway trains, boomboxes, and brick walls with AI street copilot assistance.
+          Full-viewport 3D collaborative graffiti studio. Up to 4 players can connect with their own 3D spray cans and brushes. Spray 3D objects or upload custom 3D models (.glb, .gltf, .obj, .stl) with AI copilot stylization.
         </p>
 
         {/* Feature Badges */}
         <div className="flex flex-wrap items-center justify-center gap-2 mb-8 text-[9px] font-mono uppercase tracking-wider text-[#777]">
-          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-white">
-            ⛶ Fullscreen Immersion
+          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-cyan-400 flex items-center gap-1">
+            <Users size={11} />
+            <span>Up to 4-Player Multiplayer</span>
           </span>
-          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-[#FF3D00]">
-            🎨 Direct Phone Projection
+          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-emerald-400 flex items-center gap-1">
+            <Upload size={11} />
+            <span>Upload 3D Models (.glb/.obj/.stl)</span>
           </span>
-          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-cyan-400">
-            🛹 5 3D Objects To Spray
+          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-[#FF3D00] flex items-center gap-1">
+            <Box size={11} />
+            <span>9 Interactive 3D Objects</span>
           </span>
-          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-violet-400">
-            ✦ AI Street Copilot
+          <span className="px-3 py-1 bg-[#141414] border border-[#222] rounded-full text-violet-400 flex items-center gap-1">
+            <Wand2 size={11} />
+            <span>AI Copilot & Stylizer</span>
           </span>
         </div>
 
@@ -62,7 +66,7 @@ export default function Home() {
               </div>
               <h2 className="text-sm font-bold text-white tracking-wide mb-1">1. Launch Studio Canvas</h2>
               <p className="text-[11px] text-[#777] leading-relaxed max-w-xs mb-4">
-                Opens the full-viewport 3D studio environment on this screen. Supports fullscreen mode (F) and camera orbit.
+                Opens the host 3D studio. Features real-time multi-spray physics, custom 3D model upload, and 360° camera orbit.
               </p>
             </div>
 
@@ -80,9 +84,9 @@ export default function Home() {
               <div className="w-14 h-14 bg-[#18181D] rounded-2xl flex items-center justify-center text-cyan-400 mb-3 border border-[#25252E] shadow-lg">
                 <Smartphone size={28} strokeWidth={1.5} />
               </div>
-              <h2 className="text-sm font-bold text-white tracking-wide mb-1">2. Connect Mobile Phone</h2>
+              <h2 className="text-sm font-bold text-white tracking-wide mb-1">2. Connect Mobile Devices</h2>
               <p className="text-[11px] text-[#777] leading-relaxed mb-3">
-                Scan QR code on your phone for live 3D gyro motion spraying or direct finger-drawing projection.
+                Scan QR code with up to 4 phones. Each player gets their own color slot, floating 3D tool, and alias.
               </p>
 
               <div className="bg-white p-2.5 rounded-xl shadow-lg mb-3">
