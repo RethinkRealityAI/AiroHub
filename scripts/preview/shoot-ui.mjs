@@ -58,6 +58,9 @@ async function open(spec, label) {
   page.on('pageerror', (err) => problems.push(`[${label}] pageerror: ${String(err).slice(0, 200)}`));
   page.on('requestfailed', (req) => {
     if (req.url().includes('favicon')) return;
+    // supabase-js falls back to HTTP broadcast when the sandbox blocks its
+    // WebSocket; production uses the socket.
+    if (req.url().includes('supabase.co')) return;
     problems.push(`[${label}] request failed: ${req.url().slice(0, 140)}`);
   });
   return { context, page };
