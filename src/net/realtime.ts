@@ -29,6 +29,7 @@ export type AiroEvent =
   | 'motion'
   | 'action'
   | 'paint-stamps'
+  | 'undo-stroke'
   | 'change-object'
   | 'settings'
   | 'clear-canvas'
@@ -60,7 +61,7 @@ function getClient(): SupabaseClient | null {
       realtime: {
         // Motion frames are the high-rate stream. The client library's default
         // of 10 events/sec would throttle aiming into a slideshow.
-        params: { eventsPerSecond: 40 },
+        params: { eventsPerSecond: 50 },
       },
     });
   }
@@ -115,6 +116,7 @@ export class AiroConnection {
       'motion',
       'action',
       'paint-stamps',
+      'undo-stroke',
       'change-object',
       'settings',
       'clear-canvas',

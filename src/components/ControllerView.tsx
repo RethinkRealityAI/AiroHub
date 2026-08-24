@@ -20,7 +20,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
-  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand,
+  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -41,8 +41,8 @@ import { TargetObjectType, PlayerInfo } from '../types';
 
 type ControllerMode = 'aim' | 'paint' | 'pad';
 
-/** Motion send rate. Higher just burns realtime quota; the studio interpolates. */
-const MOTION_HZ = 30;
+/** Motion send rate; the studio interpolates the remainder to frame rate. */
+const MOTION_HZ = 40;
 const MOTION_INTERVAL = 1000 / MOTION_HZ;
 
 /* ------------------------------------------------------------------
@@ -114,6 +114,7 @@ function PreviewStage({
   orbitRef,
   onLoadingChange,
 }: PreviewProps) {
+  /* eslint-disable react-hooks/exhaustive-deps */
   const { camera, gl, size: viewport } = useThree();
   const meshRegistry = useRef<THREE.Object3D[]>([]);
   const reticle = useRef<THREE.Mesh>(null);
@@ -122,21 +123,26 @@ function PreviewStage({
 
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
 
   const painter = useMemo(
     () =>
       new SurfacePainter(
         () => meshRegistry.current,
-        () => camera,
+        () => cameraRef.current,
         () => viewportRef.current.height
       ),
-    [camera]
+    []
   );
   useEffect(() => painter.invalidate(), [painter, objectId]);
 
   /** Latest pointer NDC; painting is driven per-frame like the studio. */
   const pointerNdc = useRef(new THREE.Vector2());
   const pointerDown = useRef(false);
+  /** Multi-touch tracking: a second finger turns the gesture into orbit. */
+  const activePointers = useRef(new Set<number>());
+  const gestureLock = useRef(false);
 
   const liveConfig = useRef({ tool, size, color });
   useEffect(() => {
@@ -155,9 +161,28 @@ function PreviewStage({
       );
     };
 
+    const abortStroke = () => {
+      if (!pointerDown.current) return;
+      pointerDown.current = false;
+      painter.end();
+      onStamps([], 'end');
+      if (reticle.current) reticle.current.visible = false;
+      sounds.stopSpray();
+      sounds.stopBrush();
+    };
+
     const onDown = (event: PointerEvent) => {
+      activePointers.current.add(event.pointerId);
+      // Second finger = rotate/pinch gesture: hand the touch pair to the
+      // orbit controls and cancel any stroke in progress. Painting stays
+      // locked out until every finger lifts, so a sloppy pinch can't smear.
+      if (activePointers.current.size > 1) {
+        abortStroke();
+        gestureLock.current = true;
+        return;
+      }
+      if (gestureLock.current) return;
       event.preventDefault();
-      canvas.setPointerCapture(event.pointerId);
       toNdc(event);
       pointerDown.current = true;
       painter.begin({ tool: liveConfig.current.tool, size: liveConfig.current.size });
@@ -168,42 +193,33 @@ function PreviewStage({
     };
     const onMove = (event: PointerEvent) => {
       if (!pointerDown.current) return;
-      event.preventDefault();
       toNdc(event);
     };
     const onUp = (event: PointerEvent) => {
-      if (!pointerDown.current) return;
-      pointerDown.current = false;
-      painter.end();
-      onStamps([], 'end');
-      if (reticle.current) reticle.current.visible = false;
-      canvas.releasePointerCapture?.(event.pointerId);
-      sounds.stopSpray();
-      sounds.stopBrush();
+      activePointers.current.delete(event.pointerId);
+      if (activePointers.current.size === 0) gestureLock.current = false;
+      abortStroke();
     };
 
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
-    canvas.addEventListener('pointerup', onUp);
-    canvas.addEventListener('pointercancel', onUp);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
     return () => {
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
-      canvas.removeEventListener('pointerup', onUp);
-      canvas.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
       painter.end();
     };
   }, [gl, interaction, painter, onStamps]);
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     if (interaction !== 'paint') return;
     const painting = pointerDown.current;
-    const result = painter.frame(pointerNdc.current.x, pointerNdc.current.y, painting);
+    const result = painter.frame(pointerNdc.current.x, pointerNdc.current.y, painting, delta);
 
     if (result.stamps.length > 0) {
-      const { tool: t, color: c } = liveConfig.current;
-      paintSurface.applyStamps(result.stamps, t, c);
-      paintSurface.commit();
       const last = result.hit;
       onStamps(
         result.stamps,
@@ -233,10 +249,21 @@ function PreviewStage({
       <PerspectiveCamera makeDefault position={[0, 1, 19]} fov={44} />
       <OrbitControls
         ref={orbitRef}
-        enabled={interaction === 'orbit'}
         enableDamping
         dampingFactor={0.09}
         enablePan={false}
+        // In paint mode one finger paints while two fingers rotate/pinch —
+        // no toggling needed. The toggle still exists for one-finger orbit.
+        touches={
+          interaction === 'paint'
+            ? { ONE: undefined as any, TWO: THREE.TOUCH.DOLLY_ROTATE }
+            : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
+        }
+        mouseButtons={
+          interaction === 'paint'
+            ? { LEFT: undefined as any, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }
+            : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }
+        }
       />
       <StudioEnvironment intensity={0.55} />
       <ambientLight intensity={0.45} />
@@ -296,7 +323,6 @@ export default function ControllerView() {
   const [shaking, setShaking] = useState(false);
   const [muted, setMuted] = useState(false);
   const [objectLoading, setObjectLoading] = useState(false);
-  const [aim, setAim] = useState({ x: 0.5, y: 0.5 });
 
   const [objectSheet, setObjectSheet] = useState(false);
   const [nameSheet, setNameSheet] = useState(false);
@@ -354,9 +380,12 @@ export default function ControllerView() {
     conn.on('paint-stamps', (packet: StampPacket) => {
       if (packet.playerId === playerIdRef.current) return;
       if (packet.stamps?.length) {
-        paintSurface.applyStamps(unpackStamps(packet.stamps), packet.tool, packet.color);
+        paintSurface.applyStamps(unpackStamps(packet.stamps), packet.tool, packet.color, packet.strokeId);
         paintSurface.commit();
       }
+    });
+    conn.on('undo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.undoStroke(strokeId)) paintSurface.commit();
     });
 
     return () => {
@@ -366,7 +395,9 @@ export default function ControllerView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, paintSurface]);
 
-  /** Broadcasts stamps painted on this phone. */
+  /** Broadcasts stamps painted on this phone, tagged with the stroke id. */
+  const strokeSeq = useRef(0);
+  const strokeIdRef = useRef<string | null>(null);
   const stampBatcher = useMemo(
     () =>
       new StampBatcher((stamps, state, context) => {
@@ -376,6 +407,7 @@ export default function ControllerView() {
           tool: live.current.tool,
           color: live.current.color,
           state,
+          strokeId: strokeIdRef.current ?? undefined,
           stamps: packStamps(stamps),
           ...context,
         } satisfies StampPacket as unknown as Record<string, unknown>);
@@ -385,13 +417,26 @@ export default function ControllerView() {
   );
   useEffect(() => () => stampBatcher.dispose(), [stampBatcher]);
 
+  /** Applies stamps locally AND queues them for the room — one code path for
+   *  both the 3D preview and the flat pad, so the textures cannot diverge. */
   const handleStamps = useCallback(
     (stamps: PaintStamp[], state: 'start' | 'paint' | 'end', context?: BatchContext) => {
-      if (state === 'start') stampBatcher.begin();
-      if (stamps.length) stampBatcher.push(stamps, context);
-      if (state === 'end') stampBatcher.end();
+      if (state === 'start') {
+        strokeIdRef.current = `${playerIdRef.current}#${++strokeSeq.current}`;
+        stampBatcher.begin();
+      }
+      if (stamps.length) {
+        const { tool: t, color: c } = live.current;
+        paintSurface.applyStamps(stamps, t, c, strokeIdRef.current ?? undefined);
+        paintSurface.commit();
+        stampBatcher.push(stamps, context);
+      }
+      if (state === 'end') {
+        stampBatcher.end();
+        strokeIdRef.current = null;
+      }
     },
-    [stampBatcher]
+    [stampBatcher, paintSurface]
   );
 
   /* ----------------------------- sensors ----------------------------- */
@@ -401,11 +446,6 @@ export default function ControllerView() {
     if (alpha === null || beta === null || gamma === null) return;
 
     const sample = trackerRef.current.update(alpha, beta, gamma, performance.now());
-    setAim((prev) =>
-      Math.abs(prev.x - sample.x) + Math.abs(prev.y - sample.y) > 0.002
-        ? { x: sample.x, y: sample.y }
-        : prev
-    );
 
     const now = performance.now();
     if (now - lastMotionSend.current < MOTION_INTERVAL) return;
@@ -490,6 +530,16 @@ export default function ControllerView() {
   }, [mode, tool]);
 
   /* ------------------------------ actions ------------------------------ */
+
+  const undoLast = () => {
+    const strokeId = paintSurface.lastStrokeId();
+    if (!strokeId) return;
+    paintSurface.undoStroke(strokeId);
+    paintSurface.commit();
+    sounds.playClick(1.1);
+    navigator.vibrate?.(14);
+    connectionRef.current?.emit('undo-stroke', { strokeId });
+  };
 
   const recalibrate = () => {
     trackerRef.current.calibrate();
@@ -613,9 +663,6 @@ export default function ControllerView() {
       }
     }
     padLast.current = { u, v };
-
-    paintSurface.applyStamps(stamps, t, c);
-    paintSurface.commit();
     handleStamps(stamps, 'paint', { cursor: [u, v] });
   };
 
@@ -772,23 +819,6 @@ export default function ControllerView() {
                 </Canvas>
               </div>
 
-              {/* Mini aim map — mirrors where the studio cursor sits. */}
-              <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none">
-                <div className="relative w-[92px] h-[64px] glass glass-sheen rounded-2xl overflow-hidden">
-                  <div className="absolute inset-x-3 top-1/2 h-px bg-white/15" />
-                  <div className="absolute inset-y-2 left-1/2 w-px bg-white/15" />
-                  <div
-                    className="absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full transition-transform duration-75"
-                    style={{
-                      left: `${aim.x * 100}%`,
-                      top: `${aim.y * 100}%`,
-                      background: color,
-                      boxShadow: triggerActive ? `0 0 10px ${color}` : 'none',
-                    }}
-                  />
-                </div>
-              </div>
-
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -878,7 +908,7 @@ export default function ControllerView() {
               <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10 px-4">
                 <span className="glass glass-sheen rounded-full px-3.5 py-1.5 text-[9px] font-bold tracking-[0.14em] uppercase text-white/70 text-center">
                   {interaction === 'paint'
-                    ? `Touch the ${activeObject?.short ?? 'object'} to paint`
+                    ? `One finger paints · two fingers rotate & zoom`
                     : 'Drag to orbit'}
                 </span>
               </div>
@@ -904,7 +934,7 @@ export default function ControllerView() {
                     e.currentTarget.setPointerCapture(e.pointerId);
                     padDrawing.current = true;
                     padLast.current = null;
-                    stampBatcher.begin();
+                    handleStamps([], 'start');
                     navigator.vibrate?.(12);
                     if (live.current.tool === 'spray') sounds.startSpray(1);
                     else sounds.startBrush();
@@ -922,7 +952,7 @@ export default function ControllerView() {
                     padDrawing.current = false;
                     padLast.current = null;
                     e.currentTarget.releasePointerCapture?.(e.pointerId);
-                    stampBatcher.end();
+                    handleStamps([], 'end');
                     sounds.stopSpray();
                     sounds.stopBrush();
                   }}
@@ -930,7 +960,7 @@ export default function ControllerView() {
                     if (!padDrawing.current) return;
                     padDrawing.current = false;
                     padLast.current = null;
-                    stampBatcher.end();
+                    handleStamps([], 'end');
                     sounds.stopSpray();
                     sounds.stopBrush();
                   }}
@@ -1016,6 +1046,14 @@ export default function ControllerView() {
             >
               <Sparkles size={13} />
               Shake
+            </button>
+
+            <button
+              onClick={undoLast}
+              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+            >
+              <Undo2 size={13} />
+              Undo
             </button>
 
             <button

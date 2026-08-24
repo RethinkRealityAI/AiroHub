@@ -48,7 +48,8 @@ export interface StudioSceneProps {
     playerId: string,
     tool: 'spray' | 'brush',
     color: string,
-    stamps: PaintStamp[]
+    stamps: PaintStamp[],
+    strokeId: string
   ) => void;
 }
 
@@ -73,13 +74,25 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
   const [subjectRadius, setSubjectRadius] = useState<number | null>(null);
   useFitCamera(subjectRadius, orbitRef);
 
+  // Painters live across renders, so they must dereference the CURRENT default
+  // camera through a ref — capturing `camera` in their construction closure
+  // pins them to R3F's initial default camera and every raycast lands scaled
+  // toward the screen centre (that was the paint-offset bug).
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
+
   /** One painter per active painter identity (host + each remote player). */
   const painters = useRef(new Map<string, SurfacePainter>());
+  /** Current stroke id per painter, for undo grouping across peers. */
+  const strokeIds = useRef(new Map<string, string>());
+  const strokeSeq = useRef(0);
   /** Receive-side smoothing of each remote cursor. */
   const cursors = useRef(new Map<string, SmoothedCursor>());
 
   const hostDragging = useRef(false);
   const hostPointer = useRef(new THREE.Vector2());
+  const hostPointers = useRef(new Set<number>());
+  const hostGestureLock = useRef(false);
 
   const sizeRef = useRef(size);
   sizeRef.current = size;
@@ -90,14 +103,14 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       if (!painter) {
         painter = new SurfacePainter(
           () => meshRegistry.current,
-          () => camera,
+          () => cameraRef.current,
           () => sizeRef.current.height
         );
         painters.current.set(id, painter);
       }
       return painter;
     },
-    [camera]
+    []
   );
 
   // Texel-density caches go stale when the object swaps.
@@ -118,8 +131,29 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       );
     };
 
+    const endStroke = () => {
+      if (!hostDragging.current) return;
+      hostDragging.current = false;
+      const host = playersRef.current.find((p) => p.isHost);
+      if (host) {
+        host.isPainting = false;
+        getPainter(host.id).end();
+      }
+      sounds.stopSpray();
+      sounds.stopBrush();
+    };
+
     const onDown = (event: PointerEvent) => {
-      if (!hostPainting || event.button !== 0) return;
+      hostPointers.current.add(event.pointerId);
+      // A second finger means "gesture": abort the stroke and let the orbit
+      // controls' two-finger rotate/pinch take over. No stroke restarts until
+      // every finger lifts.
+      if (hostPointers.current.size > 1) {
+        endStroke();
+        hostGestureLock.current = true;
+        return;
+      }
+      if (!hostPainting || hostGestureLock.current || event.button !== 0) return;
       toNdc(event);
       hostDragging.current = true;
       const host = playersRef.current.find((p) => p.isHost);
@@ -131,20 +165,15 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
     };
 
     const onMove = (event: PointerEvent) => {
-      if (!hostPainting) return;
+      // Track in every stage mode — the host's floating can should follow the
+      // mouse whether or not a stroke is active.
       toNdc(event);
     };
 
-    const onUp = () => {
-      if (!hostDragging.current) return;
-      hostDragging.current = false;
-      const host = playersRef.current.find((p) => p.isHost);
-      if (host) {
-        host.isPainting = false;
-        getPainter(host.id).end();
-      }
-      sounds.stopSpray();
-      sounds.stopBrush();
+    const onUp = (event: PointerEvent) => {
+      hostPointers.current.delete(event.pointerId);
+      if (hostPointers.current.size === 0) hostGestureLock.current = false;
+      endStroke();
     };
 
     canvas.addEventListener('pointerdown', onDown);
@@ -200,27 +229,29 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       const painter = getPainter(player.id);
       if (painting && !painter.isActive) {
         painter.begin({ tool: player.tool, size: player.sizeMultiplier ?? 1 });
+        strokeIds.current.set(player.id, `${player.id}#${++strokeSeq.current}`);
       } else if (!painting && painter.isActive) {
         painter.end();
       }
 
-      const result = painter.frame(ndcX, ndcY, painting);
+      const result = painter.frame(ndcX, ndcY, painting, delta);
 
       if (result.stamps.length > 0) {
-        paintSurface.applyStamps(result.stamps, player.tool, player.color);
-        onStampsPainted(player.id, player.tool, player.color, result.stamps);
+        const strokeId = strokeIds.current.get(player.id) ?? `${player.id}#0`;
+        paintSurface.applyStamps(result.stamps, player.tool, player.color, strokeId);
+        onStampsPainted(player.id, player.tool, player.color, result.stamps, strokeId);
       }
 
-      // Position the floating tool from the central hit.
+      // Position the floating tool from the central hit, or float it smoothly
+      // on the camera-facing plane when aiming past the model.
       if (result.hit) {
         player.surfacePoint = [result.hit.point.x, result.hit.point.y, result.hit.point.z];
         player.surfaceNormal = [result.hit.normal.x, result.hit.normal.y, result.hit.normal.z];
         player.worldPos = [result.hit.point.x, result.hit.point.y, result.hit.point.z];
       } else {
-        // Off-model: park the tool on the origin plane so it stays visible.
         player.surfacePoint = undefined;
         player.surfaceNormal = undefined;
-        player.worldPos = [ndcX * 7, ndcY * 5, 2.5];
+        player.worldPos = [result.planePoint.x, result.planePoint.y, result.planePoint.z];
       }
     }
 
@@ -256,6 +287,12 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
             ? { LEFT: undefined as any, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE }
             : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN }
         }
+        // One finger paints; two fingers always rotate/pinch, no mode toggle.
+        touches={
+          hostPainting
+            ? { ONE: undefined as any, TWO: THREE.TOUCH.DOLLY_ROTATE }
+            : { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN }
+        }
       />
 
       <StudioEnvironment intensity={0.62} />
@@ -275,17 +312,7 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       />
 
       {players.map((player) => (
-        <PlayerTool
-          key={player.id}
-          position={player.worldPos}
-          surfacePoint={player.surfacePoint}
-          surfaceNormal={player.surfaceNormal}
-          tool={player.tool}
-          active={player.isPainting}
-          color={player.color}
-          playerName={player.name}
-          playerSlot={player.slot}
-        />
+        <PlayerTool key={player.id} player={player} />
       ))}
 
       <SprayMist players={players} />

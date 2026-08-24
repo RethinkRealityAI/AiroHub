@@ -17,7 +17,7 @@ import {
   Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, X, Zap,
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
-  Wifi, WifiOff, Boxes,
+  Wifi, WifiOff, Boxes, Undo2, History,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -119,12 +119,12 @@ export default function CanvasView() {
    * the batch was painted with.
    */
   const stampBatchers = useRef(
-    new Map<string, { batcher: StampBatcher; tool: 'spray' | 'brush'; color: string }>()
+    new Map<string, { batcher: StampBatcher; tool: 'spray' | 'brush'; color: string; strokeId: string }>()
   );
   const broadcastStamps = useCallback(
-    (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[]) => {
+    (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[], strokeId: string) => {
       let entry = stampBatchers.current.get(playerId);
-      if (!entry || entry.tool !== tool || entry.color !== color) {
+      if (!entry || entry.tool !== tool || entry.color !== color || entry.strokeId !== strokeId) {
         entry?.batcher.dispose();
         const batcher = new StampBatcher((batch, state) => {
           connectionRef.current?.emit('paint-stamps', {
@@ -132,10 +132,11 @@ export default function CanvasView() {
             tool,
             color,
             state,
+            strokeId,
             stamps: packStamps(batch),
           } satisfies StampPacket as unknown as Record<string, unknown>);
         });
-        entry = { batcher, tool, color };
+        entry = { batcher, tool, color, strokeId };
         stampBatchers.current.set(playerId, entry);
         entry.batcher.begin();
       }
@@ -263,8 +264,15 @@ export default function CanvasView() {
         sounds.stopBrush();
       }
       if (stamps?.length) {
-        paintSurface.applyStamps(unpackStamps(stamps), tool, color);
+        paintSurface.applyStamps(unpackStamps(stamps), tool, color, packet.strokeId);
         paintSurface.commit();
+      }
+    });
+
+    conn.on('undo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.undoStroke(strokeId)) {
+        paintSurface.commit();
+        sounds.playWhoosh();
       }
     });
 
@@ -334,6 +342,8 @@ export default function CanvasView() {
     prefetchModels(['tool-spraycan', 'tool-brush'], null);
   }, []);
 
+  const undoRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     const onFsChange = () => setFullscreen(Boolean(document.fullscreenElement));
     document.addEventListener('fullscreenchange', onFsChange);
@@ -343,6 +353,10 @@ export default function CanvasView() {
       if (key === 'f') toggleFullscreen();
       if (key === 'b') setHostTool((t) => (t === 'spray' ? 'brush' : 'spray'));
       if (key === 'o') setStageMode((m) => (m === 'paint' ? 'orbit' : 'paint'));
+      if (key === 'z' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        undoRef.current();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => {
@@ -381,8 +395,28 @@ export default function CanvasView() {
 
   const clearCanvas = () => {
     paintSurface.clear();
+    paintSurface.commit();
     sounds.playWhoosh();
     connectionRef.current?.emit('clear-canvas', {});
+  };
+
+  const undoLast = useCallback(() => {
+    const strokeId = paintSurface.lastStrokeId();
+    if (!strokeId) return;
+    paintSurface.undoStroke(strokeId);
+    paintSurface.commit();
+    sounds.playClick(1.1);
+    connectionRef.current?.emit('undo-stroke', { strokeId });
+  }, [paintSurface]);
+  undoRef.current = undoLast;
+
+  const [replaying, setReplaying] = useState(false);
+  const replayArtwork = async () => {
+    if (paintSurface.isReplaying) return;
+    setReplaying(true);
+    sounds.playWhoosh();
+    await paintSurface.replayTimelapse(4200);
+    setReplaying(false);
   };
 
   const saveSnapshot = () => {
@@ -743,6 +777,17 @@ export default function CanvasView() {
 
               <div className="w-px h-7 bg-white/12 hidden md:block" />
 
+              <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
+                <Undo2 size={15} />
+              </GlassIconButton>
+              <GlassIconButton
+                onClick={replayArtwork}
+                title="Replay the artwork painting itself"
+                size={38}
+                disabled={replaying}
+              >
+                <History size={15} className={replaying ? 'animate-spin text-[var(--color-airo-aqua)]' : ''} />
+              </GlassIconButton>
               <GlassIconButton onClick={() => sounds.playCanRattle()} title="Shake can" size={38}>
                 <Sparkles size={15} className="text-[var(--color-airo-ember)]" />
               </GlassIconButton>

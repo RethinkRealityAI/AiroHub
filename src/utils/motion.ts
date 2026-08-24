@@ -153,6 +153,15 @@ export class AimTracker {
   private rollFilter = new OneEuroFilter(1.4, 0.02);
 
   /**
+   * Soft-boundary drift, in radians. When the aim saturates at a screen edge,
+   * the neutral origin slides with the overshoot so that reversing direction
+   * responds immediately — without this, turning far past an edge leaves a
+   * dead zone the player has to wind back through.
+   */
+  private yawDrift = 0;
+  private pitchDrift = 0;
+
+  /**
    * Radians of rotation that map to a full sweep of the stage. Smaller is more
    * sensitive. ~50° each way felt like the sweet spot between "reach the
    * corners without moving your feet" and "hold a steady line".
@@ -176,6 +185,8 @@ export class AimTracker {
   calibrate() {
     this.reference.copy(this.q);
     this.hasReference = true;
+    this.yawDrift = 0;
+    this.pitchDrift = 0;
     this.yawFilter.reset();
     this.pitchFilter.reset();
     this.rollFilter.reset();
@@ -203,13 +214,27 @@ export class AimTracker {
     const sPitch = this.pitchFilter.filter(pitch, timestampMs);
     const sRoll = this.rollFilter.filter(roll, timestampMs);
 
-    return {
-      x: THREE.MathUtils.clamp(0.5 + sYaw * this.gain * 0.5, 0, 1),
-      y: THREE.MathUtils.clamp(0.5 - sPitch * this.gain * 0.5, 0, 1),
-      yaw: sYaw,
-      pitch: sPitch,
-      roll: sRoll,
-    };
+    // Map through the drifting origin, then let the origin follow overshoot.
+    const half = this.gain * 0.5;
+    const PAD = 0.015;
+    let x = 0.5 + (sYaw - this.yawDrift) * half;
+    if (x < PAD) {
+      this.yawDrift = sYaw - (PAD - 0.5) / half;
+      x = PAD;
+    } else if (x > 1 - PAD) {
+      this.yawDrift = sYaw - (1 - PAD - 0.5) / half;
+      x = 1 - PAD;
+    }
+    let y = 0.5 - (sPitch - this.pitchDrift) * half;
+    if (y < PAD) {
+      this.pitchDrift = sPitch - (0.5 - PAD) / half;
+      y = PAD;
+    } else if (y > 1 - PAD) {
+      this.pitchDrift = sPitch - (0.5 - (1 - PAD)) / half;
+      y = 1 - PAD;
+    }
+
+    return { x, y, yaw: sYaw, pitch: sPitch, roll: sRoll };
   }
 
   reset() {

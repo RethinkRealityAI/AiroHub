@@ -91,6 +91,15 @@ function tinted(kind: StampKind, color: string): HTMLCanvasElement {
    PaintSurface
    ------------------------------------------------------------------ */
 
+/** One undoable unit: a stroke's stamps, or a one-shot symbol stamp. */
+type LogEntry =
+  | { kind: 'stamps'; strokeId: string; tool: 'spray' | 'brush'; color: string; stamps: PaintStamp[] }
+  | { kind: 'symbol'; strokeId: string; symbol: string; x: number; y: number; color: string; text?: string };
+
+/** Keep the log bounded; the oldest strokes simply stop being undoable. */
+const LOG_MAX_ENTRIES = 600;
+const LOG_MAX_STAMPS = 120000;
+
 export class PaintSurface {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
@@ -98,6 +107,15 @@ export class PaintSurface {
 
   /** Set when anything changed; flushed once per frame by `commit()`. */
   private dirty = false;
+
+  /**
+   * Ordered record of everything painted. This is what powers global undo and
+   * the time-lapse replay: undo removes an entry and repaints the rest, replay
+   * re-runs the whole history from a blank surface.
+   */
+  private log: LogEntry[] = [];
+  private loggedStamps = 0;
+  private replaying = false;
 
   constructor(size: number = CANVAS_RES) {
     this.canvas = document.createElement('canvas');
@@ -126,11 +144,13 @@ export class PaintSurface {
 
   clear() {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.log = [];
+    this.loggedStamps = 0;
     this.dirty = true;
   }
 
   /** One dab. `u`/`v` are 0..1 texture space, `r` is texture pixels. */
-  applyStamp(stamp: PaintStamp, tool: 'spray' | 'brush', color: string) {
+  private drawStamp(stamp: PaintStamp, tool: 'spray' | 'brush', color: string) {
     const ctx = this.ctx;
     const x = stamp.u * this.canvas.width;
     const y = stamp.v * this.canvas.height;
@@ -141,12 +161,159 @@ export class PaintSurface {
     this.dirty = true;
   }
 
-  applyStamps(stamps: Iterable<PaintStamp>, tool: 'spray' | 'brush', color: string) {
-    for (const stamp of stamps) this.applyStamp(stamp, tool, color);
+  /**
+   * Draws stamps and records them under `strokeId` for undo/replay. Stamps
+   * without a strokeId still draw but are not undoable.
+   */
+  applyStamps(
+    stamps: Iterable<PaintStamp>,
+    tool: 'spray' | 'brush',
+    color: string,
+    strokeId?: string
+  ) {
+    let entry: Extract<LogEntry, { kind: 'stamps' }> | null = null;
+    if (strokeId) {
+      const last = this.log[this.log.length - 1];
+      if (last && last.kind === 'stamps' && last.strokeId === strokeId) {
+        entry = last;
+      } else {
+        entry = { kind: 'stamps', strokeId, tool, color, stamps: [] };
+        this.log.push(entry);
+      }
+    }
+    for (const stamp of stamps) {
+      this.drawStamp(stamp, tool, color);
+      if (entry) {
+        entry.stamps.push(stamp);
+        this.loggedStamps++;
+      }
+    }
+    this.trimLog();
+  }
+
+  private trimLog() {
+    while (
+      this.log.length > LOG_MAX_ENTRIES ||
+      (this.loggedStamps > LOG_MAX_STAMPS && this.log.length > 1)
+    ) {
+      const dropped = this.log.shift();
+      if (dropped?.kind === 'stamps') this.loggedStamps -= dropped.stamps.length;
+    }
+  }
+
+  /** Most recent undoable stroke, if any. */
+  lastStrokeId(): string | null {
+    return this.log.length ? this.log[this.log.length - 1].strokeId : null;
+  }
+
+  /** Removes one stroke and repaints the remaining history. */
+  undoStroke(strokeId: string): boolean {
+    for (let i = this.log.length - 1; i >= 0; i--) {
+      if (this.log[i].strokeId === strokeId) {
+        const [removed] = this.log.splice(i, 1);
+        if (removed.kind === 'stamps') this.loggedStamps -= removed.stamps.length;
+        this.repaintFromLog();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private repaintFromLog() {
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    for (const entry of this.log) {
+      if (entry.kind === 'stamps') {
+        for (const stamp of entry.stamps) this.drawStamp(stamp, entry.tool, entry.color);
+      } else {
+        this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
+      }
+    }
+    this.dirty = true;
+  }
+
+  get isReplaying() {
+    return this.replaying;
+  }
+
+  /**
+   * Time-lapse: wipes the surface and repaints the entire history over
+   * `durationMs`, oldest stroke first. Live painting during a replay still
+   * logs; the final frame repaints from the full log so nothing is lost.
+   */
+  async replayTimelapse(durationMs = 4200): Promise<void> {
+    if (this.replaying || this.log.length === 0) return;
+    this.replaying = true;
+
+    // Work from a snapshot so live strokes arriving mid-replay don't shift it.
+    const snapshot = this.log.map((entry) =>
+      entry.kind === 'stamps' ? { ...entry, stamps: [...entry.stamps] } : { ...entry }
+    );
+    const totalUnits = snapshot.reduce(
+      (sum, e) => sum + (e.kind === 'stamps' ? e.stamps.length : 40),
+      0
+    );
+
+    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    this.dirty = true;
+
+    let drawnUnits = 0;
+    let entryIndex = 0;
+    let stampIndex = 0;
+    const start = performance.now();
+
+    await new Promise<void>((resolve) => {
+      const tick = () => {
+        const t = Math.min((performance.now() - start) / durationMs, 1);
+        // Ease-in so the replay accelerates like a montage.
+        const target = Math.floor(totalUnits * (t * t * (3 - 2 * t)));
+        while (drawnUnits < target && entryIndex < snapshot.length) {
+          const entry = snapshot[entryIndex];
+          if (entry.kind === 'symbol') {
+            this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
+            drawnUnits += 40;
+            entryIndex++;
+            continue;
+          }
+          this.drawStamp(entry.stamps[stampIndex], entry.tool, entry.color);
+          drawnUnits++;
+          stampIndex++;
+          if (stampIndex >= entry.stamps.length) {
+            entryIndex++;
+            stampIndex = 0;
+          }
+        }
+        this.commit();
+        if (t >= 1 || entryIndex >= snapshot.length) {
+          resolve();
+        } else {
+          requestAnimationFrame(tick);
+        }
+      };
+      requestAnimationFrame(tick);
+    });
+
+    // Converge with anything painted during the replay.
+    this.repaintFromLog();
+    this.commit();
+    this.replaying = false;
   }
 
   /** One-shot decorative stamp used by the AI stencil feature. */
   stampSymbol(symbol: string, x: number, y: number, color: string, text?: string) {
+    this.log.push({
+      kind: 'symbol',
+      strokeId: `symbol#${Math.random().toString(36).slice(2, 9)}`,
+      symbol,
+      x,
+      y,
+      color,
+      text,
+    });
+    this.trimLog();
+    this.drawSymbol(symbol, x, y, color, text);
+  }
+
+  private drawSymbol(symbol: string, x: number, y: number, color: string, text?: string) {
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = color;

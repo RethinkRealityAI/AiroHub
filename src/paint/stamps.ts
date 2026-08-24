@@ -29,6 +29,8 @@ export interface StampPacket {
   tool: 'spray' | 'brush';
   color: string;
   state: StrokeState;
+  /** Stable id for this stroke, shared by every peer for undo. */
+  strokeId?: string;
   /** Flat [u,v,r,o] quads — cheaper to serialise than objects. */
   stamps: number[];
   /** Latest aim point, for positioning the player's 3D tool remotely. */

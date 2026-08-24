@@ -21,17 +21,17 @@ import * as THREE from 'three';
 import { loadToolRig, ToolRig } from './toolRig';
 import { NameTag } from './NameTag';
 
+import { PlayerState } from '../types';
+
 export interface PlayerToolProps {
-  /** Where the tool body should hover. */
-  position: [number, number, number];
-  /** Point on the object the tool is aimed at. */
-  surfacePoint?: [number, number, number];
-  surfaceNormal?: [number, number, number];
-  tool: 'spray' | 'brush';
-  active: boolean;
-  color: string;
-  playerName?: string;
-  playerSlot?: number;
+  /**
+   * The live player record. The frame loop mutates its transform fields every
+   * frame without going through React, so this component reads them inside
+   * useFrame — taking them as value props would freeze the tool between React
+   * renders (which is exactly how the "can doesn't follow the mouse" bug
+   * looked).
+   */
+  player: PlayerState;
   scale?: number;
 }
 
@@ -49,21 +49,13 @@ const HOVER = { spray: 1.15, brush: 0.12 } as const;
  */
 const APPROACH = { up: 0.62, right: 0.42 } as const;
 
-export const PlayerTool: React.FC<PlayerToolProps> = ({
-  position,
-  surfacePoint,
-  surfaceNormal,
-  tool,
-  active,
-  color,
-  playerName,
-  playerSlot = 1,
-  scale = 1,
-}) => {
+export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => {
+  const { tool, color, name: playerName, slot: playerSlot } = player;
   const groupRef = useRef<THREE.Group>(null);
   const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>({});
 
-  const currentPos = useRef(new THREE.Vector3(...position));
+  const reticleMat = useRef<THREE.MeshBasicMaterial>(null);
+  const currentPos = useRef(new THREE.Vector3(...player.worldPos));
   const currentQuat = useRef(new THREE.Quaternion());
   const targetPos = useMemo(() => new THREE.Vector3(), []);
   const lookAt = useMemo(() => new THREE.Vector3(), []);
@@ -90,6 +82,8 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({
     const group = groupRef.current;
     if (!group) return;
 
+    // Live reads — these fields mutate every frame outside React.
+    const { surfacePoint, surfaceNormal, worldPos: position, isPainting: active } = player;
     const hover = active ? HOVER[tool] : HOVER[tool] + 0.7;
 
     if (surfacePoint && surfaceNormal) {
@@ -132,6 +126,8 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({
 
     group.position.copy(currentPos.current);
     group.quaternion.copy(currentQuat.current);
+
+    if (reticleMat.current) reticleMat.current.opacity = active ? 0.95 : 0.4;
   });
 
   const rig = rigs[tool];
@@ -168,9 +164,10 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({
       <mesh>
         <ringGeometry args={[0.06, 0.1, 20]} />
         <meshBasicMaterial
+          ref={reticleMat}
           color={color}
           transparent
-          opacity={active ? 0.95 : 0.4}
+          opacity={0.4}
           side={THREE.DoubleSide}
           depthTest={false}
         />
