@@ -16,13 +16,16 @@ import { loadToolRig, ToolRig } from './toolRig';
 const PARTICLES = 260;
 
 /**
- * Base display pose. The rig points its nozzle along -Z (into the screen), so
- * with no tilt applied the camera stares at the can's base end-on — a circle.
- * Pitching the assembly ~64° brings it to the iconic hold: can nearly upright,
- * nozzle up, leaning gently toward the canvas, label facing the player. Device
- * rotation is applied inside this pose, so phone tilt still reads naturally.
+ * Base display lean. The rig is stood upright inside the group (see
+ * POSTURE_X), so identity orientation shows the can vertical, nozzle on top.
+ * A slight negative X lean tips the top *away from the viewer, into the
+ * screen* — you're holding the phone with its camera facing the studio, so
+ * the can naturally leans toward the canvas you're spraying.
  */
-const BASE_TILT = new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(64), 0, 0));
+const BASE_LEAN = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.16, 0, 0));
+
+/** Stand the rig upright (spray) / pen-tilt it (brush) inside the group. */
+const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
 
 interface HandheldToolProps {
   tool: 'spray' | 'brush';
@@ -95,7 +98,7 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
 
     // ---- Orientation: live sensors inside the display pose ----
     getOrientation(deviceQuat);
-    deviceQuat.premultiply(BASE_TILT);
+    deviceQuat.premultiply(BASE_LEAN);
     displayQuat.current.slerp(deviceQuat, 1 - Math.exp(-16 * delta));
     group.quaternion.copy(displayQuat.current);
 
@@ -107,14 +110,14 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
       shakeX = (Math.random() - 0.5) * 0.28;
       shakeY = (Math.random() - 0.5) * 0.28;
     }
-    group.position.set(shakeX, idleY + shakeY - 0.55, 0);
+    group.position.set(shakeX, idleY + shakeY - 0.72, 0);
 
-    // Trigger recoil: the can kicks back along its own +Z when pressed.
+    // Trigger recoil: the can dips slightly into the grip when pressed.
     const recoil = recoilRef.current;
     if (recoil) {
-      const target = pressed ? 0.16 : 0;
-      recoil.position.z = THREE.MathUtils.lerp(recoil.position.z, target, 1 - Math.exp(-20 * delta));
-      const targetScale = pressed ? 0.97 : 1;
+      const target = pressed ? -0.07 : 0;
+      recoil.position.y = THREE.MathUtils.lerp(recoil.position.y, target, 1 - Math.exp(-20 * delta));
+      const targetScale = pressed ? 0.985 : 1;
       const s = THREE.MathUtils.lerp(recoil.scale.x, targetScale, 1 - Math.exp(-20 * delta));
       recoil.scale.setScalar(s);
     }
@@ -127,9 +130,10 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
         const toSpawn = Math.floor(spawnDebt.current);
         spawnDebt.current -= toSpawn;
 
-        // Nozzle sits at the rig origin; spray leaves along the tool's -Z.
-        nozzleWorld.set(0, 0, 0).applyQuaternion(displayQuat.current).add(group.position);
-        sprayDir.set(0, 0, -1).applyQuaternion(displayQuat.current);
+        // The nozzle sits at the group origin (top of the upright can);
+        // spray leaves up-and-forward, into the screen toward the studio.
+        nozzleWorld.set(0, 0.05, 0).applyQuaternion(displayQuat.current).add(group.position);
+        sprayDir.set(0, 0.35, -1).normalize().applyQuaternion(displayQuat.current);
 
         for (let n = 0; n < toSpawn; n++) {
           const index = freeList.current.pop();
@@ -184,31 +188,33 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
 
   return (
     <>
-      <group ref={groupRef} scale={1.12}>
+      <group ref={groupRef} scale={1.85}>
         <group ref={recoilRef}>
-          {rig ? (
-            <primitive object={rig.root} />
-          ) : (
-            <mesh position={[0, 0, 0.8]}>
-              <capsuleGeometry args={[0.22, 0.9, 4, 14]} />
-              <meshStandardMaterial color={color} roughness={0.4} metalness={0.4} />
+          <group rotation={[POSTURE_X[tool], 0, 0]}>
+            {rig ? (
+              <primitive object={rig.root} />
+            ) : (
+              <mesh position={[0, 0, 0.8]}>
+                <capsuleGeometry args={[0.22, 0.9, 4, 14]} />
+                <meshStandardMaterial color={color} roughness={0.4} metalness={0.4} />
+              </mesh>
+            )}
+
+            {/* Player-colour band around the body, matching the studio view. */}
+            <mesh position={[0, 0, 0.55]}>
+              <torusGeometry args={[0.24, 0.05, 12, 28]} />
+              <meshStandardMaterial
+                color={color}
+                emissive={color}
+                emissiveIntensity={pressed ? 1.1 : 0.5}
+                roughness={0.3}
+              />
             </mesh>
-          )}
+          </group>
 
-          {/* Player-colour band near the tip, matching the studio view. */}
-          <mesh position={[0, 0, 0.16]}>
-            <torusGeometry args={[0.24, 0.045, 12, 28]} />
-            <meshStandardMaterial
-              color={color}
-              emissive={color}
-              emissiveIntensity={pressed ? 1.1 : 0.5}
-              roughness={0.3}
-            />
-          </mesh>
-
-          {/* Aim ring floating just off the nozzle — lights up while painting. */}
-          <mesh position={[0, 0, -0.55]}>
-            <ringGeometry args={[0.1, 0.14, 26]} />
+          {/* Aim halo above the nozzle — lights up while painting. */}
+          <mesh position={[0, 0.32, -0.12]} rotation={[Math.PI / 2.6, 0, 0]}>
+            <ringGeometry args={[0.12, 0.16, 26]} />
             <meshBasicMaterial
               color={color}
               transparent

@@ -20,7 +20,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
-  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2,
+  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Eye, EyeOff,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -98,6 +98,8 @@ interface PreviewProps {
   size: number;
   interaction: 'paint' | 'orbit';
   onStamps: (stamps: PaintStamp[], state: 'start' | 'paint' | 'end', context?: BatchContext) => void;
+  /** Fired (throttled) whenever this phone's preview camera moves. */
+  onCameraChange?: (azimuth: number, polar: number, distanceRatio: number) => void;
   orbitRef: React.MutableRefObject<any>;
   onLoadingChange: (loading: boolean) => void;
 }
@@ -111,6 +113,7 @@ function PreviewStage({
   size,
   interaction,
   onStamps,
+  onCameraChange,
   orbitRef,
   onLoadingChange,
 }: PreviewProps) {
@@ -136,6 +139,29 @@ function PreviewStage({
     []
   );
   useEffect(() => painter.invalidate(), [painter, objectId]);
+
+  // Report orbit changes so the studio can (optionally) mirror this player's
+  // view. Throttled — camera sync is cosmetic, not telemetry.
+  useEffect(() => {
+    const controls = orbitRef.current;
+    if (!controls || !onCameraChange) return;
+    let last = 0;
+    const onChange = () => {
+      const now = performance.now();
+      if (now - last < 80) return;
+      last = now;
+      const distance = camera.position.distanceTo(controls.target);
+      const min = controls.minDistance || 1;
+      const max = controls.maxDistance || min + 1;
+      onCameraChange(
+        controls.getAzimuthalAngle(),
+        controls.getPolarAngle(),
+        THREE.MathUtils.clamp((distance - min) / Math.max(max - min, 0.001), 0, 1)
+      );
+    };
+    controls.addEventListener('change', onChange);
+    return () => controls.removeEventListener('change', onChange);
+  }, [onCameraChange, camera, orbitRef, interaction]);
 
   /** Latest pointer NDC; painting is driven per-frame like the studio. */
   const pointerNdc = useRef(new THREE.Vector2());
@@ -319,6 +345,7 @@ export default function ControllerView() {
   });
 
   const [sensorState, setSensorState] = useState<'idle' | 'granted' | 'denied' | 'unsupported'>('idle');
+  const [showCan, setShowCan] = useState(true);
   const [triggerActive, setTriggerActive] = useState(false);
   const [shaking, setShaking] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -377,8 +404,10 @@ export default function ControllerView() {
     });
     // Paint made elsewhere (studio pointer, motion players, other phones)
     // keeps this phone's local texture identical to the studio's.
+    // Applies every peer's paint — including strokes the studio derives for
+    // *this* phone's motion aiming (they carry our own playerId; broadcast
+    // self:false already filters the packets we sent ourselves).
     conn.on('paint-stamps', (packet: StampPacket) => {
-      if (packet.playerId === playerIdRef.current) return;
       if (packet.stamps?.length) {
         paintSurface.applyStamps(unpackStamps(packet.stamps), packet.tool, packet.color, packet.strokeId);
         paintSurface.commit();
@@ -386,6 +415,23 @@ export default function ControllerView() {
     });
     conn.on('undo-stroke', ({ strokeId }) => {
       if (strokeId && paintSurface.undoStroke(strokeId)) paintSurface.commit();
+    });
+
+    // Late-join sync: ask the studio for the artwork as it stands, and bake
+    // the reply in as a baseline layer under our own stroke log.
+    conn.on('connection', ({ status }) => {
+      if (status === 'connected') {
+        conn.emit('request-state', { playerId: playerIdRef.current });
+      }
+    });
+    conn.on('canvas-state', ({ target, dataUrl }) => {
+      if (target !== playerIdRef.current || typeof dataUrl !== 'string') return;
+      const image = new Image();
+      image.onload = () => {
+        paintSurface.setBaseline(image);
+        paintSurface.commit();
+      };
+      image.src = dataUrl;
     });
 
     return () => {
@@ -530,6 +576,15 @@ export default function ControllerView() {
   }, [mode, tool]);
 
   /* ------------------------------ actions ------------------------------ */
+
+  const handleCameraChange = useCallback((azimuth: number, polar: number, distanceRatio: number) => {
+    connectionRef.current?.emit('camera-sync', {
+      playerId: playerIdRef.current,
+      azimuth,
+      polar,
+      distanceRatio,
+    });
+  }, []);
 
   const undoLast = () => {
     const strokeId = paintSurface.lastStrokeId();
@@ -805,19 +860,21 @@ export default function ControllerView() {
               }}
             >
               {/* The handheld 3D tool, driven live by the motion sensors. */}
-              <div className="absolute inset-0 pointer-events-none">
-                <Canvas dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
-                  <Suspense fallback={null}>
-                    <AimStage
-                      tool={tool}
-                      color={color}
-                      pressed={triggerActive}
-                      shaking={shaking}
-                      trackerRef={trackerRef}
-                    />
-                  </Suspense>
-                </Canvas>
-              </div>
+              {showCan && (
+                <div className="absolute inset-0 pointer-events-none">
+                  <Canvas dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+                    <Suspense fallback={null}>
+                      <AimStage
+                        tool={tool}
+                        color={color}
+                        pressed={triggerActive}
+                        shaking={shaking}
+                        trackerRef={trackerRef}
+                      />
+                    </Suspense>
+                  </Canvas>
+                </div>
+              )}
 
               <button
                 onClick={(e) => {
@@ -830,6 +887,20 @@ export default function ControllerView() {
               >
                 <Crosshair size={12} className="text-[var(--color-airo-flame)]" />
                 Recentre
+              </button>
+
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowCan((v) => !v);
+                  sounds.playClick(1.1);
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                title={showCan ? 'Hide the 3D can' : 'Show the 3D can'}
+                className="tap absolute top-3 left-3 glass glass-sheen rounded-full w-9 h-9 grid place-items-center z-20 text-white/70"
+              >
+                {showCan ? <Eye size={14} /> : <EyeOff size={14} />}
               </button>
 
               <div className="absolute bottom-4 inset-x-0 flex justify-center px-6 pointer-events-none">
@@ -870,6 +941,7 @@ export default function ControllerView() {
                     size={toolSize}
                     interaction={interaction}
                     onStamps={handleStamps}
+                    onCameraChange={handleCameraChange}
                     orbitRef={orbitRef}
                     onLoadingChange={setObjectLoading}
                   />

@@ -1,70 +1,77 @@
 /**
- * A player's floating spray can / brush.
+ * A player's floating spray can / brush, plus their surface reticle.
  *
- * Two things the previous version got wrong, both of which showed up as the
- * tool feeling "off" from where paint actually lands:
+ * Posture matters: a real can is held *upright* — body vertical, nozzle on
+ * top, leaning slightly toward the wall — not aimed down its axis like a
+ * laser pointer. The spray can therefore stands vertical (blended a little
+ * toward the surface normal so painting the top of an object still looks
+ * natural), while the brush tilts like a held pen with its tip at the
+ * contact point.
  *
- *  1. **Tip alignment.** The tool was oriented with `lookAt`, which aims the
- *     model's -Z axis at the surface, but the primitive can was modelled along
- *     +Y with the nozzle on top. The nozzle therefore pointed 90° away from the
- *     spray. Generated models have their own arbitrary axes too, so each is
- *     measured on load and re-anchored so its emitting tip sits exactly at the
- *     contact point, pointing down the surface normal.
+ * Aiming clarity comes from two world-anchored guides rendered with the tool:
+ *   - a crosshair reticle planted flat on the mesh exactly where paint lands
+ *   - a faint "laser" line from the nozzle to that point
+ * Both use the player's colour and brighten while painting.
  *
- *  2. **Rotation damping.** A fixed lerp factor is frame-rate dependent, so the
- *     tool lagged differently at 60 Hz and 120 Hz. Smoothing is now
- *     exponential in delta time.
+ * Everything positional reads the live player record inside useFrame — those
+ * fields mutate every frame outside React, so value props would freeze the
+ * tool between renders.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { loadToolRig, ToolRig } from './toolRig';
 import { NameTag } from './NameTag';
-
 import { PlayerState } from '../types';
 
 export interface PlayerToolProps {
-  /**
-   * The live player record. The frame loop mutates its transform fields every
-   * frame without going through React, so this component reads them inside
-   * useFrame — taking them as value props would freeze the tool between React
-   * renders (which is exactly how the "can doesn't follow the mouse" bug
-   * looked).
-   */
+  /** The live player record — transforms are read imperatively per frame. */
   player: PlayerState;
   scale?: number;
 }
 
-const HOVER = { spray: 1.15, brush: 0.12 } as const;
+/** How far the emitting tip hovers off the surface while painting. */
+const HOVER = { spray: 1.05, brush: 0.14 } as const;
 
 /**
- * Lateral offset of the tool body from the contact point, as a fraction of the
- * hover distance.
- *
- * Without this the tool sits exactly on the surface normal, so whenever the
- * camera looks along that normal you see the flat base of the can end-on — a
- * white disc parked over the artwork. Offsetting it up and to the right makes
- * the tool approach at an angle, the way a hand actually holds a can, which
- * both reads correctly and keeps the contact point visible.
+ * Posture of the rig inside the tool group. The rig's barrel runs +Z with the
+ * tip at the origin; rotating X by +90° stands the can upright (body hanging
+ * below the nozzle), while -52° tilts the brush like a held pen.
  */
-const APPROACH = { up: 0.62, right: 0.42 } as const;
+const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
+
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => {
   const { tool, color, name: playerName, slot: playerSlot } = player;
+  const { camera } = useThree();
+
   const groupRef = useRef<THREE.Group>(null);
+  const reticleRef = useRef<THREE.Group>(null);
+  const reticleMats = useRef<THREE.MeshBasicMaterial[]>([]);
+  const guideRef = useRef<THREE.Mesh>(null);
+  const guideMat = useRef<THREE.MeshBasicMaterial>(null);
   const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>({});
 
-  const reticleMat = useRef<THREE.MeshBasicMaterial>(null);
   const currentPos = useRef(new THREE.Vector3(...player.worldPos));
   const currentQuat = useRef(new THREE.Quaternion());
-  const targetPos = useMemo(() => new THREE.Vector3(), []);
-  const lookAt = useMemo(() => new THREE.Vector3(), []);
-  const normalVec = useMemo(() => new THREE.Vector3(0, 0, 1), []);
-  const tangentRight = useMemo(() => new THREE.Vector3(), []);
-  const tangentUp = useMemo(() => new THREE.Vector3(), []);
-  const matrix = useMemo(() => new THREE.Matrix4(), []);
-  const targetQuat = useMemo(() => new THREE.Quaternion(), []);
-  const upHint = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const scratch = useMemo(
+    () => ({
+      targetPos: new THREE.Vector3(),
+      targetQuat: new THREE.Quaternion(),
+      normal: new THREE.Vector3(0, 0, 1),
+      face: new THREE.Vector3(),
+      up: new THREE.Vector3(),
+      surface: new THREE.Vector3(),
+      matrix: new THREE.Matrix4(),
+      zero: new THREE.Vector3(),
+      guideDir: new THREE.Vector3(),
+      guideQuat: new THREE.Quaternion(),
+      axis: new THREE.Vector3(),
+      camHoriz: new THREE.Vector3(),
+    }),
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -82,100 +89,176 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
     const group = groupRef.current;
     if (!group) return;
 
-    // Live reads — these fields mutate every frame outside React.
     const { surfacePoint, surfaceNormal, worldPos: position, isPainting: active } = player;
-    const hover = active ? HOVER[tool] : HOVER[tool] + 0.7;
+    const s = scratch;
+    const hover = active ? HOVER[tool] : HOVER[tool] + 0.65;
 
-    if (surfacePoint && surfaceNormal) {
-      // Plant the tip on the surface, back the body off along the normal, then
-      // swing it up and across so the can is held at an angle rather than
-      // pointing straight down the camera axis.
-      normalVec.set(surfaceNormal[0], surfaceNormal[1], surfaceNormal[2]).normalize();
-      lookAt.set(surfacePoint[0], surfacePoint[1], surfacePoint[2]);
+    // Facing fallback: the camera's horizontal look direction.
+    s.camHoriz.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    s.camHoriz.y = 0;
+    if (s.camHoriz.lengthSq() < 1e-4) s.camHoriz.set(0, 0, -1);
+    s.camHoriz.normalize();
 
-      const upRef = Math.abs(normalVec.dot(upHint)) > 0.95 ? new THREE.Vector3(0, 0, 1) : upHint;
-      tangentRight.crossVectors(upRef, normalVec).normalize();
-      tangentUp.crossVectors(normalVec, tangentRight).normalize();
+    const hasSurface = Boolean(surfacePoint && surfaceNormal);
+    if (hasSurface) {
+      s.normal.set(surfaceNormal![0], surfaceNormal![1], surfaceNormal![2]).normalize();
+      s.surface.set(surfacePoint![0], surfacePoint![1], surfacePoint![2]);
+      s.targetPos.copy(s.surface).addScaledVector(s.normal, hover);
 
-      targetPos
-        .copy(lookAt)
-        .addScaledVector(normalVec, hover)
-        .addScaledVector(tangentUp, hover * APPROACH.up)
-        .addScaledVector(tangentRight, hover * APPROACH.right);
+      // Face the wall: horizontal component of the inverse normal; when the
+      // surface is horizontal (painting a top), fall back to the camera view.
+      s.face.set(-s.normal.x, 0, -s.normal.z);
+      if (s.face.lengthSq() < 0.04) s.face.copy(s.camHoriz);
+      s.face.normalize();
+
+      // Mostly world-upright, tipped slightly away from the surface so the
+      // body clears it — and naturally upright when spraying downward.
+      s.up.copy(WORLD_UP).addScaledVector(s.normal, 0.28).normalize();
     } else {
-      targetPos.set(position[0], position[1], position[2]);
-      lookAt.set(0, 0, 0);
+      // Floating off-model on the camera plane.
+      s.targetPos.set(position[0], position[1], position[2]);
+      s.face.copy(s.camHoriz);
+      s.up.copy(WORLD_UP);
     }
 
-    // Guard against a degenerate up vector when aiming straight up or down.
-    const forward = lookAt.clone().sub(targetPos);
-    if (forward.lengthSq() > 1e-6) {
-      forward.normalize();
-      const up = Math.abs(forward.dot(upHint)) > 0.985 ? new THREE.Vector3(0, 0, 1) : upHint;
-      matrix.lookAt(targetPos, lookAt, up);
-      targetQuat.setFromRotationMatrix(matrix);
-    }
+    s.matrix.lookAt(s.zero, s.face, s.up);
+    s.targetQuat.setFromRotationMatrix(s.matrix);
 
-    // Frame-rate independent smoothing. Snap on large jumps so switching
-    // objects or recentring does not produce a long swooping arc.
+    // Frame-rate independent smoothing; snap on big jumps (object switches).
     const posBlend = 1 - Math.exp(-26 * delta);
-    const rotBlend = 1 - Math.exp(-22 * delta);
-    if (currentPos.current.distanceTo(targetPos) > 4) currentPos.current.copy(targetPos);
-    else currentPos.current.lerp(targetPos, posBlend);
-    currentQuat.current.slerp(targetQuat, rotBlend);
+    const rotBlend = 1 - Math.exp(-20 * delta);
+    if (currentPos.current.distanceTo(s.targetPos) > 5) currentPos.current.copy(s.targetPos);
+    else currentPos.current.lerp(s.targetPos, posBlend);
+    currentQuat.current.slerp(s.targetQuat, rotBlend);
 
     group.position.copy(currentPos.current);
     group.quaternion.copy(currentQuat.current);
 
-    if (reticleMat.current) reticleMat.current.opacity = active ? 0.95 : 0.4;
+    /* ---------- surface reticle + guide line (world-anchored) ---------- */
+
+    const reticle = reticleRef.current;
+    const guide = guideRef.current;
+
+    if (reticle) {
+      reticle.visible = hasSurface;
+      if (hasSurface) {
+        reticle.position.copy(s.surface).addScaledVector(s.normal, 0.035);
+        reticle.quaternion.setFromUnitVectors(s.axis.set(0, 0, 1), s.normal);
+        const pulse = active ? 1 + Math.sin(performance.now() / 90) * 0.08 : 1;
+        reticle.scale.setScalar(pulse * (active ? 0.92 : 1.12));
+        for (const mat of reticleMats.current) mat.opacity = active ? 0.95 : 0.55;
+      }
+    }
+
+    if (guide && guideMat.current) {
+      guide.visible = hasSurface;
+      if (hasSurface) {
+        s.guideDir.copy(s.surface).sub(currentPos.current);
+        const len = s.guideDir.length();
+        if (len > 0.2) {
+          // Start 35% of the way out so the beam reads as leaving the nozzle
+          // instead of overlapping the can body.
+          const visibleLen = len * 0.65;
+          guide.position.copy(currentPos.current).addScaledVector(s.guideDir, 0.35 + 0.325);
+          s.guideQuat.setFromUnitVectors(s.axis.set(0, 1, 0), s.guideDir.normalize());
+          guide.quaternion.copy(s.guideQuat);
+          guide.scale.set(1, visibleLen, 1);
+          guideMat.current.opacity = active ? 0.5 : 0.18;
+        } else {
+          guide.visible = false;
+        }
+      }
+    }
   });
 
   const rig = rigs[tool];
+  const registerReticleMat = (mat: THREE.MeshBasicMaterial | null) => {
+    if (mat && !reticleMats.current.includes(mat)) reticleMats.current.push(mat);
+  };
 
   return (
-    <group ref={groupRef} scale={scale}>
-      {rig ? (
-        <primitive object={rig.root} />
-      ) : (
-        // Minimal stand-in until the model lands, so aim is never invisible.
-        <mesh position={[0, 0, 0.5]}>
-          <capsuleGeometry args={[0.16, 0.7, 4, 12]} />
-          <meshStandardMaterial color={color} roughness={0.4} metalness={0.3} />
-        </mesh>
-      )}
+    <>
+      {/* ------------------------------ tool ------------------------------ */}
+      <group ref={groupRef} scale={scale}>
+        <group rotation={[POSTURE_X[tool], 0, 0]}>
+          {rig ? (
+            <primitive object={rig.root} />
+          ) : (
+            <mesh position={[0, 0, 0.6]}>
+              <capsuleGeometry args={[0.16, 0.7, 4, 12]} />
+              <meshStandardMaterial color={color} roughness={0.4} metalness={0.3} />
+            </mesh>
+          )}
 
-      {/* Colour band so each player's can reads as theirs at a glance. The
-          rig puts the emitting tip at the origin with the body running back
-          along -Z, so the band has to sit at negative Z to be *on* the tool
-          rather than floating in front of its nozzle. */}
-      {rig && (
-        <mesh position={[0, 0, rig.length * 0.4]}>
-          <torusGeometry args={[0.2, 0.05, 10, 24]} />
-          <meshStandardMaterial
+          {/* Player-colour band around the body. */}
+          {rig && (
+            <mesh position={[0, 0, rig.length * 0.38]}>
+              <torusGeometry args={[0.21, 0.05, 10, 24]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.55} roughness={0.35} />
+            </mesh>
+          )}
+        </group>
+
+        {playerName && (
+          <NameTag text={`P${playerSlot} · ${playerName}`} color={color} position={[0, 1.55, 0]} />
+        )}
+      </group>
+
+      {/* --------------------- world-anchored aim guides --------------------- */}
+      <group ref={reticleRef} visible={false}>
+        <mesh>
+          <ringGeometry args={[0.16, 0.2, 28]} />
+          <meshBasicMaterial
+            ref={registerReticleMat}
             color={color}
-            emissive={color}
-            emissiveIntensity={0.5}
-            roughness={0.35}
+            transparent
+            opacity={0.55}
+            side={THREE.DoubleSide}
+            depthWrite={false}
           />
         </mesh>
-      )}
+        <mesh>
+          <circleGeometry args={[0.035, 12]} />
+          <meshBasicMaterial
+            ref={registerReticleMat}
+            color={color}
+            transparent
+            opacity={0.55}
+            side={THREE.DoubleSide}
+            depthWrite={false}
+          />
+        </mesh>
+        {[0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2].map((angle) => (
+          <mesh
+            key={angle}
+            rotation={[0, 0, angle]}
+            position={[Math.cos(angle) * 0.27, Math.sin(angle) * 0.27, 0]}
+          >
+            <planeGeometry args={[0.11, 0.028]} />
+            <meshBasicMaterial
+              ref={registerReticleMat}
+              color={color}
+              transparent
+              opacity={0.55}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+        ))}
+      </group>
 
-      {/* Contact reticle sitting exactly where paint lands. */}
-      <mesh>
-        <ringGeometry args={[0.06, 0.1, 20]} />
+      {/* Guide line from nozzle to surface. */}
+      <mesh ref={guideRef} visible={false}>
+        <cylinderGeometry args={[0.016, 0.016, 1, 6, 1, true]} />
         <meshBasicMaterial
-          ref={reticleMat}
+          ref={guideMat}
           color={color}
           transparent
-          opacity={0.4}
-          side={THREE.DoubleSide}
-          depthTest={false}
+          opacity={0.18}
+          depthWrite={false}
+          blending={THREE.AdditiveBlending}
         />
       </mesh>
-
-      {playerName && (
-        <NameTag text={`P${playerSlot} · ${playerName}`} color={color} />
-      )}
-    </group>
+    </>
   );
 };

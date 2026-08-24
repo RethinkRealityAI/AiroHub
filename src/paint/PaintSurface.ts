@@ -117,6 +117,13 @@ export class PaintSurface {
   private loggedStamps = 0;
   private replaying = false;
 
+  /**
+   * Snapshot of the artwork as it stood when this client joined. Everything a
+   * late joiner missed is baked in here; the live log sits on top of it. Not
+   * undoable from this client (the strokes inside it predate its log).
+   */
+  private baseline: HTMLImageElement | ImageBitmap | null = null;
+
   constructor(size: number = CANVAS_RES) {
     this.canvas = document.createElement('canvas');
     this.canvas.width = size;
@@ -146,7 +153,14 @@ export class PaintSurface {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.log = [];
     this.loggedStamps = 0;
+    this.baseline = null;
     this.dirty = true;
+  }
+
+  /** Installs the joined-late snapshot and repaints with it underneath. */
+  setBaseline(image: HTMLImageElement | ImageBitmap) {
+    this.baseline = image;
+    this.repaintFromLog();
   }
 
   /** One dab. `u`/`v` are 0..1 texture space, `r` is texture pixels. */
@@ -221,6 +235,9 @@ export class PaintSurface {
 
   private repaintFromLog() {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (this.baseline) {
+      this.ctx.drawImage(this.baseline, 0, 0, this.canvas.width, this.canvas.height);
+    }
     for (const entry of this.log) {
       if (entry.kind === 'stamps') {
         for (const stamp of entry.stamps) this.drawStamp(stamp, entry.tool, entry.color);
@@ -254,6 +271,9 @@ export class PaintSurface {
     );
 
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (this.baseline) {
+      this.ctx.drawImage(this.baseline, 0, 0, this.canvas.width, this.canvas.height);
+    }
     this.dirty = true;
 
     let drawnUnits = 0;
@@ -335,6 +355,16 @@ export class PaintSurface {
    * Flattens the paint layer over a solid backdrop for export — the live layer
    * is transparent, so a straight `toDataURL` would be mostly empty.
    */
+  /** Downscaled snapshot for syncing late joiners; ~40-150 KB as webp. */
+  toSyncDataURL(size = 1024): string {
+    const out = document.createElement('canvas');
+    out.width = size;
+    out.height = size;
+    const ctx = out.getContext('2d')!;
+    ctx.drawImage(this.canvas, 0, 0, size, size);
+    return out.toDataURL('image/webp', 0.72);
+  }
+
   toExportDataURL(background = '#0d0d12'): string {
     const out = document.createElement('canvas');
     out.width = this.canvas.width;

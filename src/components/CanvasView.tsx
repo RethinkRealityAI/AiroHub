@@ -17,7 +17,7 @@ import {
   Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, X, Zap,
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
-  Wifi, WifiOff, Boxes, Undo2, History,
+  Wifi, WifiOff, Boxes, Undo2, History, Video,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -83,6 +83,12 @@ export default function CanvasView() {
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
 
   const [objectSheet, setObjectSheet] = useState(false);
+  /** Players whose gestures are allowed to rotate the studio camera. */
+  const [cameraSyncIds, setCameraSyncIds] = useState<Set<string>>(new Set());
+  const cameraSyncRef = useRef(cameraSyncIds);
+  useEffect(() => {
+    cameraSyncRef.current = cameraSyncIds;
+  }, [cameraSyncIds]);
   const [inviteSheet, setInviteSheet] = useState(false);
   const [aiSheet, setAiSheet] = useState(false);
   const [uploadSheet, setUploadSheet] = useState(false);
@@ -274,6 +280,39 @@ export default function CanvasView() {
         paintSurface.commit();
         sounds.playWhoosh();
       }
+    });
+
+    // A phone's orbit gesture steers the studio camera — but only for players
+    // the host has toggled on, so ten people can't fight over the view.
+    conn.on('camera-sync', ({ playerId, azimuth, polar, distanceRatio }) => {
+      if (!playerId || !cameraSyncRef.current.has(playerId)) return;
+      const controls = orbitRef.current;
+      if (!controls) return;
+      controls.setAzimuthalAngle(azimuth);
+      controls.setPolarAngle(polar);
+      if (typeof distanceRatio === 'number') {
+        const min = controls.minDistance || 1;
+        const max = controls.maxDistance || min + 1;
+        const dist = min + (max - min) * Math.min(Math.max(distanceRatio, 0), 1);
+        const cam = controls.object as THREE.PerspectiveCamera;
+        const dir = cam.position.clone().sub(controls.target).normalize().multiplyScalar(dist);
+        cam.position.copy(controls.target).add(dir);
+      }
+      controls.update();
+    });
+
+    // Late joiners ask for the artwork as it stands; answer with a downscaled
+    // snapshot they bake in as a baseline. Throttled per requester.
+    const lastStateSend = new Map<string, number>();
+    conn.on('request-state', ({ playerId }) => {
+      if (!playerId) return;
+      const now = Date.now();
+      if (now - (lastStateSend.get(playerId) ?? 0) < 4000) return;
+      lastStateSend.set(playerId, now);
+      const dataUrl = paintSurface.toSyncDataURL(1024);
+      // A blank canvas produces a tiny webp; still worth skipping the send.
+      if (dataUrl.length < 2000 || dataUrl.length > 900000) return;
+      conn.emit('canvas-state', { target: playerId, dataUrl });
     });
 
     conn.on('change-object', ({ objectType }) => {
@@ -616,10 +655,13 @@ export default function CanvasView() {
                 <div className="flex -space-x-1.5">
                   {[1, 2, 3, 4].map((slot) => {
                     const player = remotePlayers.find((p) => p.slot === slot);
+                    const syncOn = player ? cameraSyncIds.has(player.id) : false;
                     return (
                       <span
                         key={slot}
-                        className={`w-4 h-4 rounded-full border-2 border-black/50 ${player?.isPainting ? 'airo-breathe' : ''}`}
+                        className={`w-4 h-4 rounded-full border-2 ${
+                          syncOn ? 'border-[var(--color-airo-aqua)]' : 'border-black/50'
+                        } ${player?.isPainting ? 'airo-breathe' : ''}`}
                         style={{ background: player ? player.color : 'rgba(255,255,255,0.14)' }}
                       />
                     );
@@ -863,6 +905,7 @@ export default function CanvasView() {
         <div className="grid grid-cols-2 gap-2 mb-4">
           {[1, 2, 3, 4].map((slot) => {
             const player = remotePlayers.find((p) => p.slot === slot);
+            const syncOn = player ? cameraSyncIds.has(player.id) : false;
             return (
               <div
                 key={slot}
@@ -871,10 +914,38 @@ export default function CanvasView() {
                 }`}
               >
                 <span
-                  className={`w-2.5 h-2.5 rounded-full ${player ? 'airo-breathe' : ''}`}
+                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${player ? 'airo-breathe' : ''}`}
                   style={{ background: player ? player.color : 'rgba(255,255,255,0.2)' }}
                 />
-                <span className="font-semibold truncate">{player ? player.name : `Slot ${slot} open`}</span>
+                <span className="font-semibold truncate flex-1">
+                  {player ? player.name : `Slot ${slot} open`}
+                </span>
+                {player && (
+                  <button
+                    onClick={() => {
+                      setCameraSyncIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(player.id)) next.delete(player.id);
+                        else next.add(player.id);
+                        return next;
+                      });
+                      sounds.playClick(1.1);
+                    }}
+                    title={
+                      syncOn
+                        ? 'This player is steering the studio camera — click to stop'
+                        : "Let this player's gestures rotate the studio camera"
+                    }
+                    className={`tap shrink-0 rounded-lg px-1.5 py-1 border text-[9px] font-bold flex items-center gap-1 ${
+                      syncOn
+                        ? 'bg-[var(--color-airo-aqua)]/25 border-[var(--color-airo-aqua)]/50 text-[var(--color-airo-aqua)]'
+                        : 'bg-white/[0.06] border-white/15 text-white/50'
+                    }`}
+                  >
+                    <Video size={10} />
+                    CAM
+                  </button>
+                )}
               </div>
             );
           })}

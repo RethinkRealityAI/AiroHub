@@ -30,6 +30,9 @@ export type AiroEvent =
   | 'action'
   | 'paint-stamps'
   | 'undo-stroke'
+  | 'camera-sync'
+  | 'request-state'
+  | 'canvas-state'
   | 'change-object'
   | 'settings'
   | 'clear-canvas'
@@ -117,6 +120,9 @@ export class AiroConnection {
       'action',
       'paint-stamps',
       'undo-stroke',
+      'camera-sync',
+      'request-state',
+      'canvas-state',
       'change-object',
       'settings',
       'clear-canvas',
