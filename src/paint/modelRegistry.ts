@@ -8,6 +8,16 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+// Spray painting fires dozens of rays per frame (path samples x cone rays).
+// A linear triangle scan per ray would melt the frame budget on 20k-triangle
+// models, so every loaded geometry gets a BVH and raycasts go through it.
+// The lib's bundled module augmentation lags its own export types, hence the
+// casts; runtime behaviour is the documented prototype patch.
+(THREE.BufferGeometry.prototype as any).computeBoundsTree = computeBoundsTree;
+(THREE.BufferGeometry.prototype as any).disposeBoundsTree = disposeBoundsTree;
+(THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
 import { TargetObjectType } from '../types';
 import { OBJECT_BY_ID } from './objectCatalog';
 import { makeGroupPaintable, PaintUniforms, setPrimerMix } from './paintMaterial';
@@ -43,6 +53,16 @@ export function modelUrl(id: string): string {
  * normalising here keeps camera framing, tool hover distances and spray cone
  * geometry consistent across every object.
  */
+/** Builds BVHs for every mesh under `root` so painting raycasts stay cheap. */
+export function buildRaycastAcceleration(root: THREE.Object3D) {
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.isMesh && mesh.geometry && !(mesh.geometry as any).boundsTree) {
+      (mesh.geometry as any).computeBoundsTree({ maxLeafTris: 24 });
+    }
+  });
+}
+
 function normalise(root: THREE.Object3D, targetSize: number): { radius: number; center: THREE.Vector3 } {
   root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
@@ -97,6 +117,7 @@ export function loadModel(
         if (yaw) root.rotation.y = yaw;
 
         const paintBlocks = makeGroupPaintable(root, paintTexture);
+        buildRaycastAcceleration(root);
         resolve({ id, root, paintBlocks, radius, center });
       },
       undefined,

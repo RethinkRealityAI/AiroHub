@@ -1,23 +1,20 @@
 /**
  * The phone controller.
  *
- * Mode organisation is the main change here. Previously there were two
- * top-level modes plus a hidden 2D pad reachable only through an unlabelled
- * icon, a tool switcher, and a nine-item object strip all stacked above the
- * stage — five competing control rows on a phone screen.
+ * Three peer modes on one segmented switch:
  *
- * Now there is one primary segmented control with three peer modes:
+ *   Aim   — the phone *is* the spray can. The real 3D can/brush floats on
+ *           screen, rotating live with the motion sensors; hold anywhere to
+ *           paint on the studio canvas where you're pointing.
+ *   Paint — touch the 3D object directly on your own screen.
+ *   Pad   — flat trackpad mapped straight onto the texture.
  *
- *   Aim   — point the phone, hold to spray (gyro)
- *   Paint — touch the 3D object directly on your own screen
- *   Pad   — flat trackpad, for when you just want to draw
- *
- * Everything else lives in a single bottom dock, and object selection moved to
- * a bottom sheet so it scales past nine objects and is comfortable to hit.
+ * All painting produces surface-anchored stamps (see `SurfacePainter`), which
+ * are applied locally and broadcast so every peer's texture stays identical.
  */
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Canvas, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { PerspectiveCamera, OrbitControls } from '@react-three/drei';
 import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
@@ -30,10 +27,13 @@ import { sounds } from '../utils/audio';
 import { PaintTarget, Finish } from '../scene/PaintTarget';
 import { StudioEnvironment } from '../scene/StudioEnvironment';
 import { useFitCamera } from '../scene/useFitCamera';
+import { HandheldTool } from '../scene/HandheldTool';
+import { SurfacePainter } from '../scene/SurfacePainter';
 import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
 import { ColorWell } from '../ui/ColorWell';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
+import { StampBatcher, StampPacket, PaintStamp, BatchContext, packStamps, unpackStamps } from '../paint/stamps';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
 import { AimTracker, ShakeDetector } from '../utils/motion';
@@ -46,7 +46,47 @@ const MOTION_HZ = 30;
 const MOTION_INTERVAL = 1000 / MOTION_HZ;
 
 /* ------------------------------------------------------------------
-   On-device 3D preview (Paint mode)
+   Aim mode: the handheld 3D tool scene
+   ------------------------------------------------------------------ */
+
+function AimStage({
+  tool,
+  color,
+  pressed,
+  shaking,
+  trackerRef,
+}: {
+  tool: 'spray' | 'brush';
+  color: string;
+  pressed: boolean;
+  shaking: boolean;
+  trackerRef: React.MutableRefObject<AimTracker>;
+}) {
+  const getOrientation = useCallback(
+    (out: THREE.Quaternion) => trackerRef.current.getRelativeQuaternion(out),
+    [trackerRef]
+  );
+
+  return (
+    <>
+      <PerspectiveCamera makeDefault position={[0, 0, 4.6]} fov={46} />
+      <StudioEnvironment intensity={0.5} />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[4, 7, 5]} intensity={1.9} />
+      <directionalLight position={[-5, -2, 3]} intensity={0.6} color={color} />
+      <HandheldTool
+        tool={tool}
+        color={color}
+        pressed={pressed}
+        shaking={shaking}
+        getOrientation={getOrientation}
+      />
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------
+   Paint mode: on-device 3D preview with surface painting
    ------------------------------------------------------------------ */
 
 interface PreviewProps {
@@ -54,9 +94,10 @@ interface PreviewProps {
   paintSurface: PaintSurface;
   finish: Finish;
   color: string;
+  tool: 'spray' | 'brush';
   size: number;
   interaction: 'paint' | 'orbit';
-  onPaint: (type: 'start' | 'move' | 'end', u: number, v: number) => void;
+  onStamps: (stamps: PaintStamp[], state: 'start' | 'paint' | 'end', context?: BatchContext) => void;
   orbitRef: React.MutableRefObject<any>;
   onLoadingChange: (loading: boolean) => void;
 }
@@ -66,68 +107,79 @@ function PreviewStage({
   paintSurface,
   finish,
   color,
+  tool,
   size,
   interaction,
-  onPaint,
+  onStamps,
   orbitRef,
   onLoadingChange,
 }: PreviewProps) {
-  const { camera, raycaster, gl } = useThree();
+  const { camera, gl, size: viewport } = useThree();
   const meshRegistry = useRef<THREE.Object3D[]>([]);
-  const painting = useRef(false);
   const reticle = useRef<THREE.Mesh>(null);
-  const ndc = useMemo(() => new THREE.Vector2(), []);
   const [subjectRadius, setSubjectRadius] = useState<number | null>(null);
-  // Phones are tall and narrow, so framing has to come from the live aspect
-  // ratio rather than a fixed camera distance.
   useFitCamera(subjectRadius, orbitRef, 1.04);
 
-  const castAt = useCallback(
-    (clientX: number, clientY: number) => {
-      const rect = gl.domElement.getBoundingClientRect();
-      ndc.set(
-        ((clientX - rect.left) / rect.width) * 2 - 1,
-        -((clientY - rect.top) / rect.height) * 2 + 1
-      );
-      raycaster.setFromCamera(ndc, camera);
-      const hits = raycaster.intersectObjects(meshRegistry.current, true);
-      return hits.length > 0 ? hits[0] : null;
-    },
-    [camera, gl, ndc, raycaster]
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+
+  const painter = useMemo(
+    () =>
+      new SurfacePainter(
+        () => meshRegistry.current,
+        () => camera,
+        () => viewportRef.current.height
+      ),
+    [camera]
   );
+  useEffect(() => painter.invalidate(), [painter, objectId]);
+
+  /** Latest pointer NDC; painting is driven per-frame like the studio. */
+  const pointerNdc = useRef(new THREE.Vector2());
+  const pointerDown = useRef(false);
+
+  const liveConfig = useRef({ tool, size, color });
+  useEffect(() => {
+    liveConfig.current = { tool, size, color };
+  }, [tool, size, color]);
 
   useEffect(() => {
     if (interaction !== 'paint') return;
     const canvas = gl.domElement;
 
-    const handle = (event: PointerEvent, phase: 'start' | 'move') => {
-      const hit = castAt(event.clientX, event.clientY);
-      if (!hit) return;
-      if (reticle.current) {
-        reticle.current.position.copy(hit.point);
-        reticle.current.visible = true;
-      }
-      if (!hit.uv) return;
-      onPaint(phase, hit.uv.x, 1 - hit.uv.y);
+    const toNdc = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      pointerNdc.current.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
     };
 
     const onDown = (event: PointerEvent) => {
       event.preventDefault();
       canvas.setPointerCapture(event.pointerId);
-      painting.current = true;
-      handle(event, 'start');
+      toNdc(event);
+      pointerDown.current = true;
+      painter.begin({ tool: liveConfig.current.tool, size: liveConfig.current.size });
+      onStamps([], 'start');
+      navigator.vibrate?.(12);
+      if (liveConfig.current.tool === 'spray') sounds.startSpray(1);
+      else sounds.startBrush();
     };
     const onMove = (event: PointerEvent) => {
-      if (!painting.current) return;
+      if (!pointerDown.current) return;
       event.preventDefault();
-      handle(event, 'move');
+      toNdc(event);
     };
     const onUp = (event: PointerEvent) => {
-      if (!painting.current) return;
-      painting.current = false;
+      if (!pointerDown.current) return;
+      pointerDown.current = false;
+      painter.end();
+      onStamps([], 'end');
       if (reticle.current) reticle.current.visible = false;
       canvas.releasePointerCapture?.(event.pointerId);
-      onPaint('end', 0, 0);
+      sounds.stopSpray();
+      sounds.stopBrush();
     };
 
     canvas.addEventListener('pointerdown', onDown);
@@ -139,8 +191,42 @@ function PreviewStage({
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerup', onUp);
       canvas.removeEventListener('pointercancel', onUp);
+      painter.end();
     };
-  }, [castAt, gl, interaction, onPaint]);
+  }, [gl, interaction, painter, onStamps]);
+
+  useFrame(() => {
+    if (interaction !== 'paint') return;
+    const painting = pointerDown.current;
+    const result = painter.frame(pointerNdc.current.x, pointerNdc.current.y, painting);
+
+    if (result.stamps.length > 0) {
+      const { tool: t, color: c } = liveConfig.current;
+      paintSurface.applyStamps(result.stamps, t, c);
+      paintSurface.commit();
+      const last = result.hit;
+      onStamps(
+        result.stamps,
+        'paint',
+        last
+          ? {
+              cursor: [last.uv.x, last.uv.y],
+              point: [last.point.x, last.point.y, last.point.z],
+              normal: [last.normal.x, last.normal.y, last.normal.z],
+            }
+          : undefined
+      );
+    }
+
+    if (reticle.current) {
+      if (result.hit && painting) {
+        reticle.current.visible = true;
+        reticle.current.position.copy(result.hit.point);
+      } else {
+        reticle.current.visible = false;
+      }
+    }
+  });
 
   return (
     <>
@@ -167,75 +253,12 @@ function PreviewStage({
       />
 
       <mesh ref={reticle} visible={false}>
-        <sphereGeometry args={[0.16 * size, 14, 14]} />
+        <sphereGeometry args={[0.14 * size, 14, 14]} />
         <meshBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
       </mesh>
     </>
   );
 }
-
-/* ------------------------------------------------------------------
-   Aim mode visual
-   ------------------------------------------------------------------ */
-
-/**
- * Aim mode deliberately shows a 2D HUD rather than a 3D can. The player is
- * looking at the *studio* screen while aiming, so the phone only needs to
- * confirm state at a glance — and dropping the second WebGL context saves a
- * meaningful amount of battery and heat on a phone.
- */
-const AimHud: React.FC<{
-  tool: 'spray' | 'brush';
-  color: string;
-  active: boolean;
-  calibrated: boolean;
-  aim: { x: number; y: number };
-}> = ({ tool, color, active, calibrated, aim }) => (
-  <div className="absolute inset-0 grid place-items-center pointer-events-none">
-    {/* Aim field: shows where the studio cursor currently sits. */}
-    <div className="relative w-[74vw] max-w-[320px] aspect-square">
-      <div className="absolute inset-0 rounded-[32px] border border-white/12 bg-white/[0.03]" />
-      <div className="absolute inset-x-6 top-1/2 h-px bg-white/10" />
-      <div className="absolute inset-y-6 left-1/2 w-px bg-white/10" />
-
-      <motion.div
-        className="absolute w-16 h-16 -ml-8 -mt-8 rounded-full grid place-items-center"
-        animate={{ left: `${aim.x * 100}%`, top: `${aim.y * 100}%` }}
-        transition={{ type: 'spring', stiffness: 260, damping: 30 }}
-      >
-        <div
-          className="absolute inset-0 rounded-full border-2 transition-all"
-          style={{
-            borderColor: color,
-            boxShadow: active ? `0 0 34px ${color}, inset 0 0 18px ${color}55` : `0 0 12px ${color}55`,
-            transform: active ? 'scale(1.16)' : 'scale(1)',
-          }}
-        />
-        <div
-          className="w-2.5 h-2.5 rounded-full transition-transform"
-          style={{ background: color, transform: active ? 'scale(1.7)' : 'scale(1)' }}
-        />
-      </motion.div>
-    </div>
-
-    <div className="absolute bottom-6 inset-x-0 flex justify-center px-6">
-      <div
-        className={`glass glass-sheen rounded-full px-4 py-2 text-[10px] font-bold tracking-[0.14em] uppercase text-center transition-colors ${
-          active ? 'text-white' : 'text-white/60'
-        }`}
-        style={active ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
-      >
-        {active
-          ? tool === 'spray'
-            ? 'Spraying'
-            : 'Painting'
-          : calibrated
-          ? 'Hold anywhere to paint'
-          : 'Tap centre to calibrate'}
-      </div>
-    </div>
-  </div>
-);
 
 /* ------------------------------------------------------------------
    Controller
@@ -270,7 +293,6 @@ export default function ControllerView() {
 
   const [sensorState, setSensorState] = useState<'idle' | 'granted' | 'denied' | 'unsupported'>('idle');
   const [triggerActive, setTriggerActive] = useState(false);
-  const [calibrated, setCalibrated] = useState(false);
   const [shaking, setShaking] = useState(false);
   const [muted, setMuted] = useState(false);
   const [objectLoading, setObjectLoading] = useState(false);
@@ -281,14 +303,12 @@ export default function ControllerView() {
   const [nameDraft, setNameDraft] = useState('');
 
   const orbitRef = useRef<any>(null);
-  const tracker = useRef(new AimTracker());
+  const trackerRef = useRef(new AimTracker());
   const shakeDetector = useRef(new ShakeDetector());
   const lastMotionSend = useRef(0);
   const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Live mirrors of state that the sensor callbacks read. Those callbacks are
-  // registered once, so closing over React state directly would freeze them at
-  // their initial values.
+  // Live mirrors read by sensor callbacks (registered once).
   const live = useRef({ tool, color, toolSize, mode });
   useEffect(() => {
     live.current = { tool, color, toolSize, mode };
@@ -296,6 +316,7 @@ export default function ControllerView() {
 
   const padRef = useRef<HTMLCanvasElement>(null);
   const padDrawing = useRef(false);
+  const padLast = useRef<{ u: number; v: number } | null>(null);
 
   /* --------------------------- connection --------------------------- */
 
@@ -328,6 +349,15 @@ export default function ControllerView() {
       paintSurface.clear();
       paintSurface.commit();
     });
+    // Paint made elsewhere (studio pointer, motion players, other phones)
+    // keeps this phone's local texture identical to the studio's.
+    conn.on('paint-stamps', (packet: StampPacket) => {
+      if (packet.playerId === playerIdRef.current) return;
+      if (packet.stamps?.length) {
+        paintSurface.applyStamps(unpackStamps(packet.stamps), packet.tool, packet.color);
+        paintSurface.commit();
+      }
+    });
 
     return () => {
       conn.disconnect();
@@ -336,14 +366,46 @@ export default function ControllerView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, paintSurface]);
 
+  /** Broadcasts stamps painted on this phone. */
+  const stampBatcher = useMemo(
+    () =>
+      new StampBatcher((stamps, state, context) => {
+        connectionRef.current?.emit('paint-stamps', {
+          playerId: playerIdRef.current,
+          playerName: player.name,
+          tool: live.current.tool,
+          color: live.current.color,
+          state,
+          stamps: packStamps(stamps),
+          ...context,
+        } satisfies StampPacket as unknown as Record<string, unknown>);
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  useEffect(() => () => stampBatcher.dispose(), [stampBatcher]);
+
+  const handleStamps = useCallback(
+    (stamps: PaintStamp[], state: 'start' | 'paint' | 'end', context?: BatchContext) => {
+      if (state === 'start') stampBatcher.begin();
+      if (stamps.length) stampBatcher.push(stamps, context);
+      if (state === 'end') stampBatcher.end();
+    },
+    [stampBatcher]
+  );
+
   /* ----------------------------- sensors ----------------------------- */
 
   const handleOrientation = useCallback((event: DeviceOrientationEvent) => {
     const { alpha, beta, gamma } = event;
     if (alpha === null || beta === null || gamma === null) return;
 
-    const sample = tracker.current.update(alpha, beta, gamma, performance.now());
-    setAim({ x: sample.x, y: sample.y });
+    const sample = trackerRef.current.update(alpha, beta, gamma, performance.now());
+    setAim((prev) =>
+      Math.abs(prev.x - sample.x) + Math.abs(prev.y - sample.y) > 0.002
+        ? { x: sample.x, y: sample.y }
+        : prev
+    );
 
     const now = performance.now();
     if (now - lastMotionSend.current < MOTION_INTERVAL) return;
@@ -420,8 +482,8 @@ export default function ControllerView() {
     []
   );
 
-  // Tell the studio which mode we are in, so it knows whether to derive paint
-  // from our cursor (aim) or apply the UVs we send (paint/pad).
+  // Tell the studio whether paint should be derived from our aim cursor
+  // (motion) or arrives as our own stamps (projection).
   useEffect(() => {
     const netMode = mode === 'aim' ? 'motion' : 'projection';
     connectionRef.current?.updatePresence({ mode: netMode, tool });
@@ -430,8 +492,7 @@ export default function ControllerView() {
   /* ------------------------------ actions ------------------------------ */
 
   const recalibrate = () => {
-    tracker.current.calibrate();
-    setCalibrated(true);
+    trackerRef.current.calibrate();
     sounds.playClick(1.8);
     navigator.vibrate?.([14, 28, 14]);
     connectionRef.current?.emit('calibrate', { playerId: playerIdRef.current });
@@ -439,10 +500,6 @@ export default function ControllerView() {
 
   const startTrigger = (event?: React.PointerEvent) => {
     event?.preventDefault();
-    if (!calibrated) {
-      recalibrate();
-      return;
-    }
     setTriggerActive(true);
     navigator.vibrate?.(22);
     if (live.current.tool === 'spray') sounds.startSpray(1);
@@ -470,41 +527,6 @@ export default function ControllerView() {
     });
   };
 
-  /** Shared by the 3D preview and the flat pad. */
-  const emitPaint = useCallback(
-    (type: 'start' | 'move' | 'end', u: number, v: number) => {
-      const { tool: t, color: c, toolSize: s } = live.current;
-
-      if (type === 'start') {
-        paintSurface.beginStroke('self');
-        navigator.vibrate?.(12);
-        if (t === 'spray') sounds.startSpray(1);
-        else sounds.startBrush();
-      } else if (type === 'end') {
-        paintSurface.endStroke('self');
-        sounds.stopSpray();
-        sounds.stopBrush();
-      }
-
-      if (type !== 'end') {
-        paintSurface.stroke('self', { x: u * CANVAS_RES, y: v * CANVAS_RES, pressure: 1 }, t, c, s);
-        paintSurface.commit();
-      }
-
-      connectionRef.current?.emit('projection-draw', {
-        playerId: playerIdRef.current,
-        playerName: player.name,
-        type,
-        tool: t,
-        x: u,
-        y: v,
-        color: c,
-        size: s,
-      });
-    },
-    [paintSurface, player.name]
-  );
-
   /* ------------------------------- flat pad ------------------------------- */
 
   const syncPadSize = useCallback(() => {
@@ -526,8 +548,7 @@ export default function ControllerView() {
     };
   }, [mode, syncPadSize]);
 
-  // The pad mirrors the shared paint layer so a player can see their own work
-  // without looking up at the studio screen.
+  // The pad mirrors the shared texture live.
   useEffect(() => {
     if (mode !== 'pad') return;
     let raf = 0;
@@ -554,11 +575,53 @@ export default function ControllerView() {
     };
   };
 
+  /**
+   * The pad maps 1:1 onto texture space (one continuous chart), so path
+   * resampling in UV space is exact here — unlike on the atlased models.
+   */
+  const padStroke = (u: number, v: number, isFirst: boolean) => {
+    const { tool: t, color: c, toolSize: s } = live.current;
+    const stamps: PaintStamp[] = [];
+    const baseR = t === 'spray' ? 34 * s : 22 * s;
+
+    const emitDab = (du: number, dv: number) => {
+      if (t === 'spray') {
+        for (let i = 0; i < 12; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const rand = Math.pow(Math.random(), 1.6);
+          stamps.push({
+            u: du + (Math.cos(angle) * rand * baseR) / CANVAS_RES,
+            v: dv + (Math.sin(angle) * rand * baseR) / CANVAS_RES,
+            r: 1.2 + Math.random() * 2.6,
+            o: (1 - rand * 0.5) * (0.3 + Math.random() * 0.3),
+          });
+        }
+      } else {
+        stamps.push({ u: du, v: dv, r: baseR, o: 0.85 });
+      }
+    };
+
+    const last = padLast.current;
+    if (isFirst || !last) {
+      emitDab(u, v);
+    } else {
+      const dist = Math.hypot(u - last.u, v - last.v) * CANVAS_RES;
+      const steps = Math.min(Math.max(Math.ceil(dist / (baseR * 0.35)), 1), 30);
+      for (let i = 1; i <= steps; i++) {
+        const t2 = i / steps;
+        emitDab(last.u + (u - last.u) * t2, last.v + (v - last.v) * t2);
+      }
+    }
+    padLast.current = { u, v };
+
+    paintSurface.applyStamps(stamps, t, c);
+    paintSurface.commit();
+    handleStamps(stamps, 'paint', { cursor: [u, v] });
+  };
+
   /* ------------------------------- gating ------------------------------- */
 
-  const needsPermission = sensorState === 'idle';
-
-  if (needsPermission) {
+  if (sensorState === 'idle') {
     return (
       <div className="fixed inset-0 stage-vignette text-white grid place-items-center p-6 safe-top safe-bottom">
         <GlassPanel className="w-full max-w-sm p-7 text-center">
@@ -567,8 +630,8 @@ export default function ControllerView() {
           </div>
           <h1 className="text-xl font-bold tracking-tight mb-1.5">Become the spray can</h1>
           <p className="text-[12px] text-white/55 leading-relaxed mb-6">
-            Allow motion access to aim by pointing your phone at the studio screen. You can also paint
-            directly on your own screen instead.
+            Allow motion access and your phone turns into the can — point it at the studio screen,
+            hold to spray, shake to rattle.
           </p>
           <button
             onClick={requestSensors}
@@ -675,7 +738,7 @@ export default function ControllerView() {
       {/* ------------------------------- stage ------------------------------- */}
       <main className="flex-1 relative min-h-0">
         <AnimatePresence mode="wait">
-          {/* -------- Aim -------- */}
+          {/* -------- Aim: the phone IS the can -------- */}
           {mode === 'aim' && (
             <motion.div
               key="aim"
@@ -690,11 +753,41 @@ export default function ControllerView() {
               onPointerLeave={stopTrigger}
               style={{
                 background: triggerActive
-                  ? `radial-gradient(circle at 50% 45%, ${color}2e 0%, transparent 62%)`
+                  ? `radial-gradient(circle at 50% 42%, ${color}30 0%, transparent 60%)`
                   : undefined,
               }}
             >
-              <AimHud tool={tool} color={color} active={triggerActive} calibrated={calibrated} aim={aim} />
+              {/* The handheld 3D tool, driven live by the motion sensors. */}
+              <div className="absolute inset-0 pointer-events-none">
+                <Canvas dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+                  <Suspense fallback={null}>
+                    <AimStage
+                      tool={tool}
+                      color={color}
+                      pressed={triggerActive}
+                      shaking={shaking}
+                      trackerRef={trackerRef}
+                    />
+                  </Suspense>
+                </Canvas>
+              </div>
+
+              {/* Mini aim map — mirrors where the studio cursor sits. */}
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none">
+                <div className="relative w-[92px] h-[64px] glass glass-sheen rounded-2xl overflow-hidden">
+                  <div className="absolute inset-x-3 top-1/2 h-px bg-white/15" />
+                  <div className="absolute inset-y-2 left-1/2 w-px bg-white/15" />
+                  <div
+                    className="absolute w-2.5 h-2.5 -ml-[5px] -mt-[5px] rounded-full transition-transform duration-75"
+                    style={{
+                      left: `${aim.x * 100}%`,
+                      top: `${aim.y * 100}%`,
+                      background: color,
+                      boxShadow: triggerActive ? `0 0 10px ${color}` : 'none',
+                    }}
+                  />
+                </div>
+              </div>
 
               <button
                 onClick={(e) => {
@@ -708,6 +801,21 @@ export default function ControllerView() {
                 <Crosshair size={12} className="text-[var(--color-airo-flame)]" />
                 Recentre
               </button>
+
+              <div className="absolute bottom-4 inset-x-0 flex justify-center px-6 pointer-events-none">
+                <div
+                  className={`glass glass-sheen rounded-full px-4 py-2 text-[10px] font-bold tracking-[0.14em] uppercase text-center transition-colors ${
+                    triggerActive ? 'text-white' : 'text-white/60'
+                  }`}
+                  style={triggerActive ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
+                >
+                  {triggerActive
+                    ? tool === 'spray'
+                      ? 'Spraying'
+                      : 'Painting'
+                    : 'Point at the screen · hold to paint'}
+                </div>
+              </div>
             </motion.div>
           )}
 
@@ -723,17 +831,18 @@ export default function ControllerView() {
             >
               <Canvas dpr={[1, 2]} gl={{ antialias: true }} className="absolute inset-0">
                 <Suspense fallback={null}>
-                <PreviewStage
-                  objectId={objectId}
-                  paintSurface={paintSurface}
-                  finish={finish}
-                  color={color}
-                  size={toolSize}
-                  interaction={interaction}
-                  onPaint={emitPaint}
-                  orbitRef={orbitRef}
-                  onLoadingChange={setObjectLoading}
-                />
+                  <PreviewStage
+                    objectId={objectId}
+                    paintSurface={paintSurface}
+                    finish={finish}
+                    color={color}
+                    tool={tool}
+                    size={toolSize}
+                    interaction={interaction}
+                    onStamps={handleStamps}
+                    orbitRef={orbitRef}
+                    onLoadingChange={setObjectLoading}
+                  />
                 </Suspense>
               </Canvas>
 
@@ -794,25 +903,36 @@ export default function ControllerView() {
                     e.preventDefault();
                     e.currentTarget.setPointerCapture(e.pointerId);
                     padDrawing.current = true;
+                    padLast.current = null;
+                    stampBatcher.begin();
+                    navigator.vibrate?.(12);
+                    if (live.current.tool === 'spray') sounds.startSpray(1);
+                    else sounds.startBrush();
                     const { u, v } = padCoords(e);
-                    emitPaint('start', u, v);
+                    padStroke(u, v, true);
                   }}
                   onPointerMove={(e) => {
                     if (!padDrawing.current) return;
                     e.preventDefault();
                     const { u, v } = padCoords(e);
-                    emitPaint('move', u, v);
+                    padStroke(u, v, false);
                   }}
                   onPointerUp={(e) => {
                     if (!padDrawing.current) return;
                     padDrawing.current = false;
+                    padLast.current = null;
                     e.currentTarget.releasePointerCapture?.(e.pointerId);
-                    emitPaint('end', 0, 0);
+                    stampBatcher.end();
+                    sounds.stopSpray();
+                    sounds.stopBrush();
                   }}
                   onPointerCancel={() => {
                     if (!padDrawing.current) return;
                     padDrawing.current = false;
-                    emitPaint('end', 0, 0);
+                    padLast.current = null;
+                    stampBatcher.end();
+                    sounds.stopSpray();
+                    sounds.stopBrush();
                   }}
                 />
                 <span className="absolute bottom-3 inset-x-0 text-center text-[9px] font-bold tracking-[0.14em] uppercase text-white/35 pointer-events-none">

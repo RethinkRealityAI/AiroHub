@@ -18,7 +18,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadModel } from '../paint/modelRegistry';
+import { loadToolRig, ToolRig } from './toolRig';
 import { NameTag } from './NameTag';
 
 export interface PlayerToolProps {
@@ -35,58 +35,6 @@ export interface PlayerToolProps {
   scale?: number;
 }
 
-interface ToolRig {
-  root: THREE.Group;
-  /** Distance from the model origin to its emitting tip, after alignment. */
-  tipOffset: number;
-}
-
-/**
- * Wraps a generated tool model so that:
- *   - its long axis runs along -Z (the direction it points)
- *   - its emitting tip sits at the wrapper origin
- *
- * Meshy has no notion of "this end is the nozzle", so the longest axis is
- * treated as the barrel and the tip is taken as the end of it.
- */
-function buildRig(source: THREE.Object3D, targetLength: number, flip: boolean): ToolRig {
-  const model = source.clone(true);
-  model.updateMatrixWorld(true);
-
-  const box = new THREE.Box3().setFromObject(model);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-
-  // Longest axis is the barrel/handle.
-  const axis = size.x > size.y && size.x > size.z ? 'x' : size.y > size.z ? 'y' : 'z';
-  const length = size[axis] || 1;
-  const scale = targetLength / length;
-
-  const aligner = new THREE.Group();
-  model.position.set(-center.x, -center.y, -center.z);
-  aligner.add(model);
-
-  // Rotate the barrel axis onto -Z.
-  if (axis === 'y') aligner.rotation.x = flip ? -Math.PI / 2 : Math.PI / 2;
-  else if (axis === 'x') aligner.rotation.y = flip ? -Math.PI / 2 : Math.PI / 2;
-  else if (flip) aligner.rotation.y = Math.PI;
-
-  const scaler = new THREE.Group();
-  scaler.scale.setScalar(scale);
-  scaler.add(aligner);
-
-  // Push the model back so its front face lands on the wrapper origin — that
-  // origin is what gets planted on the painted surface.
-  const tipOffset = (length * scale) / 2;
-  scaler.position.z = -tipOffset;
-
-  const root = new THREE.Group();
-  root.add(scaler);
-  return { root, tipOffset };
-}
-
-const TOOL_ASSET = { spray: 'tool-spraycan', brush: 'tool-brush' } as const;
-/** How far the body floats off the surface while painting. */
 const HOVER = { spray: 1.15, brush: 0.12 } as const;
 
 /**
@@ -128,17 +76,11 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({
 
   useEffect(() => {
     let cancelled = false;
-    const asset = TOOL_ASSET[tool];
-    // Tools are framed small; targetSize here is world units of barrel length.
-    loadModel(asset, null, tool === 'spray' ? 1.55 : 2.0)
-      .then((loaded) => {
-        if (cancelled) return;
-        setRigs((prev) => ({
-          ...prev,
-          [tool]: buildRig(loaded.root, tool === 'spray' ? 1.55 : 2.0, tool === 'spray'),
-        }));
+    loadToolRig(tool)
+      .then((rig) => {
+        if (!cancelled) setRigs((prev) => ({ ...prev, [tool]: rig }));
       })
-      .catch((err) => console.error(`[PlayerTool] ${asset} failed to load`, err));
+      .catch((err) => console.error(`[PlayerTool] ${tool} rig failed to load`, err));
     return () => {
       cancelled = true;
     };
@@ -211,7 +153,7 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({
           along -Z, so the band has to sit at negative Z to be *on* the tool
           rather than floating in front of its nozzle. */}
       {rig && (
-        <mesh position={[0, 0, -rig.tipOffset]}>
+        <mesh position={[0, 0, rig.length * 0.4]}>
           <torusGeometry args={[0.2, 0.05, 10, 24]} />
           <meshStandardMaterial
             color={color}

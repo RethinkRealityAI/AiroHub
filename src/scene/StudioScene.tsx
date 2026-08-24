@@ -2,19 +2,25 @@
  * The studio 3D stage.
  *
  * Owns raycasting, paint application and the per-frame smoothing of remote
- * player cursors. Networking and UI state live in `CanvasView`; this component
- * only consumes them.
+ * player cursors. All painting flows through `SurfacePainter`, which turns
+ * aim movement into surface-anchored stamps — the studio derives paint for
+ * itself (mouse) and for motion-mode phone players (their aim cursor), applies
+ * it locally, and broadcasts the resulting stamps so every peer's texture
+ * converges. Touch-paint stamps arriving *from* phones are applied by
+ * `CanvasView`'s network layer, not here.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, PerspectiveCamera, ContactShadows } from '@react-three/drei';
 import * as THREE from 'three';
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
+import { PaintStamp } from '../paint/stamps';
 import { PaintTarget, Finish } from './PaintTarget';
 import { PlayerTool } from './PlayerTool';
 import { SprayMist } from './SprayMist';
 import { StudioEnvironment } from './StudioEnvironment';
 import { useFitCamera } from './useFitCamera';
+import { SurfacePainter } from './SurfacePainter';
 import { SmoothedCursor } from '../utils/motion';
 import { TargetObjectType, PlayerState } from '../types';
 import { sounds } from '../utils/audio';
@@ -34,6 +40,16 @@ export interface StudioSceneProps {
   hostColor: string;
   hostSize: number;
   onObjectLoadingChange: (loading: boolean) => void;
+  /**
+   * Called with every batch of stamps painted locally (host or motion players)
+   * so the network layer can rebroadcast them to the other peers.
+   */
+  onStampsPainted: (
+    playerId: string,
+    tool: 'spray' | 'brush',
+    color: string,
+    stamps: PaintStamp[]
+  ) => void;
 }
 
 export const StudioScene: React.FC<StudioSceneProps> = ({
@@ -50,90 +66,44 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
   hostColor,
   hostSize,
   onObjectLoadingChange,
+  onStampsPainted,
 }) => {
-  const { camera, raycaster, gl } = useThree();
+  const { camera, gl, size } = useThree();
   const meshRegistry = useRef<THREE.Object3D[]>([]);
   const [subjectRadius, setSubjectRadius] = useState<number | null>(null);
   useFitCamera(subjectRadius, orbitRef);
 
-  /** Per-player receive-side smoothing of the networked cursor. */
+  /** One painter per active painter identity (host + each remote player). */
+  const painters = useRef(new Map<string, SurfacePainter>());
+  /** Receive-side smoothing of each remote cursor. */
   const cursors = useRef(new Map<string, SmoothedCursor>());
 
   const hostDragging = useRef(false);
   const hostPointer = useRef(new THREE.Vector2());
 
-  const scratch = useMemo(
-    () => ({
-      normal: new THREE.Vector3(),
-      toCamera: new THREE.Vector3(),
-      ndc: new THREE.Vector2(),
-      plane: new THREE.Plane(),
-      planeHit: new THREE.Vector3(),
-      camDir: new THREE.Vector3(),
-    }),
-    []
-  );
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
 
-  /** Casts through the current NDC point and paints where it lands. */
-  const castAndPaint = useCallback(
-    (
-      ndcX: number,
-      ndcY: number,
-      player: PlayerState,
-      shouldPaint: boolean
-    ) => {
-      scratch.ndc.set(ndcX, ndcY);
-      raycaster.setFromCamera(scratch.ndc, camera);
-
-      const hits =
-        meshRegistry.current.length > 0
-          ? raycaster.intersectObjects(meshRegistry.current, true)
-          : [];
-
-      if (hits.length > 0) {
-        const hit = hits[0];
-        scratch.normal.set(0, 0, 1);
-        if (hit.face) {
-          scratch.normal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld).normalize();
-        }
-        // Flip back-facing normals so the tool never buries itself in the mesh.
-        scratch.toCamera.subVectors(camera.position, hit.point).normalize();
-        if (scratch.normal.dot(scratch.toCamera) < 0) scratch.normal.negate();
-
-        player.surfacePoint = [hit.point.x, hit.point.y, hit.point.z];
-        player.surfaceNormal = [scratch.normal.x, scratch.normal.y, scratch.normal.z];
-        player.worldPos = [hit.point.x, hit.point.y, hit.point.z];
-
-        if (shouldPaint && hit.uv) {
-          paintSurface.stroke(
-            player.id,
-            {
-              x: hit.uv.x * CANVAS_RES,
-              // glTF UVs are bottom-up; the paint canvas is top-down.
-              y: (1 - hit.uv.y) * CANVAS_RES,
-              pressure: player.pressure || 1,
-            },
-            player.tool,
-            player.color,
-            player.sizeMultiplier ?? 1
-          );
-        }
-        return true;
+  const getPainter = useCallback(
+    (id: string) => {
+      let painter = painters.current.get(id);
+      if (!painter) {
+        painter = new SurfacePainter(
+          () => meshRegistry.current,
+          () => camera,
+          () => sizeRef.current.height
+        );
+        painters.current.set(id, painter);
       }
-
-      // Nothing under the cursor: park the tool on the plane through the origin
-      // so it stays visible and correctly oriented instead of snapping away.
-      scratch.camDir.copy(camera.position).normalize();
-      scratch.plane.setFromNormalAndCoplanarPoint(scratch.camDir, new THREE.Vector3(0, 0, 0));
-      if (raycaster.ray.intersectPlane(scratch.plane, scratch.planeHit)) {
-        player.worldPos = [scratch.planeHit.x, scratch.planeHit.y, scratch.planeHit.z];
-        player.surfacePoint = undefined;
-        player.surfaceNormal = undefined;
-      }
-      return false;
+      return painter;
     },
-    [camera, raycaster, paintSurface, scratch]
+    [camera]
   );
+
+  // Texel-density caches go stale when the object swaps.
+  useEffect(() => {
+    for (const painter of painters.current.values()) painter.invalidate();
+  }, [objectId, customGroup]);
 
   /* ----------------------- host pointer painting ----------------------- */
 
@@ -155,7 +125,7 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       const host = playersRef.current.find((p) => p.isHost);
       if (!host) return;
       host.isPainting = true;
-      paintSurface.beginStroke(host.id);
+      getPainter(host.id).begin({ tool: host.tool, size: host.sizeMultiplier ?? 1 });
       if (host.tool === 'spray') sounds.startSpray(1);
       else sounds.startBrush();
     };
@@ -171,7 +141,7 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       const host = playersRef.current.find((p) => p.isHost);
       if (host) {
         host.isPainting = false;
-        paintSurface.endStroke(host.id);
+        getPainter(host.id).end();
       }
       sounds.stopSpray();
       sounds.stopBrush();
@@ -187,7 +157,7 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [gl, hostPainting, paintSurface, playersRef]);
+  }, [gl, hostPainting, getPainter, playersRef]);
 
   /* ------------------------------ frame ------------------------------ */
 
@@ -195,47 +165,77 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
     const roster = playersRef.current;
 
     for (const player of roster) {
+      let ndcX: number;
+      let ndcY: number;
+      let painting: boolean;
+
       if (player.isHost) {
-        // The host aims with the mouse, so no network smoothing is involved.
         player.tool = hostTool;
         player.color = hostColor;
         player.sizeMultiplier = hostSize;
-        castAndPaint(
-          hostPointer.current.x,
-          hostPointer.current.y,
-          player,
-          hostPainting && hostDragging.current
-        );
+        ndcX = hostPointer.current.x;
+        ndcY = hostPointer.current.y;
+        painting = hostPainting && hostDragging.current;
+      } else if (player.mode === 'projection') {
+        // Their tool position arrives with their stamp packets; nothing to
+        // derive here. Just make sure any stale painter is closed.
+        const painter = painters.current.get(player.id);
+        if (painter?.isActive) painter.end();
         continue;
+      } else {
+        let cursor = cursors.current.get(player.id);
+        if (!cursor) {
+          cursor = new SmoothedCursor();
+          cursors.current.set(player.id, cursor);
+        }
+        cursor.setTarget(player.cursorPx.x / CANVAS_RES, player.cursorPx.y / CANVAS_RES);
+        const smoothed = cursor.step(delta);
+        ndcX = smoothed.x * 2 - 1;
+        ndcY = -(smoothed.y * 2 - 1);
+        // The studio derives paint only for motion-mode (gyro) players; players
+        // painting by touch send their own surface-anchored stamps.
+        painting = player.isPainting && player.mode === 'motion';
       }
 
-      let cursor = cursors.current.get(player.id);
-      if (!cursor) {
-        cursor = new SmoothedCursor();
-        cursors.current.set(player.id, cursor);
+      const painter = getPainter(player.id);
+      if (painting && !painter.isActive) {
+        painter.begin({ tool: player.tool, size: player.sizeMultiplier ?? 1 });
+      } else if (!painting && painter.isActive) {
+        painter.end();
       }
-      cursor.setTarget(player.cursorPx.x / CANVAS_RES, player.cursorPx.y / CANVAS_RES);
-      const smoothed = cursor.step(delta);
 
-      // Projection-mode players paint via UVs sent from their own device, so
-      // the studio only positions their tool rather than re-deriving paint.
-      castAndPaint(
-        smoothed.x * 2 - 1,
-        -(smoothed.y * 2 - 1),
-        player,
-        player.isPainting && player.mode === 'motion'
-      );
+      const result = painter.frame(ndcX, ndcY, painting);
+
+      if (result.stamps.length > 0) {
+        paintSurface.applyStamps(result.stamps, player.tool, player.color);
+        onStampsPainted(player.id, player.tool, player.color, result.stamps);
+      }
+
+      // Position the floating tool from the central hit.
+      if (result.hit) {
+        player.surfacePoint = [result.hit.point.x, result.hit.point.y, result.hit.point.z];
+        player.surfaceNormal = [result.hit.normal.x, result.hit.normal.y, result.hit.normal.z];
+        player.worldPos = [result.hit.point.x, result.hit.point.y, result.hit.point.z];
+      } else {
+        // Off-model: park the tool on the origin plane so it stays visible.
+        player.surfacePoint = undefined;
+        player.surfaceNormal = undefined;
+        player.worldPos = [ndcX * 7, ndcY * 5, 2.5];
+      }
     }
 
-    // Prune smoothers for players who have left.
-    if (cursors.current.size > roster.length + 2) {
+    // Drop painters and smoothers for players who have left.
+    if (painters.current.size > roster.length + 2) {
       const live = new Set(roster.map((p) => p.id));
+      for (const id of [...painters.current.keys()]) {
+        if (!live.has(id)) painters.current.delete(id);
+      }
       for (const id of [...cursors.current.keys()]) {
         if (!live.has(id)) cursors.current.delete(id);
       }
     }
 
-    // Single texture upload per frame regardless of how many players painted.
+    // One texture upload per frame no matter how many players painted.
     paintSurface.commit();
   });
 
@@ -258,8 +258,6 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
         }
       />
 
-      {/* Image-based lighting makes the generated PBR materials read properly;
-          the directional keys then add shape and colour. */}
       <StudioEnvironment intensity={0.62} />
       <ambientLight intensity={0.35} />
       <directionalLight position={[9, 14, 10]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />

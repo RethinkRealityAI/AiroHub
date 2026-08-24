@@ -24,9 +24,16 @@ const VIEWPORTS = [
 
 const problems = [];
 
+// Chromium does not read HTTPS_PROXY on its own. Shooting a deployed URL from
+// a sandboxed runner therefore needs the proxy passed explicitly; the proxy CA
+// is already in the browser trust store, so TLS verification stays on.
+const PROXY = process.env.HTTPS_PROXY || process.env.https_proxy;
+const useProxy = PROXY && !/^https?:\/\/(127\.0\.0\.1|localhost)/.test(BASE);
+
 const browser = await chromium.launch({
   executablePath: CHROME,
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
+  ...(useProxy ? { proxy: { server: PROXY, bypass: '127.0.0.1,localhost' } } : {}),
 });
 
 /** Opens a page with error capture wired up. */

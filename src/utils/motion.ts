@@ -159,6 +159,19 @@ export class AimTracker {
    */
   gain = 1 / (50 * DEG2RAD);
 
+  /**
+   * Copies the latest calibrated device rotation, for driving the on-screen
+   * 3D tool. Identity until the first orientation sample arrives.
+   */
+  getRelativeQuaternion(out: THREE.Quaternion): THREE.Quaternion {
+    return out.copy(this.relative);
+  }
+
+  /** True once at least one orientation sample has been processed. */
+  get hasFix(): boolean {
+    return this.hasReference;
+  }
+
   /** Marks the current pose as dead centre. */
   calibrate() {
     this.reference.copy(this.q);

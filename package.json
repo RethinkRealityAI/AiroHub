@@ -30,6 +30,7 @@
     "react-dom": "^19.0.1",
     "react-router-dom": "^7.18.2",
     "three": "^0.185.1",
+    "three-mesh-bvh": "^0.9.14",
     "uuid": "^14.0.2",
     "vite": "^6.2.3"
   },

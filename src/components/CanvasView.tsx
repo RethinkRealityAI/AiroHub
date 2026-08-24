@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
+import { StampBatcher, StampPacket, PaintStamp, packStamps, unpackStamps } from '../paint/stamps';
 import { StudioScene } from '../scene/StudioScene';
 import { Finish } from '../scene/PaintTarget';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
@@ -31,7 +32,7 @@ import { prefetchModels } from '../paint/modelRegistry';
 import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
 import { sounds } from '../utils/audio';
 import { parseUploaded3DModel } from '../utils/model3dLoader';
-import { TargetObjectType, PlayerState, ProjectionDrawData, Uploaded3DModelInfo } from '../types';
+import { TargetObjectType, PlayerState, Uploaded3DModelInfo } from '../types';
 
 const STYLE_PRESETS = [
   { id: 'cyberpunk', name: 'Cyberpunk', icon: '⚡', desc: 'Neon grids and chromatic flare.', accent: '#22D3EE' },
@@ -111,6 +112,44 @@ export default function CanvasView() {
   const connectionRef = useRef<AiroConnection | null>(null);
   const controllerUrl = `${window.location.origin}/controller/${roomId}`;
 
+  /**
+   * Rebroadcasts stamps the studio painted (host pointer strokes and the paint
+   * it derives for motion-aiming phones) so controllers' local textures track
+   * the studio's. One batcher per painter identity, keyed with the tool+colour
+   * the batch was painted with.
+   */
+  const stampBatchers = useRef(
+    new Map<string, { batcher: StampBatcher; tool: 'spray' | 'brush'; color: string }>()
+  );
+  const broadcastStamps = useCallback(
+    (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[]) => {
+      let entry = stampBatchers.current.get(playerId);
+      if (!entry || entry.tool !== tool || entry.color !== color) {
+        entry?.batcher.dispose();
+        const batcher = new StampBatcher((batch, state) => {
+          connectionRef.current?.emit('paint-stamps', {
+            playerId,
+            tool,
+            color,
+            state,
+            stamps: packStamps(batch),
+          } satisfies StampPacket as unknown as Record<string, unknown>);
+        });
+        entry = { batcher, tool, color };
+        stampBatchers.current.set(playerId, entry);
+        entry.batcher.begin();
+      }
+      entry.batcher.push(stamps);
+    },
+    []
+  );
+  useEffect(
+    () => () => {
+      for (const { batcher } of stampBatchers.current.values()) batcher.dispose();
+    },
+    []
+  );
+
   /* --------------------------- networking --------------------------- */
 
   useEffect(() => {
@@ -180,12 +219,11 @@ export default function CanvasView() {
       if (color) player.color = color;
       if (typeof size === 'number') player.sizeMultiplier = size;
       player.isPainting = painting;
+      player.mode = 'motion';
       if (painting) {
-        paintSurface.beginStroke(player.id);
         if (player.tool === 'spray') sounds.startSpray(1);
         else sounds.startBrush();
       } else {
-        paintSurface.endStroke(player.id);
         sounds.stopSpray();
         sounds.stopBrush();
       }
@@ -193,37 +231,41 @@ export default function CanvasView() {
       setPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, isPainting: painting } : p)));
     });
 
-    // Controllers drawing directly on their own 3D preview send UV coordinates,
-    // which are applied here verbatim so both screens stay identical.
-    conn.on('projection-draw', (data: ProjectionDrawData) => {
-      const { playerId, x, y, type, tool, color, size } = data;
-      const id = playerId || 'remote';
-      const player = playersRef.current.find((p) => p.id === id);
+    // Phones painting by touch resolve their own surface raycasts and send the
+    // resulting stamps; the studio applies them verbatim so every peer's
+    // texture is identical.
+    conn.on('paint-stamps', (packet: StampPacket) => {
+      const { playerId, tool, color, state, stamps, cursor, point, normal } = packet;
+      const player = playersRef.current.find((p) => p.id === playerId);
       if (player) {
-        player.cursorPx.x = x * CANVAS_RES;
-        player.cursorPx.y = y * CANVAS_RES;
         player.tool = tool || player.tool;
         if (color) player.color = color;
-        player.isPainting = type !== 'end';
         player.mode = 'projection';
+        player.isPainting = state !== 'end';
+        if (cursor) {
+          player.cursorPx.x = cursor[0] * CANVAS_RES;
+          player.cursorPx.y = cursor[1] * CANVAS_RES;
+        }
+        // Touch-painting phones know their true surface contact; use it to
+        // place their floating tool instead of guessing from a screen ray.
+        if (point) {
+          player.worldPos = point;
+          player.surfacePoint = point;
+          player.surfaceNormal = normal ?? [0, 0, 1];
+        }
+        player.lastActive = Date.now();
       }
-      if (type === 'start') {
-        paintSurface.beginStroke(id);
+      if (state === 'start') {
         if (tool === 'spray') sounds.startSpray(1);
         else sounds.startBrush();
-      } else if (type === 'end') {
-        paintSurface.endStroke(id);
+      } else if (state === 'end') {
         sounds.stopSpray();
         sounds.stopBrush();
-        return;
       }
-      paintSurface.stroke(
-        id,
-        { x: x * CANVAS_RES, y: y * CANVAS_RES, pressure: 1 },
-        tool || 'spray',
-        color || '#FF4D1C',
-        size || 1
-      );
+      if (stamps?.length) {
+        paintSurface.applyStamps(unpackStamps(stamps), tool, color);
+        paintSurface.commit();
+      }
     });
 
     conn.on('change-object', ({ objectType }) => {
@@ -258,9 +300,25 @@ export default function CanvasView() {
       }
     });
 
+    // Test hook (only with ?debug in the URL): lets automated verification
+    // drive the remote-player path without a live network.
+    if (new URLSearchParams(window.location.search).has('debug')) {
+      (window as any).__airoSim = (event: string, payload: unknown) =>
+        conn.simulateIncoming(event as any, payload);
+      (window as any).__airoProbe = () =>
+        playersRef.current.map((p) => ({
+          id: p.id,
+          cursor: { ...p.cursorPx },
+          painting: p.isPainting,
+          mode: p.mode,
+          world: [...p.worldPos],
+        }));
+    }
+
     return () => {
       conn.disconnect();
       connectionRef.current = null;
+      delete (window as any).__airoSim;
       sounds.stopSpray();
       sounds.stopBrush();
     };
@@ -478,6 +536,7 @@ export default function CanvasView() {
           hostColor={hostColor}
           hostSize={hostSize}
           onObjectLoadingChange={setObjectLoading}
+          onStampsPainted={broadcastStamps}
         />
         </Suspense>
       </Canvas>

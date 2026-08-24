@@ -28,7 +28,7 @@ export const SLOT_COLORS = ['#FF4D1C', '#22D3EE', '#A78BFA', '#34D399'];
 export type AiroEvent =
   | 'motion'
   | 'action'
-  | 'projection-draw'
+  | 'paint-stamps'
   | 'change-object'
   | 'settings'
   | 'clear-canvas'
@@ -114,7 +114,7 @@ export class AiroConnection {
     const FORWARDED: AiroEvent[] = [
       'motion',
       'action',
-      'projection-draw',
+      'paint-stamps',
       'change-object',
       'settings',
       'clear-canvas',
@@ -240,6 +240,15 @@ export class AiroConnection {
         console.error(`[realtime] handler for "${event}" threw`, err);
       }
     }
+  }
+
+  /**
+   * Dispatches an event locally as if it had arrived from the network.
+   * Exists for automated end-to-end tests in environments whose sandboxes
+   * block WebSockets; it exercises the identical handler path.
+   */
+  simulateIncoming(event: AiroEvent, payload: unknown) {
+    this.dispatch(event, payload);
   }
 
   disconnect() {

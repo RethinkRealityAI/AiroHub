@@ -72,19 +72,6 @@ export interface ActionData {
   pressure?: number;
 }
 
-export interface ProjectionDrawData {
-  roomId: string;
-  playerId?: string;
-  playerSlot?: number;
-  playerName?: string;
-  type: 'start' | 'move' | 'end';
-  tool: 'spray' | 'brush';
-  x: number; // 0 to 1 normalized
-  y: number; // 0 to 1 normalized
-  color: string;
-  size: number;
-}
-
 export interface SettingsData {
   roomId: string;
   playerId?: string;
