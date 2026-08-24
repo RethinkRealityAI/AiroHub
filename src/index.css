@@ -1,1 +1,244 @@
 @import "tailwindcss";
+
+/* ============================================================
+   AiroHub — liquid glass design system
+   ------------------------------------------------------------
+   The whole UI is built from a small set of translucent surfaces
+   that sit over the live 3D stage. Everything here is defined
+   once so panels, docks, sheets and controls stay consistent
+   between the studio screen and the phone controller.
+   ============================================================ */
+
+@theme {
+  --color-airo-void: #05050a;
+  --color-airo-ink: #0a0a12;
+  --color-airo-flame: #ff4d1c;
+  --color-airo-ember: #ffb020;
+  --color-airo-aqua: #22d3ee;
+  --color-airo-violet: #a78bfa;
+
+  --radius-glass: 26px;
+  --radius-glass-sm: 18px;
+
+  --font-sans: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Inter, system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+:root {
+  /* Tuned so a single blur value reads correctly on both the near-black
+     studio background and the brighter 3D stage behind the controller. */
+  --glass-tint: rgba(255, 255, 255, 0.075);
+  --glass-tint-strong: rgba(255, 255, 255, 0.115);
+  --glass-edge: rgba(255, 255, 255, 0.16);
+  --glass-edge-bright: rgba(255, 255, 255, 0.28);
+  --glass-blur: 30px;
+  --glass-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.85);
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-airo-void);
+  color: #f4f4f7;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Controller is a fixed-viewport app surface, never a scrolling document. */
+  overscroll-behavior: none;
+}
+
+/* Respect the notch / home indicator on iOS when the controller is
+   installed to the home screen or run in Safari's full-bleed mode. */
+.safe-top {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+.safe-bottom {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+/* ------------------------------------------------------------
+   Glass surfaces
+   ------------------------------------------------------------ */
+
+@utility glass {
+  position: relative;
+  background: var(--glass-tint);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  border: 1px solid var(--glass-edge);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 0 rgba(0, 0, 0, 0.35);
+}
+
+@utility glass-strong {
+  position: relative;
+  background: var(--glass-tint-strong);
+  backdrop-filter: blur(40px) saturate(200%);
+  -webkit-backdrop-filter: blur(40px) saturate(200%);
+  border: 1px solid var(--glass-edge-bright);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.2),
+    inset 0 -1px 0 0 rgba(0, 0, 0, 0.4);
+}
+
+/* Modal surfaces need a near-opaque base as well as blur. A purely
+   translucent panel lets whatever it covers — the controller dock especially —
+   read straight through the text sitting on it. */
+@utility glass-modal {
+  position: relative;
+  background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.09),
+      rgba(255, 255, 255, 0.04)
+    ),
+    rgba(11, 11, 17, 0.965);
+  backdrop-filter: blur(42px) saturate(190%);
+  -webkit-backdrop-filter: blur(42px) saturate(190%);
+  border: 1px solid var(--glass-edge-bright);
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.92),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.18);
+}
+
+/* The specular sweep that sells the "liquid" part of liquid glass:
+   a soft light band across the top edge of a panel. */
+@utility glass-sheen {
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(
+      160deg,
+      rgba(255, 255, 255, 0.22) 0%,
+      rgba(255, 255, 255, 0.06) 22%,
+      rgba(255, 255, 255, 0) 46%
+    );
+    mix-blend-mode: screen;
+  }
+}
+
+/* ------------------------------------------------------------
+   Controls
+   ------------------------------------------------------------ */
+
+@utility tap {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1), opacity 160ms,
+    background-color 160ms, border-color 160ms, color 160ms;
+  &:active {
+    transform: scale(0.94);
+  }
+}
+
+/* iOS-style segmented control track. The moving pill itself is a
+   separate absolutely-positioned element animated by Motion. */
+@utility segmented {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  gap: 2px;
+  border-radius: 9999px;
+  background: rgba(10, 10, 18, 0.55);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1),
+    0 8px 24px -8px rgba(0, 0, 0, 0.8);
+}
+
+@utility label-caps {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Hide scrollbars on horizontally scrolling chip rows without
+   losing the ability to scroll them. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Ambient colour wash behind the 3D stage. */
+@utility stage-vignette {
+  background:
+    radial-gradient(ellipse 120% 80% at 50% 0%, rgba(255, 77, 28, 0.1), transparent 60%),
+    radial-gradient(ellipse 100% 70% at 20% 100%, rgba(34, 211, 238, 0.09), transparent 60%),
+    radial-gradient(ellipse 100% 70% at 85% 90%, rgba(167, 139, 250, 0.08), transparent 60%),
+    var(--color-airo-void);
+}
+
+input[type="range"].airo-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 30px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"].airo-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+input[type="range"].airo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 24px;
+  height: 24px;
+  margin-top: -9px;
+  border-radius: 999px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+}
+input[type="range"].airo-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+input[type="range"].airo-slider::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+}
+
+@keyframes airo-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+.airo-breathe {
+  animation: airo-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

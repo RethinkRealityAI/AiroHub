@@ -1,1092 +1,993 @@
-import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+/**
+ * The phone controller.
+ *
+ * Mode organisation is the main change here. Previously there were two
+ * top-level modes plus a hidden 2D pad reachable only through an unlabelled
+ * icon, a tool switcher, and a nine-item object strip all stacked above the
+ * stage — five competing control rows on a phone screen.
+ *
+ * Now there is one primary segmented control with three peer modes:
+ *
+ *   Aim   — point the phone, hold to spray (gyro)
+ *   Paint — touch the 3D object directly on your own screen
+ *   Pad   — flat trackpad, for when you just want to draw
+ *
+ * Everything else lives in a single bottom dock, and object selection moved to
+ * a bottom sheet so it scales past nine objects and is comfortable to hit.
+ */
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { io, Socket } from 'socket.io-client';
-import { Canvas, useThree, useFrame } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { PerspectiveCamera, OrbitControls } from '@react-three/drei';
+import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
 import {
-  Crosshair,
-  SprayCan,
-  PenTool,
-  Sparkles,
-  Volume2,
-  VolumeX,
-  Trash2,
-  Smartphone,
-  Edit3,
-  User,
-  Rotate3d,
-  Move,
-  Layers,
-  MousePointer,
+  Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
+  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand,
 } from 'lucide-react';
+
 import { sounds } from '../utils/audio';
-import { PhoneTool3D } from './PhoneTool3D';
-import { DecorateObjects3D } from './DecorateObjects3D';
-import { RadialColorPicker } from './RadialColorPicker';
+import { PaintTarget, Finish } from '../scene/PaintTarget';
+import { StudioEnvironment } from '../scene/StudioEnvironment';
+import { useFitCamera } from '../scene/useFitCamera';
+import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
+import { ColorWell } from '../ui/ColorWell';
+import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
+import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
+import { OBJECT_BY_ID } from '../paint/objectCatalog';
+import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
+import { AimTracker, ShakeDetector } from '../utils/motion';
 import { TargetObjectType, PlayerInfo } from '../types';
 
-const TARGET_OBJECTS: { id: TargetObjectType; label: string; icon: string }[] = [
-  { id: 'easel', label: 'Easel', icon: '🎨' },
-  { id: 'skateboard', label: 'Skate', icon: '🛹' },
-  { id: 'subway', label: 'Train', icon: '🚇' },
-  { id: 'boombox', label: 'Boombox', icon: '📻' },
-  { id: 'wall', label: 'Wall', icon: '🧱' },
-  { id: 'helmet', label: 'Helmet', icon: '🪖' },
-  { id: 'sneaker', label: 'Sneaker', icon: '👟' },
-  { id: 'vinyltoy', label: 'Toy', icon: '🧸' },
-  { id: 'sculpture', label: 'Bust', icon: '🗿' },
-];
+type ControllerMode = 'aim' | 'paint' | 'pad';
 
-const CANVAS_RES = 2048;
+/** Motion send rate. Higher just burns realtime quota; the studio interpolates. */
+const MOTION_HZ = 30;
+const MOTION_INTERVAL = 1000 / MOTION_HZ;
 
-/**
- * 3D Interactive Drawing Scene for Controller Draw Mode
- */
-interface Controller3DDrawSceneProps {
-  targetObject: TargetObjectType;
-  canvasTexture: THREE.CanvasTexture | null;
-  selectedTool: 'spray' | 'brush';
-  selectedColor: string;
-  toolSize: number;
-  drawSubMode: 'paint' | 'rotate';
-  onDrawEvent: (type: 'start' | 'move' | 'end', normX: number, normY: number) => void;
-  orbitControlsRef: React.MutableRefObject<any>;
+/* ------------------------------------------------------------------
+   On-device 3D preview (Paint mode)
+   ------------------------------------------------------------------ */
+
+interface PreviewProps {
+  objectId: TargetObjectType;
+  paintSurface: PaintSurface;
+  finish: Finish;
+  color: string;
+  size: number;
+  interaction: 'paint' | 'orbit';
+  onPaint: (type: 'start' | 'move' | 'end', u: number, v: number) => void;
+  orbitRef: React.MutableRefObject<any>;
+  onLoadingChange: (loading: boolean) => void;
 }
 
-function Controller3DDrawScene({
-  targetObject,
-  canvasTexture,
-  selectedTool,
-  selectedColor,
-  toolSize,
-  drawSubMode,
-  onDrawEvent,
-  orbitControlsRef,
-}: Controller3DDrawSceneProps) {
-  const { camera, raycaster, scene } = useThree();
-  const objGroupRef = useRef<THREE.Group>(null);
-  const isPaintingRef = useRef<boolean>(false);
-  const toolCursorRef = useRef<THREE.Group>(null);
-  const lastNormPos = useRef<{ x: number; y: number } | null>(null);
+function PreviewStage({
+  objectId,
+  paintSurface,
+  finish,
+  color,
+  size,
+  interaction,
+  onPaint,
+  orbitRef,
+  onLoadingChange,
+}: PreviewProps) {
+  const { camera, raycaster, gl } = useThree();
+  const meshRegistry = useRef<THREE.Object3D[]>([]);
+  const painting = useRef(false);
+  const reticle = useRef<THREE.Mesh>(null);
+  const ndc = useMemo(() => new THREE.Vector2(), []);
+  const [subjectRadius, setSubjectRadius] = useState<number | null>(null);
+  // Phones are tall and narrow, so framing has to come from the live aspect
+  // ratio rather than a fixed camera distance.
+  useFitCamera(subjectRadius, orbitRef, 1.04);
 
-  // Collect target meshes for precision raycasting
-  const getMeshes = useCallback(() => {
-    if (!objGroupRef.current) return [];
-    const meshes: THREE.Mesh[] = [];
-    objGroupRef.current.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) {
-        meshes.push(child as THREE.Mesh);
+  const castAt = useCallback(
+    (clientX: number, clientY: number) => {
+      const rect = gl.domElement.getBoundingClientRect();
+      ndc.set(
+        ((clientX - rect.left) / rect.width) * 2 - 1,
+        -((clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const hits = raycaster.intersectObjects(meshRegistry.current, true);
+      return hits.length > 0 ? hits[0] : null;
+    },
+    [camera, gl, ndc, raycaster]
+  );
+
+  useEffect(() => {
+    if (interaction !== 'paint') return;
+    const canvas = gl.domElement;
+
+    const handle = (event: PointerEvent, phase: 'start' | 'move') => {
+      const hit = castAt(event.clientX, event.clientY);
+      if (!hit) return;
+      if (reticle.current) {
+        reticle.current.position.copy(hit.point);
+        reticle.current.visible = true;
       }
-    });
-    return meshes;
-  }, []);
+      if (!hit.uv) return;
+      onPaint(phase, hit.uv.x, 1 - hit.uv.y);
+    };
 
-  const handlePointerDown = (e: any) => {
-    if (drawSubMode !== 'paint') return;
-    e.stopPropagation();
-    isPaintingRef.current = true;
+    const onDown = (event: PointerEvent) => {
+      event.preventDefault();
+      canvas.setPointerCapture(event.pointerId);
+      painting.current = true;
+      handle(event, 'start');
+    };
+    const onMove = (event: PointerEvent) => {
+      if (!painting.current) return;
+      event.preventDefault();
+      handle(event, 'move');
+    };
+    const onUp = (event: PointerEvent) => {
+      if (!painting.current) return;
+      painting.current = false;
+      if (reticle.current) reticle.current.visible = false;
+      canvas.releasePointerCapture?.(event.pointerId);
+      onPaint('end', 0, 0);
+    };
 
-    const meshes = getMeshes();
-    const intersects = raycaster.intersectObjects(meshes, true);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      let normX = 0.5;
-      let normY = 0.5;
-      if (hit.uv) {
-        normX = hit.uv.x;
-        normY = 1 - hit.uv.y;
-      } else {
-        // Fallback: estimate from bounding box
-        normX = 0.5;
-        normY = 0.5;
-      }
-      lastNormPos.current = { x: normX, y: normY };
-      onDrawEvent('start', normX, normY);
-
-      if (toolCursorRef.current) {
-        toolCursorRef.current.position.copy(hit.point);
-      }
-    }
-  };
-
-  const handlePointerMove = (e: any) => {
-    if (drawSubMode !== 'paint' || !isPaintingRef.current) return;
-    e.stopPropagation();
-
-    const meshes = getMeshes();
-    const intersects = raycaster.intersectObjects(meshes, true);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      let normX = 0.5;
-      let normY = 0.5;
-      if (hit.uv) {
-        normX = hit.uv.x;
-        normY = 1 - hit.uv.y;
-      } else if (lastNormPos.current) {
-        normX = lastNormPos.current.x;
-        normY = lastNormPos.current.y;
-      }
-      lastNormPos.current = { x: normX, y: normY };
-      onDrawEvent('move', normX, normY);
-
-      if (toolCursorRef.current) {
-        toolCursorRef.current.position.copy(hit.point);
-      }
-    }
-  };
-
-  const handlePointerUp = (e: any) => {
-    if (drawSubMode !== 'paint' || !isPaintingRef.current) return;
-    e.stopPropagation();
-    isPaintingRef.current = false;
-    onDrawEvent('end', 0, 0);
-    lastNormPos.current = null;
-  };
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove);
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointercancel', onUp);
+    };
+  }, [castAt, gl, interaction, onPaint]);
 
   return (
     <>
-      <PerspectiveCamera makeDefault position={[0, 0, 8.0]} fov={50} />
-
+      <PerspectiveCamera makeDefault position={[0, 1, 19]} fov={44} />
       <OrbitControls
-        ref={orbitControlsRef}
-        enabled={drawSubMode === 'rotate'}
+        ref={orbitRef}
+        enabled={interaction === 'orbit'}
         enableDamping
-        dampingFactor={0.08}
-        minDistance={3.5}
-        maxDistance={22}
+        dampingFactor={0.09}
+        enablePan={false}
+      />
+      <StudioEnvironment intensity={0.55} />
+      <ambientLight intensity={0.45} />
+      <directionalLight position={[6, 10, 8]} intensity={1.9} />
+      <directionalLight position={[-6, -2, 4]} intensity={0.55} color={color} />
+
+      <PaintTarget
+        objectId={objectId}
+        paintTexture={paintSurface.texture}
+        finish={finish}
+        meshRegistry={meshRegistry}
+        onLoadedChange={onLoadingChange}
+        onRadiusChange={setSubjectRadius}
       />
 
-      {/* 3D Studio Lights */}
-      <ambientLight intensity={0.7} />
-      <directionalLight position={[6, 10, 8]} intensity={1.6} />
-      <directionalLight position={[-6, -4, 4]} intensity={0.6} color={selectedColor} />
-      <spotLight position={[0, 6, 8]} angle={0.6} intensity={1.4} color="#ffffff" />
-
-      {/* Target Object Group with Pointer Events */}
-      <group
-        ref={objGroupRef}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-      >
-        <DecorateObjects3D objectType={targetObject} canvasTexture={canvasTexture} />
-      </group>
-
-      {/* 3D Live Surface Hover / Touch Indicator */}
-      <group ref={toolCursorRef} visible={drawSubMode === 'paint'}>
-        <mesh>
-          <sphereGeometry args={[0.12 * toolSize, 16, 16]} />
-          <meshBasicMaterial color={selectedColor} transparent opacity={0.8} />
-        </mesh>
-      </group>
+      <mesh ref={reticle} visible={false}>
+        <sphereGeometry args={[0.16 * size, 14, 14]} />
+        <meshBasicMaterial color={color} transparent opacity={0.85} depthTest={false} />
+      </mesh>
     </>
   );
 }
 
+/* ------------------------------------------------------------------
+   Aim mode visual
+   ------------------------------------------------------------------ */
+
+/**
+ * Aim mode deliberately shows a 2D HUD rather than a 3D can. The player is
+ * looking at the *studio* screen while aiming, so the phone only needs to
+ * confirm state at a glance — and dropping the second WebGL context saves a
+ * meaningful amount of battery and heat on a phone.
+ */
+const AimHud: React.FC<{
+  tool: 'spray' | 'brush';
+  color: string;
+  active: boolean;
+  calibrated: boolean;
+  aim: { x: number; y: number };
+}> = ({ tool, color, active, calibrated, aim }) => (
+  <div className="absolute inset-0 grid place-items-center pointer-events-none">
+    {/* Aim field: shows where the studio cursor currently sits. */}
+    <div className="relative w-[74vw] max-w-[320px] aspect-square">
+      <div className="absolute inset-0 rounded-[32px] border border-white/12 bg-white/[0.03]" />
+      <div className="absolute inset-x-6 top-1/2 h-px bg-white/10" />
+      <div className="absolute inset-y-6 left-1/2 w-px bg-white/10" />
+
+      <motion.div
+        className="absolute w-16 h-16 -ml-8 -mt-8 rounded-full grid place-items-center"
+        animate={{ left: `${aim.x * 100}%`, top: `${aim.y * 100}%` }}
+        transition={{ type: 'spring', stiffness: 260, damping: 30 }}
+      >
+        <div
+          className="absolute inset-0 rounded-full border-2 transition-all"
+          style={{
+            borderColor: color,
+            boxShadow: active ? `0 0 34px ${color}, inset 0 0 18px ${color}55` : `0 0 12px ${color}55`,
+            transform: active ? 'scale(1.16)' : 'scale(1)',
+          }}
+        />
+        <div
+          className="w-2.5 h-2.5 rounded-full transition-transform"
+          style={{ background: color, transform: active ? 'scale(1.7)' : 'scale(1)' }}
+        />
+      </motion.div>
+    </div>
+
+    <div className="absolute bottom-6 inset-x-0 flex justify-center px-6">
+      <div
+        className={`glass glass-sheen rounded-full px-4 py-2 text-[10px] font-bold tracking-[0.14em] uppercase text-center transition-colors ${
+          active ? 'text-white' : 'text-white/60'
+        }`}
+        style={active ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
+      >
+        {active
+          ? tool === 'spray'
+            ? 'Spraying'
+            : 'Painting'
+          : calibrated
+          ? 'Hold anywhere to paint'
+          : 'Tap centre to calibrate'}
+      </div>
+    </div>
+  </div>
+);
+
+/* ------------------------------------------------------------------
+   Controller
+   ------------------------------------------------------------------ */
+
 export default function ControllerView() {
   const { roomId } = useParams<{ roomId: string }>();
-  const [socket, setSocket] = useState<Socket | null>(null);
-  const [connected, setConnected] = useState(false);
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
-  const [isDesktopDevice, setIsDesktopDevice] = useState<boolean>(false);
 
-  // Multiplayer Player Identity State
-  const [myPlayerInfo, setMyPlayerInfo] = useState<PlayerInfo>({
-    id: '',
+  const paintSurface = useMemo(() => new PaintSurface(CANVAS_RES), []);
+  const connectionRef = useRef<AiroConnection | null>(null);
+  const playerIdRef = useRef(
+    `ctrl-${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`
+  );
+
+  const [mode, setMode] = useState<ControllerMode>('aim');
+  const [interaction, setInteraction] = useState<'paint' | 'orbit'>('paint');
+  const [tool, setTool] = useState<'spray' | 'brush'>('spray');
+  const [color, setColor] = useState('#FF4D1C');
+  const [toolSize, setToolSize] = useState(1);
+  const [objectId, setObjectId] = useState<TargetObjectType>('skateboard');
+  const [finish, setFinish] = useState<Finish>('original');
+
+  const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
+  const [player, setPlayer] = useState<PlayerInfo>({
+    id: playerIdRef.current,
     slot: 1,
-    name: 'Tagger 1',
-    color: '#FF3D00',
+    name: 'Tagger',
+    color: '#FF4D1C',
     tool: 'spray',
     mode: 'motion',
   });
-  const [taggerNameModal, setTaggerNameModal] = useState<boolean>(false);
-  const [editNameInput, setEditNameInput] = useState<string>('');
 
-  // Controller Core Mode: 'motion' (gyro pointer) vs 'projection' (draw on 3D object / canvas)
-  const [controllerMode, setControllerMode] = useState<'motion' | 'projection'>('motion');
-  const [drawViewType, setDrawViewType] = useState<'3d_model' | '2d_flat'>('3d_model');
-  const [drawSubMode, setDrawSubMode] = useState<'paint' | 'rotate'>('paint');
+  const [sensorState, setSensorState] = useState<'idle' | 'granted' | 'denied' | 'unsupported'>('idle');
+  const [triggerActive, setTriggerActive] = useState(false);
+  const [calibrated, setCalibrated] = useState(false);
+  const [shaking, setShaking] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [objectLoading, setObjectLoading] = useState(false);
+  const [aim, setAim] = useState({ x: 0.5, y: 0.5 });
 
-  // Tool states
-  const [selectedTool, setSelectedTool] = useState<'spray' | 'brush'>('spray');
-  const [selectedColor, setSelectedColor] = useState<string>('#FF3D00');
-  const [toolSize, setToolSize] = useState<number>(1.0);
-  const [targetObject, setTargetObject] = useState<TargetObjectType>('easel');
+  const [objectSheet, setObjectSheet] = useState(false);
+  const [nameSheet, setNameSheet] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
 
-  const [isTriggerActive, setIsTriggerActive] = useState<boolean>(false);
-  const [isShaking, setIsShaking] = useState<boolean>(false);
-  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const orbitRef = useRef<any>(null);
+  const tracker = useRef(new AimTracker());
+  const shakeDetector = useRef(new ShakeDetector());
+  const lastMotionSend = useRef(0);
+  const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Motion sensor states
-  const [orientationData, setOrientationData] = useState<{
-    alpha: number | null;
-    beta: number | null;
-    gamma: number | null;
-  }>({ alpha: null, beta: null, gamma: null });
-
-  const lastEmitTime = useRef(0);
-  const THROTTLE_MS = 14;
-  const lastShakeTime = useRef(0);
-  const shakeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // OrbitControls ref for 3D Draw View
-  const orbitControlsRef = useRef<any>(null);
-
-  // Local Texture & Buffer for Direct 3D Draw Rendering
-  const localCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const localCtxRef = useRef<CanvasRenderingContext2D | null>(null);
-  const [localTexture, setLocalTexture] = useState<THREE.CanvasTexture | null>(null);
-
-  // 2D Flat Pad Canvas Refs
-  const flatCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const flatCtxRef = useRef<CanvasRenderingContext2D | null>(null);
-  const isFlatDrawing = useRef<boolean>(false);
-  const lastFlatPos = useRef<{ x: number; y: number } | null>(null);
-
-  // Initialize Local 2048 Texture Buffer
+  // Live mirrors of state that the sensor callbacks read. Those callbacks are
+  // registered once, so closing over React state directly would freeze them at
+  // their initial values.
+  const live = useRef({ tool, color, toolSize, mode });
   useEffect(() => {
-    const canvas = document.createElement('canvas');
-    canvas.width = CANVAS_RES;
-    canvas.height = CANVAS_RES;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.fillStyle = '#0f0f14';
-      ctx.fillRect(0, 0, CANVAS_RES, CANVAS_RES);
-      localCtxRef.current = ctx;
-      localCanvasRef.current = canvas;
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.minFilter = THREE.LinearFilter;
-      tex.magFilter = THREE.LinearFilter;
-      setLocalTexture(tex);
+    live.current = { tool, color, toolSize, mode };
+  }, [tool, color, toolSize, mode]);
+
+  const padRef = useRef<HTMLCanvasElement>(null);
+  const padDrawing = useRef(false);
+
+  /* --------------------------- connection --------------------------- */
+
+  useEffect(() => {
+    if (!roomId) return;
+    if (!isRealtimeConfigured()) {
+      setConnection('offline');
+      return;
     }
 
-    // Detect if running on a desktop / non-motion device
-    const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    if (!hasTouch) {
-      setIsDesktopDevice(true);
-    }
-  }, []);
+    const conn = new AiroConnection(roomId, {
+      id: playerIdRef.current,
+      role: 'controller',
+      name: player.name,
+      tool: 'spray',
+      mode: 'motion',
+    }).connect();
+    connectionRef.current = conn;
 
-  // WebSocket Connection & Multiplayer Player Assignment
-  useEffect(() => {
-    const newSocket = io();
-
-    newSocket.on('connect', () => {
-      setConnected(true);
-      if (roomId) {
-        newSocket.emit('join-room', { roomId, role: 'controller', playerName: myPlayerInfo.name });
-      }
-    });
-
-    newSocket.on('disconnect', () => {
-      setConnected(false);
-    });
-
-    newSocket.on('player-assigned', (player: PlayerInfo) => {
-      setMyPlayerInfo(player);
-      setSelectedColor(player.color);
-      setSelectedTool(player.tool);
+    conn.on('connection', ({ status }) =>
+      setConnection(status === 'connected' ? 'connected' : status === 'error' ? 'offline' : 'connecting')
+    );
+    conn.on('player-assigned', (assigned: PlayerInfo) => {
+      setPlayer(assigned);
+      setColor(assigned.color);
       sounds.playClick(1.5);
     });
-
-    newSocket.on('change-object', (data) => {
-      if (data.objectType) setTargetObject(data.objectType);
+    conn.on('change-object', ({ objectType }) => objectType && setObjectId(objectType));
+    conn.on('clear-canvas', () => {
+      paintSurface.clear();
+      paintSurface.commit();
     });
-
-    newSocket.on('clear-canvas', () => {
-      clearLocalCanvas();
-    });
-
-    setSocket(newSocket);
 
     return () => {
-      newSocket.disconnect();
+      conn.disconnect();
+      connectionRef.current = null;
     };
-  }, [roomId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, paintSurface]);
 
-  // Motion Sensor Handlers
-  const handleOrientation = useCallback(
-    (event: DeviceOrientationEvent) => {
-      if (!socket || !roomId) return;
+  /* ----------------------------- sensors ----------------------------- */
 
-      const alpha = event.alpha;
-      const beta = event.beta;
-      const gamma = event.gamma;
+  const handleOrientation = useCallback((event: DeviceOrientationEvent) => {
+    const { alpha, beta, gamma } = event;
+    if (alpha === null || beta === null || gamma === null) return;
 
-      setOrientationData({ alpha, beta, gamma });
+    const sample = tracker.current.update(alpha, beta, gamma, performance.now());
+    setAim({ x: sample.x, y: sample.y });
 
-      const now = Date.now();
-      if (now - lastEmitTime.current < THROTTLE_MS) return;
+    const now = performance.now();
+    if (now - lastMotionSend.current < MOTION_INTERVAL) return;
+    lastMotionSend.current = now;
 
-      socket.emit('motion', {
-        roomId,
-        playerId: myPlayerInfo.id,
-        playerSlot: myPlayerInfo.slot,
-        playerName: myPlayerInfo.name,
-        color: selectedColor,
-        alpha,
-        beta,
-        gamma,
-      });
-      lastEmitTime.current = now;
-    },
-    [socket, roomId, myPlayerInfo, selectedColor]
-  );
+    connectionRef.current?.emit('motion', {
+      playerId: playerIdRef.current,
+      x: sample.x,
+      y: sample.y,
+      yaw: sample.yaw,
+      pitch: sample.pitch,
+      roll: sample.roll,
+    });
+  }, []);
 
-  const handleMotion = useCallback(
-    (event: DeviceMotionEvent) => {
-      if (!socket || !roomId) return;
-      const accel = event.accelerationIncludingGravity || event.acceleration;
-      if (!accel || accel.x === null || accel.y === null || accel.z === null) return;
+  const handleDeviceMotion = useCallback((event: DeviceMotionEvent) => {
+    const accel = event.accelerationIncludingGravity || event.acceleration;
+    if (!accel || accel.x === null || accel.y === null || accel.z === null) return;
 
-      const magnitude = Math.sqrt(accel.x * accel.x + accel.y * accel.y + accel.z * accel.z);
-      const now = Date.now();
+    const intensity = shakeDetector.current.push(accel.x, accel.y, accel.z, performance.now());
+    if (intensity <= 0) return;
 
-      if (magnitude > 18 && now - lastShakeTime.current > 260) {
-        lastShakeTime.current = now;
-        setIsShaking(true);
-        if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
-        shakeTimeoutRef.current = setTimeout(() => setIsShaking(false), 450);
+    setShaking(true);
+    if (shakeTimer.current) clearTimeout(shakeTimer.current);
+    shakeTimer.current = setTimeout(() => setShaking(false), 450);
 
-        sounds.playCanRattle();
-        if (navigator.vibrate) navigator.vibrate([30, 20, 35, 15, 30]);
-        socket.emit('shake', { roomId, playerId: myPlayerInfo.id, intensity: magnitude });
-      }
-    },
-    [socket, roomId, myPlayerInfo]
-  );
+    sounds.playCanRattle();
+    navigator.vibrate?.([28, 18, 32, 14, 28]);
+    connectionRef.current?.emit('shake', { playerId: playerIdRef.current, intensity });
+  }, []);
 
-  const requestAccess = async () => {
-    if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
-      try {
-        const permission = await (DeviceOrientationEvent as any).requestPermission();
-        if (permission === 'granted') {
-          setPermissionGranted(true);
-          window.addEventListener('deviceorientation', handleOrientation);
-          if (typeof (DeviceMotionEvent as any).requestPermission === 'function') {
-            await (DeviceMotionEvent as any).requestPermission();
-          }
-          window.addEventListener('devicemotion', handleMotion);
-        } else {
-          setPermissionGranted(false);
-          setControllerMode('projection'); // fallback to Draw Mode if denied
+  const requestSensors = async () => {
+    const orientationApi = (DeviceOrientationEvent as any)?.requestPermission;
+    try {
+      if (typeof orientationApi === 'function') {
+        const result = await orientationApi.call(DeviceOrientationEvent);
+        if (result !== 'granted') {
+          setSensorState('denied');
+          setMode('paint');
+          return;
         }
-      } catch (error) {
-        console.error('Permission error:', error);
-        setPermissionGranted(false);
-        setControllerMode('projection');
+        const motionApi = (DeviceMotionEvent as any)?.requestPermission;
+        if (typeof motionApi === 'function') await motionApi.call(DeviceMotionEvent);
+      } else if (!('DeviceOrientationEvent' in window)) {
+        setSensorState('unsupported');
+        setMode('paint');
+        return;
       }
-    } else {
-      setPermissionGranted(true);
-      window.addEventListener('deviceorientation', handleOrientation);
-      window.addEventListener('devicemotion', handleMotion);
+      setSensorState('granted');
+      sounds.playClick(1.6);
+    } catch (err) {
+      console.error('[controller] sensor permission failed', err);
+      setSensorState('denied');
+      setMode('paint');
     }
   };
 
   useEffect(() => {
-    if (permissionGranted) {
-      window.addEventListener('deviceorientation', handleOrientation);
-      window.addEventListener('devicemotion', handleMotion);
-    }
+    if (sensorState !== 'granted') return;
+    window.addEventListener('deviceorientation', handleOrientation);
+    window.addEventListener('devicemotion', handleDeviceMotion);
     return () => {
       window.removeEventListener('deviceorientation', handleOrientation);
-      window.removeEventListener('devicemotion', handleMotion);
-      if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
+      window.removeEventListener('devicemotion', handleDeviceMotion);
     };
-  }, [permissionGranted, handleOrientation, handleMotion]);
+  }, [sensorState, handleOrientation, handleDeviceMotion]);
 
-  // Motion Mode Trigger Press
-  const handleTriggerDown = useCallback(
-    (e?: React.PointerEvent) => {
-      if (e) e.preventDefault();
-      setIsTriggerActive(true);
-      if (navigator.vibrate) navigator.vibrate(25);
-
-      if (selectedTool === 'spray') sounds.startSpray(1.0);
-      else sounds.startBrush();
-
-      if (socket && roomId) {
-        socket.emit('action', {
-          roomId,
-          playerId: myPlayerInfo.id,
-          playerSlot: myPlayerInfo.slot,
-          playerName: myPlayerInfo.name,
-          action: selectedTool,
-          state: 'start',
-          color: selectedColor,
-        });
-      }
-    },
-    [socket, roomId, selectedTool, selectedColor, myPlayerInfo]
-  );
-
-  const handleTriggerUp = useCallback(
-    (e?: React.PointerEvent) => {
-      if (e) e.preventDefault();
-      setIsTriggerActive(false);
-
-      if (selectedTool === 'spray') sounds.stopSpray();
-      else sounds.stopBrush();
-
-      if (socket && roomId) {
-        socket.emit('action', {
-          roomId,
-          playerId: myPlayerInfo.id,
-          playerSlot: myPlayerInfo.slot,
-          playerName: myPlayerInfo.name,
-          action: selectedTool,
-          state: 'stop',
-          color: selectedColor,
-        });
-      }
-    },
-    [socket, roomId, selectedTool, selectedColor, myPlayerInfo]
-  );
-
-  // Clear local texture
-  const clearLocalCanvas = () => {
-    if (localCtxRef.current && localCanvasRef.current) {
-      localCtxRef.current.fillStyle = '#0f0f14';
-      localCtxRef.current.fillRect(0, 0, CANVAS_RES, CANVAS_RES);
-      if (localTexture) localTexture.needsUpdate = true;
-    }
-    if (flatCtxRef.current && flatCanvasRef.current) {
-      const rect = flatCanvasRef.current.getBoundingClientRect();
-      flatCtxRef.current.fillStyle = '#0f0f14';
-      flatCtxRef.current.fillRect(0, 0, rect.width, rect.height);
-    }
-  };
-
-  // ==========================================================
-  // 3D MODEL DIRECT DRAW HANDLER (From 3D Mesh Raycaster)
-  // ==========================================================
-  const handle3DDrawEvent = (type: 'start' | 'move' | 'end', normX: number, normY: number) => {
-    const px = normX * CANVAS_RES;
-    const py = normY * CANVAS_RES;
-
-    const ctx = localCtxRef.current;
-    if (ctx && type !== 'end') {
-      if (selectedTool === 'spray') {
-        drawSprayBuffer(ctx, px, py, selectedColor, toolSize);
-      } else {
-        ctx.strokeStyle = selectedColor;
-        ctx.lineWidth = 18 * toolSize;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        ctx.arc(px, py, (18 * toolSize) / 2, 0, Math.PI * 2);
-        ctx.fillStyle = selectedColor;
-        ctx.fill();
-      }
-      if (localTexture) localTexture.needsUpdate = true;
-    }
-
-    if (type === 'start') {
-      if (navigator.vibrate) navigator.vibrate(15);
-      if (selectedTool === 'spray') sounds.startSpray(1.0);
-      else sounds.startBrush();
-    } else if (type === 'end') {
+  useEffect(
+    () => () => {
+      if (shakeTimer.current) clearTimeout(shakeTimer.current);
       sounds.stopSpray();
       sounds.stopBrush();
-    }
+    },
+    []
+  );
 
-    if (socket && roomId) {
-      socket.emit('projection-draw', {
-        roomId,
-        playerId: myPlayerInfo.id,
-        playerSlot: myPlayerInfo.slot,
-        playerName: myPlayerInfo.name,
+  // Tell the studio which mode we are in, so it knows whether to derive paint
+  // from our cursor (aim) or apply the UVs we send (paint/pad).
+  useEffect(() => {
+    const netMode = mode === 'aim' ? 'motion' : 'projection';
+    connectionRef.current?.updatePresence({ mode: netMode, tool });
+  }, [mode, tool]);
+
+  /* ------------------------------ actions ------------------------------ */
+
+  const recalibrate = () => {
+    tracker.current.calibrate();
+    setCalibrated(true);
+    sounds.playClick(1.8);
+    navigator.vibrate?.([14, 28, 14]);
+    connectionRef.current?.emit('calibrate', { playerId: playerIdRef.current });
+  };
+
+  const startTrigger = (event?: React.PointerEvent) => {
+    event?.preventDefault();
+    if (!calibrated) {
+      recalibrate();
+      return;
+    }
+    setTriggerActive(true);
+    navigator.vibrate?.(22);
+    if (live.current.tool === 'spray') sounds.startSpray(1);
+    else sounds.startBrush();
+    connectionRef.current?.emit('action', {
+      playerId: playerIdRef.current,
+      action: live.current.tool,
+      state: 'start',
+      color: live.current.color,
+      size: live.current.toolSize,
+    });
+  };
+
+  const stopTrigger = (event?: React.PointerEvent) => {
+    event?.preventDefault();
+    if (!triggerActive) return;
+    setTriggerActive(false);
+    sounds.stopSpray();
+    sounds.stopBrush();
+    connectionRef.current?.emit('action', {
+      playerId: playerIdRef.current,
+      action: live.current.tool,
+      state: 'stop',
+      color: live.current.color,
+    });
+  };
+
+  /** Shared by the 3D preview and the flat pad. */
+  const emitPaint = useCallback(
+    (type: 'start' | 'move' | 'end', u: number, v: number) => {
+      const { tool: t, color: c, toolSize: s } = live.current;
+
+      if (type === 'start') {
+        paintSurface.beginStroke('self');
+        navigator.vibrate?.(12);
+        if (t === 'spray') sounds.startSpray(1);
+        else sounds.startBrush();
+      } else if (type === 'end') {
+        paintSurface.endStroke('self');
+        sounds.stopSpray();
+        sounds.stopBrush();
+      }
+
+      if (type !== 'end') {
+        paintSurface.stroke('self', { x: u * CANVAS_RES, y: v * CANVAS_RES, pressure: 1 }, t, c, s);
+        paintSurface.commit();
+      }
+
+      connectionRef.current?.emit('projection-draw', {
+        playerId: playerIdRef.current,
+        playerName: player.name,
         type,
-        tool: selectedTool,
-        x: normX,
-        y: normY,
-        color: selectedColor,
-        size: toolSize,
+        tool: t,
+        x: u,
+        y: v,
+        color: c,
+        size: s,
       });
-    }
-  };
+    },
+    [paintSurface, player.name]
+  );
 
-  const drawSprayBuffer = (
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    color: string,
-    size: number
-  ) => {
-    const density = Math.floor(45 * size);
-    const radius = 35 * size;
-    ctx.fillStyle = color;
-    for (let i = 0; i < density; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.pow(Math.random(), 1.6) * radius;
-      const px = x + Math.cos(angle) * r;
-      const py = y + Math.sin(angle) * r;
-      ctx.globalAlpha = Math.random() * 0.55 + 0.25;
-      ctx.beginPath();
-      ctx.arc(px, py, Math.random() * 2.8 + 0.8, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1.0;
-  };
+  /* ------------------------------- flat pad ------------------------------- */
 
-  // Camera presets for 3D Draw View
-  const setControllerCameraAngle = (azimuth: number, polar: number) => {
-    if (!orbitControlsRef.current) return;
-    sounds.playClick(1.2);
-    orbitControlsRef.current.setAzimuthalAngle(azimuth);
-    orbitControlsRef.current.setPolarAngle(polar);
-    orbitControlsRef.current.update();
-  };
-
-  // ==========================================================
-  // 2D FLAT PAD DRAWING HANDLER (Optional Fallback)
-  // ==========================================================
-  const initFlatCanvas = useCallback(() => {
-    if (!flatCanvasRef.current) return;
-    const canvas = flatCanvasRef.current;
+  const syncPadSize = useCallback(() => {
+    const canvas = padRef.current;
+    if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 2;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.scale(dpr, dpr);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    flatCtxRef.current = ctx;
-
-    ctx.fillStyle = '#0f0f14';
-    ctx.fillRect(0, 0, rect.width, rect.height);
   }, []);
 
   useEffect(() => {
-    if (controllerMode === 'projection' && drawViewType === '2d_flat') {
-      setTimeout(initFlatCanvas, 40);
-    }
-  }, [controllerMode, drawViewType, initFlatCanvas]);
+    if (mode !== 'pad') return;
+    const raf = requestAnimationFrame(syncPadSize);
+    window.addEventListener('resize', syncPadSize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', syncPadSize);
+    };
+  }, [mode, syncPadSize]);
 
-  const handleFlatPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
-    isFlatDrawing.current = true;
-    const canvas = flatCanvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const normX = Math.max(0, Math.min(1, x / rect.width));
-    const normY = Math.max(0, Math.min(1, y / rect.height));
-    lastFlatPos.current = { x, y };
-
-    handle3DDrawEvent('start', normX, normY);
-  };
-
-  const handleFlatPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isFlatDrawing.current) return;
-    e.preventDefault();
-    const canvas = flatCanvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const normX = Math.max(0, Math.min(1, x / rect.width));
-    const normY = Math.max(0, Math.min(1, y / rect.height));
-    lastFlatPos.current = { x, y };
-
-    handle3DDrawEvent('move', normX, normY);
-  };
-
-  const handleFlatPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    isFlatDrawing.current = false;
-    lastFlatPos.current = null;
-    handle3DDrawEvent('end', 0, 0);
-  };
-
-  const handleModeSwitch = (mode: 'motion' | 'projection') => {
-    setControllerMode(mode);
-    sounds.playClick(1.2);
-    if (socket && roomId) {
-      socket.emit('calibrate', { roomId, playerId: myPlayerInfo.id });
-    }
-  };
-
-  const handleToolSelect = (tool: 'spray' | 'brush') => {
-    setSelectedTool(tool);
-    sounds.playClick(1.2);
-    if (navigator.vibrate) navigator.vibrate(15);
-    if (socket && roomId) {
-      socket.emit('settings', { roomId, playerId: myPlayerInfo.id, tool, color: selectedColor });
-    }
-  };
-
-  const handleColorSelect = (hex: string) => {
-    setSelectedColor(hex);
-    if (socket && roomId) {
-      socket.emit('settings', { roomId, playerId: myPlayerInfo.id, color: hex });
-    }
-  };
-
-  const handleObjectChange = (obj: TargetObjectType) => {
-    setTargetObject(obj);
-    sounds.playClick(1.3);
-    if (socket && roomId) {
-      socket.emit('change-object', { roomId, objectType: obj });
-      socket.emit('calibrate', { roomId, playerId: myPlayerInfo.id });
-    }
-  };
-
-  const handleSaveTaggerName = () => {
-    if (editNameInput.trim()) {
-      const newName = editNameInput.trim().slice(0, 12);
-      setMyPlayerInfo((prev) => ({ ...prev, name: newName }));
-      if (socket && roomId) {
-        socket.emit('settings', { roomId, playerId: myPlayerInfo.id, playerName: newName });
+  // The pad mirrors the shared paint layer so a player can see their own work
+  // without looking up at the studio screen.
+  useEffect(() => {
+    if (mode !== 'pad') return;
+    let raf = 0;
+    const draw = () => {
+      const canvas = padRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(paintSurface.canvas, 0, 0, canvas.width, canvas.height);
+        }
       }
-    }
-    setTaggerNameModal(false);
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [mode, paintSurface]);
+
+  const padCoords = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return {
+      u: Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1),
+      v: Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1),
+    };
   };
 
-  const handleRecenter = () => {
-    sounds.playClick(1.8);
-    if (navigator.vibrate) navigator.vibrate([15, 30, 15]);
-    if (socket && roomId) socket.emit('calibrate', { roomId, playerId: myPlayerInfo.id });
-  };
+  /* ------------------------------- gating ------------------------------- */
 
-  const handleClear = () => {
-    sounds.playWhoosh();
-    clearLocalCanvas();
-    if (navigator.vibrate) navigator.vibrate(40);
-    if (socket && roomId) socket.emit('clear-canvas', { roomId });
-  };
+  const needsPermission = sensorState === 'idle';
 
-  const toggleMute = () => {
-    const muted = sounds.toggleMute();
-    setIsMuted(muted);
-    if (!muted) sounds.playClick(1.2);
-  };
-
-  if (permissionGranted === null && !isDesktopDevice) {
+  if (needsPermission) {
     return (
-      <div className="min-h-screen bg-[#080808] text-[#D1D1D1] flex flex-col items-center justify-center p-6 text-center font-sans select-none">
-        <div className="w-20 h-20 bg-[#141414] rounded-2xl flex items-center justify-center text-[#FF3D00] mb-6 border border-[#222] shadow-[0_0_30px_rgba(255,61,0,0.25)]">
-          <SprayCan size={40} strokeWidth={1.5} />
-        </div>
-        <h1 className="text-2xl font-bold mb-2 text-white tracking-tighter">
-          AERO•CANVAS CONTROLLER
-        </h1>
-        <p className="text-[#888] mb-8 max-w-xs text-xs leading-relaxed">
-          Connect your device as a 3D spray can or paint brush with Gyro Motion or Interactive 3D Draw Mode.
-        </p>
-        <div className="flex flex-col gap-3 w-full max-w-xs">
+      <div className="fixed inset-0 stage-vignette text-white grid place-items-center p-6 safe-top safe-bottom">
+        <GlassPanel className="w-full max-w-sm p-7 text-center">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-[22px] bg-gradient-to-tr from-[#FF4D1C] to-[#FFB020] grid place-items-center shadow-[0_0_34px_rgba(255,77,28,0.5)]">
+            <SprayCan size={30} className="text-white" />
+          </div>
+          <h1 className="text-xl font-bold tracking-tight mb-1.5">Become the spray can</h1>
+          <p className="text-[12px] text-white/55 leading-relaxed mb-6">
+            Allow motion access to aim by pointing your phone at the studio screen. You can also paint
+            directly on your own screen instead.
+          </p>
           <button
-            onClick={requestAccess}
-            className="w-full py-4 bg-[#FF3D00] hover:bg-orange-600 rounded-xl text-[11px] font-bold uppercase tracking-widest text-white shadow-xl transition-all active:scale-95 flex items-center justify-center gap-2"
+            onClick={requestSensors}
+            className="tap w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-[12px] font-bold tracking-wide flex items-center justify-center gap-2 shadow-[0_10px_28px_-8px_rgba(255,77,28,0.8)] mb-2.5"
           >
             <Smartphone size={16} />
-            <span>Enable 3D Motion Sensors</span>
+            Enable motion aiming
           </button>
           <button
             onClick={() => {
-              setPermissionGranted(false);
-              setControllerMode('projection');
+              setSensorState('denied');
+              setMode('paint');
             }}
-            className="w-full py-3 bg-[#141414] hover:bg-[#1E1E1E] border border-[#2A2A2A] rounded-xl text-[10px] font-bold uppercase tracking-wider text-[#AAA] transition-all"
+            className="tap w-full py-3 rounded-2xl bg-white/[0.07] border border-white/12 text-[11px] font-semibold text-white/75"
           >
-            Use Direct 3D Draw / Pointer Mode
+            Just paint on my screen
           </button>
-        </div>
+          <p className="mt-4 text-[10px] font-mono text-white/30">ROOM {roomId}</p>
+        </GlassPanel>
       </div>
     );
   }
 
+  const sensorsReady = sensorState === 'granted';
+  const activeObject = OBJECT_BY_ID.get(objectId);
+
+  const modeOptions = [
+    { value: 'aim' as const, label: 'Aim', icon: <Crosshair size={13} />, accent: '#FF4D1C' },
+    { value: 'paint' as const, label: 'Paint', icon: <Pencil size={13} />, accent: '#22D3EE' },
+    { value: 'pad' as const, label: 'Pad', icon: <Square size={13} />, accent: '#A78BFA' },
+  ].filter((option) => option.value !== 'aim' || sensorsReady);
+
   return (
-    <div className="min-h-screen bg-[#080808] text-[#D1D1D1] flex flex-col fixed inset-0 overscroll-none touch-none font-sans select-none overflow-hidden">
-      {/* ========================================================
-          TOP BAR: ROOM & MULTIPLAYER PLAYER BADGE
-          ======================================================== */}
-      <header className="h-14 px-3 bg-[#0A0A0A] border-b border-[#1A1A1A] flex items-center justify-between z-30">
-        {/* Player Badge / Alias Customizer */}
+    <div className="fixed inset-0 stage-vignette text-white flex flex-col overflow-hidden touch-none select-none">
+      {/* ------------------------------ header ------------------------------ */}
+      <header className="shrink-0 px-3 pt-2 pb-2 flex items-center gap-2 safe-top z-30">
         <button
           onClick={() => {
-            setEditNameInput(myPlayerInfo.name);
-            setTaggerNameModal(true);
+            setNameDraft(player.name);
+            setNameSheet(true);
           }}
-          className="flex items-center space-x-1.5 bg-[#141414] px-2.5 py-1 rounded-full border border-[#222] hover:border-[#444] transition-all"
+          className="tap glass glass-sheen rounded-full pl-2 pr-2.5 py-1.5 flex items-center gap-1.5 min-w-0"
         >
-          <div
-            className="w-2.5 h-2.5 rounded-full animate-pulse shadow-sm"
-            style={{ backgroundColor: selectedColor }}
+          <span
+            className={`w-2.5 h-2.5 rounded-full shrink-0 ${triggerActive ? 'airo-breathe' : ''}`}
+            style={{ background: color }}
           />
-          <span className="font-mono text-[9px] font-bold uppercase tracking-wider text-white truncate max-w-[85px]">
-            {`P${myPlayerInfo.slot}: ${myPlayerInfo.name}`}
+          <span className="text-[11px] font-semibold truncate max-w-[92px]">
+            P{player.slot} {player.name}
           </span>
-          <User size={10} className="text-[#666]" />
+          <User size={10} className="text-white/40 shrink-0" />
         </button>
 
-        {/* Mode Switch: Gyro Motion vs 3D Draw */}
-        <div className="flex items-center bg-[#141414] p-0.5 rounded-lg border border-[#222]">
-          <button
-            onClick={() => handleModeSwitch('motion')}
-            className={`flex items-center gap-1 px-3 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all ${
-              controllerMode === 'motion'
-                ? 'bg-[#FF3D00] text-white shadow-sm'
-                : 'text-[#666] hover:text-white'
-            }`}
-          >
-            <Smartphone size={11} />
-            <span>3D Gyro</span>
-          </button>
-
-          <button
-            onClick={() => handleModeSwitch('projection')}
-            className={`flex items-center gap-1 px-3 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all ${
-              controllerMode === 'projection'
-                ? 'bg-[#06B6D4] text-white shadow-sm'
-                : 'text-[#666] hover:text-white'
-            }`}
-          >
-            <Edit3 size={11} />
-            <span>3D Draw</span>
-          </button>
+        <div className="flex-1 flex justify-center min-w-0">
+          <ObjectTrigger
+            objectId={objectId}
+            compact
+            onClick={() => {
+              setObjectSheet(true);
+              sounds.playClick(1.2);
+            }}
+          />
         </div>
 
-        {/* Recenter & Audio */}
-        <div className="flex items-center space-x-1">
-          {controllerMode === 'motion' && (
-            <button
-              onClick={handleRecenter}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-[#1A1A1A] border border-[#222] rounded-lg text-[9px] font-bold uppercase text-white active:scale-95"
-              title="Calibrate Center"
-            >
-              <Crosshair size={11} className="text-[#FF3D00]" />
-              <span>Zero</span>
-            </button>
-          )}
-
-          <button
-            onClick={toggleMute}
-            className="p-1.5 bg-[#141414] border border-[#222] rounded-lg text-[#888]"
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span
+            className="glass rounded-full w-8 h-8 grid place-items-center"
+            title={connection === 'connected' ? 'Connected' : 'Not connected'}
           >
-            {isMuted ? <VolumeX size={14} /> : <Volume2 size={14} className="text-[#FF3D00]" />}
-          </button>
+            {connection === 'connected' ? (
+              <Wifi size={13} className="text-emerald-400" />
+            ) : connection === 'connecting' ? (
+              <Loader2 size={13} className="animate-spin text-white/50" />
+            ) : (
+              <WifiOff size={13} className="text-amber-400" />
+            )}
+          </span>
+          <GlassIconButton
+            size={32}
+            onClick={() => setMuted(sounds.toggleMute())}
+            title={muted ? 'Unmute' : 'Mute'}
+          >
+            {muted ? <VolumeX size={13} /> : <Volume2 size={13} className="text-[var(--color-airo-flame)]" />}
+          </GlassIconButton>
         </div>
       </header>
 
-      {/* ========================================================
-          SUB-HEADER: TOOL SELECTOR & 3D OBJECT PICKER
-          ======================================================== */}
-      <div className="px-3 pt-2 pb-1.5 z-20 bg-[#0C0C0E] border-b border-[#1A1A1A] flex items-center justify-between gap-2">
-        {/* Tool Switch (Spray Can vs Paint Brush) */}
-        <div className="flex bg-[#16161C] p-0.5 rounded-lg border border-[#262630] flex-shrink-0">
-          <button
-            onClick={() => handleToolSelect('spray')}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all ${
-              selectedTool === 'spray'
-                ? 'bg-[#FF3D00] text-white shadow-[0_0_10px_rgba(255,61,0,0.3)]'
-                : 'text-[#777]'
-            }`}
-          >
-            <SprayCan size={12} />
-            <span>Spray</span>
-          </button>
-          <button
-            onClick={() => handleToolSelect('brush')}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all ${
-              selectedTool === 'brush'
-                ? 'bg-[#06B6D4] text-white shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                : 'text-[#777]'
-            }`}
-          >
-            <PenTool size={12} />
-            <span>Brush</span>
-          </button>
-        </div>
-
-        {/* 3D Target Object Quick Switch */}
-        <div className="flex items-center space-x-1 overflow-x-auto">
-          {TARGET_OBJECTS.map((obj) => (
-            <button
-              key={obj.id}
-              onClick={() => handleObjectChange(obj.id)}
-              className={`px-2 py-1 rounded-md text-[8px] font-bold uppercase transition-all flex items-center gap-1 flex-shrink-0 ${
-                targetObject === obj.id
-                  ? 'bg-[#282834] text-white border border-[#444]'
-                  : 'text-[#666] hover:text-white'
-              }`}
-            >
-              <span>{obj.icon}</span>
-              <span className="hidden xs:inline">{obj.label}</span>
-            </button>
-          ))}
-        </div>
+      {/* --------------------------- mode selector --------------------------- */}
+      <div className="shrink-0 px-3 pb-2 z-30">
+        <Segmented
+          layoutId="controller-mode"
+          size="lg"
+          className="w-full"
+          value={mode}
+          onChange={(next) => {
+            setMode(next);
+            sounds.playClick(1.25);
+            navigator.vibrate?.(10);
+          }}
+          options={modeOptions}
+        />
       </div>
 
-      {/* ========================================================
-          MODE A: 3D GYRO MOTION CONTROLLER (OR DESKTOP POINTER)
-          ======================================================== */}
-      {controllerMode === 'motion' && (
-        <main
-          className="flex-1 relative flex flex-col items-center justify-center cursor-pointer select-none overflow-hidden touch-none"
-          onPointerDown={handleTriggerDown}
-          onPointerUp={handleTriggerUp}
-          onPointerCancel={handleTriggerUp}
-          onPointerLeave={handleTriggerUp}
-          style={{
-            background: isTriggerActive
-              ? selectedTool === 'spray'
-                ? 'radial-gradient(circle at center, rgba(255,61,0,0.25) 0%, #080808 70%)'
-                : 'radial-gradient(circle at center, rgba(6,182,212,0.25) 0%, #080808 70%)'
-              : '#080808',
-          }}
-        >
-          {/* 3D Floating Tool Scene on Phone */}
-          <div className="absolute inset-0 pointer-events-none z-10">
-            <Canvas className="w-full h-full">
-              <PerspectiveCamera makeDefault position={[0, 0, 4.2]} fov={50} />
-              <ambientLight intensity={0.6} />
-              <directionalLight position={[5, 8, 5]} intensity={1.5} />
-              <directionalLight position={[-5, -2, 3]} intensity={0.5} color={selectedColor} />
-              <spotLight position={[0, 5, 4]} angle={0.6} intensity={1.2} color="#ffffff" />
-              <PhoneTool3D
-                tool={selectedTool}
-                isPressed={isTriggerActive}
-                color={selectedColor}
-                isShaking={isShaking}
-                orientation={orientationData}
-              />
-            </Canvas>
-          </div>
-
-          <div className="absolute bottom-20 left-0 right-0 flex flex-col items-center pointer-events-none z-20 px-4">
-            <span
-              className={`px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-[0.2em] transition-all text-center ${
-                isTriggerActive
-                  ? selectedTool === 'spray'
-                    ? 'bg-[#FF3D00] text-white shadow-[0_0_15px_#FF3D00]'
-                    : 'bg-[#06B6D4] text-white shadow-[0_0_15px_#06B6D4]'
-                  : 'bg-black/70 backdrop-blur border border-white/10 text-[#AAA]'
-              }`}
-            >
-              {isTriggerActive
-                ? selectedTool === 'spray'
-                  ? 'EMITTING AEROSOL...'
-                  : 'PAINTING STROKE...'
-                : isDesktopDevice
-                ? 'CLICK & HOLD SCREEN TO SPRAY'
-                : 'AIM PHONE & HOLD SCREEN TO SPRAY'}
-            </span>
-          </div>
-        </main>
-      )}
-
-      {/* ========================================================
-          MODE B: INTERACTIVE 3D OBJECT DRAWING VIEW
-          ======================================================== */}
-      {controllerMode === 'projection' && (
-        <div className="flex-1 relative flex flex-col bg-[#0A0A0E] overflow-hidden">
-          {/* Top Floating Control Bar for 3D Draw Mode */}
-          <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-30 pointer-events-auto">
-            {/* Draw vs Rotate 3D Object Switch */}
-            <div className="flex bg-black/80 backdrop-blur-md p-1 rounded-xl border border-[#2A2A38] shadow-xl">
-              <button
-                onClick={() => {
-                  setDrawSubMode('paint');
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase transition-all ${
-                  drawSubMode === 'paint'
-                    ? 'bg-cyan-500 text-black shadow-[0_0_12px_rgba(6,182,212,0.4)]'
-                    : 'text-[#888] hover:text-white'
-                }`}
-              >
-                <Edit3 size={11} />
-                <span>Draw on 3D</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setDrawSubMode('rotate');
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[9px] font-bold uppercase transition-all ${
-                  drawSubMode === 'rotate'
-                    ? 'bg-orange-500 text-white shadow-[0_0_12px_rgba(255,61,0,0.4)]'
-                    : 'text-[#888] hover:text-white'
-                }`}
-              >
-                <Rotate3d size={11} />
-                <span>Rotate 360°</span>
-              </button>
-            </div>
-
-            {/* Quick Camera Angle Buttons */}
-            {drawViewType === '3d_model' && (
-              <div className="flex items-center space-x-1 bg-black/80 backdrop-blur-md p-1 rounded-xl border border-[#2A2A38]">
-                <button
-                  onClick={() => setControllerCameraAngle(0, Math.PI / 2)}
-                  className="px-2 py-1 rounded bg-[#181822] hover:bg-[#252535] text-[8px] font-bold text-[#DDD]"
-                >
-                  Front
-                </button>
-                <button
-                  onClick={() => setControllerCameraAngle(1.3, Math.PI / 2)}
-                  className="px-2 py-1 rounded bg-[#181822] hover:bg-[#252535] text-[8px] font-bold text-[#DDD]"
-                >
-                  Side
-                </button>
-                <button
-                  onClick={() => setControllerCameraAngle(0, 0.2)}
-                  className="px-2 py-1 rounded bg-[#181822] hover:bg-[#252535] text-[8px] font-bold text-[#DDD]"
-                >
-                  Top
-                </button>
-              </div>
-            )}
-
-            {/* 3D vs 2D Pad Switch */}
-            <button
-              onClick={() => {
-                setDrawViewType((prev) => (prev === '3d_model' ? '2d_flat' : '3d_model'));
-                sounds.playClick(1.3);
+      {/* ------------------------------- stage ------------------------------- */}
+      <main className="flex-1 relative min-h-0">
+        <AnimatePresence mode="wait">
+          {/* -------- Aim -------- */}
+          {mode === 'aim' && (
+            <motion.div
+              key="aim"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className="absolute inset-0 touch-none"
+              onPointerDown={startTrigger}
+              onPointerUp={stopTrigger}
+              onPointerCancel={stopTrigger}
+              onPointerLeave={stopTrigger}
+              style={{
+                background: triggerActive
+                  ? `radial-gradient(circle at 50% 45%, ${color}2e 0%, transparent 62%)`
+                  : undefined,
               }}
-              className="p-2 bg-black/80 backdrop-blur-md border border-[#2A2A38] rounded-xl text-[#AAA] hover:text-white"
-              title={drawViewType === '3d_model' ? 'Switch to 2D Pad' : 'Switch to 3D Model'}
             >
-              <Layers size={13} />
-            </button>
-          </div>
+              <AimHud tool={tool} color={color} active={triggerActive} calibrated={calibrated} aim={aim} />
 
-          {/* 1. Direct 3D Object Stage */}
-          {drawViewType === '3d_model' ? (
-            <div className="flex-1 w-full h-full relative cursor-crosshair">
-              <Canvas className="w-full h-full">
-                <Controller3DDrawScene
-                  targetObject={targetObject}
-                  canvasTexture={localTexture}
-                  selectedTool={selectedTool}
-                  selectedColor={selectedColor}
-                  toolSize={toolSize}
-                  drawSubMode={drawSubMode}
-                  onDrawEvent={handle3DDrawEvent}
-                  orbitControlsRef={orbitControlsRef}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  recalibrate();
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                className="tap absolute top-3 right-3 glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-1.5 text-[10px] font-bold z-20"
+              >
+                <Crosshair size={12} className="text-[var(--color-airo-flame)]" />
+                Recentre
+              </button>
+            </motion.div>
+          )}
+
+          {/* -------- Paint on 3D -------- */}
+          {mode === 'paint' && (
+            <motion.div
+              key="paint"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className="absolute inset-0"
+            >
+              <Canvas dpr={[1, 2]} gl={{ antialias: true }} className="absolute inset-0">
+                <Suspense fallback={null}>
+                <PreviewStage
+                  objectId={objectId}
+                  paintSurface={paintSurface}
+                  finish={finish}
+                  color={color}
+                  size={toolSize}
+                  interaction={interaction}
+                  onPaint={emitPaint}
+                  orbitRef={orbitRef}
+                  onLoadingChange={setObjectLoading}
                 />
+                </Suspense>
               </Canvas>
 
-              <div className="absolute bottom-20 left-0 right-0 flex justify-center pointer-events-none z-10 px-4">
-                <span className="px-3.5 py-1.5 rounded-full bg-black/80 backdrop-blur-md border border-cyan-500/30 text-[9px] font-bold uppercase tracking-widest text-cyan-300 shadow-lg text-center">
-                  {drawSubMode === 'paint'
-                    ? `TOUCH & COLOR DIRECTLY ON ${targetObject.toUpperCase()}`
-                    : 'SWIPE SCREEN TO ROTATE 3D OBJECT'}
+              <div className="absolute top-3 inset-x-3 flex items-center justify-between gap-2 z-20">
+                <Segmented
+                  layoutId="controller-interaction"
+                  size="sm"
+                  value={interaction}
+                  onChange={(next) => {
+                    setInteraction(next);
+                    sounds.playClick(1.2);
+                  }}
+                  options={[
+                    { value: 'paint', label: 'Paint', icon: <Pencil size={11} />, accent: '#22D3EE' },
+                    { value: 'orbit', label: 'Rotate', icon: <Rotate3d size={11} />, accent: '#FF4D1C' },
+                  ]}
+                />
+                <AnimatePresence>
+                  {objectLoading && (
+                    <motion.span
+                      initial={{ opacity: 0, scale: 0.9 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      className="glass rounded-full px-2.5 py-1.5 flex items-center gap-1.5 text-[9px] font-semibold"
+                    >
+                      <Loader2 size={10} className="animate-spin" />
+                      Loading
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10 px-4">
+                <span className="glass glass-sheen rounded-full px-3.5 py-1.5 text-[9px] font-bold tracking-[0.14em] uppercase text-white/70 text-center">
+                  {interaction === 'paint'
+                    ? `Touch the ${activeObject?.short ?? 'object'} to paint`
+                    : 'Drag to orbit'}
                 </span>
               </div>
-            </div>
-          ) : (
-            /* 2. Optional 2D Flat Pad */
-            <div className="flex-1 w-full h-full relative flex flex-col">
-              <canvas
-                ref={flatCanvasRef}
-                className="flex-1 w-full h-full cursor-crosshair touch-none"
-                onPointerDown={handleFlatPointerDown}
-                onPointerMove={handleFlatPointerMove}
-                onPointerUp={handleFlatPointerUp}
-                onPointerCancel={handleFlatPointerUp}
-              />
-              <div className="absolute bottom-20 left-0 right-0 flex justify-center pointer-events-none z-10">
-                <span className="px-3 py-1 rounded-full bg-black/80 backdrop-blur border border-white/10 text-[9px] font-bold uppercase tracking-widest text-[#AAA]">
-                  2D FLAT PROJECTION PAD
-                </span>
-              </div>
-            </div>
+            </motion.div>
           )}
-        </div>
-      )}
 
-      {/* ========================================================
-          BOTTOM ACTIONS BAR (CLEAN & NON-INTERFERING)
-          ======================================================== */}
-      <footer className="p-3 bg-[#0A0A0A] border-t border-[#1A1A1A] flex items-center justify-between gap-2 z-30">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => {
-              setIsShaking(true);
-              if (shakeTimeoutRef.current) clearTimeout(shakeTimeoutRef.current);
-              shakeTimeoutRef.current = setTimeout(() => setIsShaking(false), 450);
-              sounds.playCanRattle();
-              if (navigator.vibrate) navigator.vibrate([30, 20, 35, 15, 30]);
-              if (socket && roomId) socket.emit('shake', { roomId, playerId: myPlayerInfo.id });
-            }}
-            className="py-2.5 px-3 bg-[#141414] hover:bg-[#1C1C1C] border border-[#222] rounded-xl flex items-center gap-1.5 text-white active:scale-95 transition-all"
-          >
-            <Sparkles size={13} className="text-[#FF3D00]" />
-            <span className="text-[9px] font-bold uppercase tracking-wider">Rattle</span>
-          </button>
+          {/* -------- Flat pad -------- */}
+          {mode === 'pad' && (
+            <motion.div
+              key="pad"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.16 }}
+              className="absolute inset-0 p-3"
+            >
+              <div className="relative w-full h-full rounded-[26px] overflow-hidden glass">
+                <canvas
+                  ref={padRef}
+                  className="absolute inset-0 w-full h-full touch-none"
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    padDrawing.current = true;
+                    const { u, v } = padCoords(e);
+                    emitPaint('start', u, v);
+                  }}
+                  onPointerMove={(e) => {
+                    if (!padDrawing.current) return;
+                    e.preventDefault();
+                    const { u, v } = padCoords(e);
+                    emitPaint('move', u, v);
+                  }}
+                  onPointerUp={(e) => {
+                    if (!padDrawing.current) return;
+                    padDrawing.current = false;
+                    e.currentTarget.releasePointerCapture?.(e.pointerId);
+                    emitPaint('end', 0, 0);
+                  }}
+                  onPointerCancel={() => {
+                    if (!padDrawing.current) return;
+                    padDrawing.current = false;
+                    emitPaint('end', 0, 0);
+                  }}
+                />
+                <span className="absolute bottom-3 inset-x-0 text-center text-[9px] font-bold tracking-[0.14em] uppercase text-white/35 pointer-events-none">
+                  Flat pad · maps to the object's texture
+                </span>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
 
-          <button
-            onClick={handleClear}
-            className="py-2.5 px-3 bg-[#141414] hover:bg-red-950/30 border border-[#222] hover:border-red-900/50 rounded-xl flex items-center gap-1.5 text-[#AAA] hover:text-red-400 active:scale-95 transition-all"
-          >
-            <Trash2 size={13} />
-            <span className="text-[9px] font-bold uppercase tracking-wider">Clear</span>
-          </button>
-        </div>
+      {/* -------------------------------- dock -------------------------------- */}
+      <footer className="shrink-0 p-3 safe-bottom z-30">
+        <GlassPanel className="p-2.5 flex flex-col gap-2.5">
+          <div className="flex items-center gap-2">
+            <Segmented
+              layoutId="controller-tool"
+              className="flex-1"
+              value={tool}
+              onChange={(next) => {
+                setTool(next);
+                sounds.playClick(1.2);
+                navigator.vibrate?.(12);
+                connectionRef.current?.emit('settings', {
+                  playerId: playerIdRef.current,
+                  tool: next,
+                  color,
+                });
+              }}
+              options={[
+                { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
+                { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+              ]}
+            />
+            <ColorWell
+              color={color}
+              onChange={(hex) => {
+                setColor(hex);
+                connectionRef.current?.emit('settings', { playerId: playerIdRef.current, color: hex });
+              }}
+              size={40}
+            />
+          </div>
 
-        {/* Selected Tool Indicator & Size */}
-        <div className="flex items-center gap-2 font-mono text-[9px] text-[#777] pr-16">
-          <div
-            className="w-2.5 h-2.5 rounded-full border border-black shadow"
-            style={{ backgroundColor: selectedColor }}
-          />
-          <span className="text-[#CCC] font-bold uppercase">
-            {selectedTool} • P{myPlayerInfo.slot}
-          </span>
-        </div>
+          <div className="flex items-center gap-3 px-1">
+            <span className="label-caps text-white/40 shrink-0">Size</span>
+            <input
+              type="range"
+              min={0.4}
+              max={2}
+              step={0.05}
+              value={toolSize}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                setToolSize(value);
+                connectionRef.current?.emit('settings', { playerId: playerIdRef.current, size: value });
+              }}
+              className="airo-slider flex-1"
+              aria-label="Tool size"
+            />
+            <span className="text-[10px] font-mono text-white/50 w-8 text-right shrink-0">
+              {toolSize.toFixed(1)}×
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setShaking(true);
+                if (shakeTimer.current) clearTimeout(shakeTimer.current);
+                shakeTimer.current = setTimeout(() => setShaking(false), 450);
+                sounds.playCanRattle();
+                navigator.vibrate?.([28, 18, 32, 14, 28]);
+                connectionRef.current?.emit('shake', { playerId: playerIdRef.current });
+              }}
+              className={`tap flex-1 py-2.5 rounded-2xl flex items-center justify-center gap-1.5 text-[10px] font-bold border transition-colors ${
+                shaking
+                  ? 'bg-[var(--color-airo-ember)]/25 border-[var(--color-airo-ember)]/50 text-[var(--color-airo-ember)]'
+                  : 'bg-white/[0.06] border-white/12 text-white/75'
+              }`}
+            >
+              <Sparkles size={13} />
+              Shake
+            </button>
+
+            <button
+              onClick={() => {
+                sounds.playWhoosh();
+                paintSurface.clear();
+                paintSurface.commit();
+                navigator.vibrate?.(36);
+                connectionRef.current?.emit('clear-canvas', {});
+              }}
+              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 hover:text-red-300 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+            >
+              <Trash2 size={13} />
+              Clear
+            </button>
+
+            {mode !== 'aim' && (
+              <button
+                onClick={() => {
+                  setFinish((f) => (f === 'original' ? 'primer' : 'original'));
+                  sounds.playClick(1.15);
+                }}
+                className={`tap flex-1 py-2.5 rounded-2xl flex items-center justify-center gap-1.5 text-[10px] font-bold border transition-colors ${
+                  finish === 'primer'
+                    ? 'bg-white/20 border-white/35 text-white'
+                    : 'bg-white/[0.06] border-white/12 text-white/75'
+                }`}
+                title="Toggle between the model's texture and a blank primer coat"
+              >
+                <Hand size={13} />
+                {finish === 'primer' ? 'Primer' : 'Textured'}
+              </button>
+            )}
+          </div>
+        </GlassPanel>
       </footer>
 
-      {/* ========================================================
-          SLICK RADIAL COLOR PICKER (ALWAYS VISIBLE IN BOTTOM RIGHT)
-          ======================================================== */}
-      <RadialColorPicker
-        selectedColor={selectedColor}
-        onSelectColor={handleColorSelect}
-        className="bottom-4 right-4"
+      {/* ------------------------------- sheets ------------------------------- */}
+
+      <ObjectPickerSheet
+        open={objectSheet}
+        onClose={() => setObjectSheet(false)}
+        objectId={objectId}
+        onSelect={(next) => {
+          setObjectId(next);
+          sounds.playClick(1.3);
+          connectionRef.current?.emit('change-object', { objectType: next });
+        }}
       />
 
-      {/* ========================================================
-          MODAL: EDIT TAGGER ALIAS
-          ======================================================== */}
-      {taggerNameModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
-          <div className="w-full max-w-xs bg-[#121218] border border-[#282836] rounded-2xl p-5 shadow-2xl">
-            <h3 className="text-sm font-bold text-white mb-1">Customize Tagger Alias</h3>
-            <p className="text-[10px] text-[#777] mb-3">Your name will appear floating above your 3D tool.</p>
-            <input
-              type="text"
-              maxLength={12}
-              value={editNameInput}
-              onChange={(e) => setEditNameInput(e.target.value)}
-              className="w-full px-3 py-2 bg-[#1A1A24] border border-[#333] rounded-xl text-xs text-white mb-4 focus:outline-none focus:border-cyan-500 font-mono"
-            />
-            <div className="flex gap-2">
-              <button
-                onClick={() => setTaggerNameModal(false)}
-                className="flex-1 py-2 bg-[#222] rounded-xl text-xs text-[#AAA] font-bold uppercase"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveTaggerName}
-                className="flex-1 py-2 bg-[#FF3D00] hover:bg-orange-600 rounded-xl text-xs text-white font-bold uppercase"
-              >
-                Save
-              </button>
-            </div>
-          </div>
+      <Sheet
+        open={nameSheet}
+        onClose={() => setNameSheet(false)}
+        centered
+        title="Your tag"
+        subtitle="Shown floating above your can in the studio"
+      >
+        <input
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          maxLength={14}
+          autoFocus
+          className="w-full px-4 py-3 rounded-2xl bg-black/40 border border-white/15 text-[15px] font-semibold focus:outline-none focus:border-[var(--color-airo-aqua)] mb-3"
+          placeholder="Tagger"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={() => setNameSheet(false)}
+            className="tap flex-1 py-3 rounded-2xl bg-white/[0.07] border border-white/12 text-[12px] font-semibold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              const next = nameDraft.trim().slice(0, 14);
+              if (next) {
+                setPlayer((prev) => ({ ...prev, name: next }));
+                connectionRef.current?.updatePresence({ name: next });
+                connectionRef.current?.emit('settings', {
+                  playerId: playerIdRef.current,
+                  playerName: next,
+                });
+              }
+              setNameSheet(false);
+            }}
+            className="tap flex-1 py-3 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-[12px] font-bold flex items-center justify-center gap-1.5"
+          >
+            <Check size={14} />
+            Save
+          </button>
         </div>
-      )}
+      </Sheet>
     </div>
   );
 }

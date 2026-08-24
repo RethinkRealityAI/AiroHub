@@ -10,7 +10,12 @@ export type TargetObjectType =
   | 'helmet'
   | 'sneaker'
   | 'vinyltoy'
-  | 'sculpture';
+  | 'sculpture'
+  | 'hoodie'
+  | 'guitar'
+  | 'hydrant'
+  | 'van'
+  | 'cap';
 
 export interface PlayerInfo {
   id: string;
@@ -34,8 +39,12 @@ export interface PlayerState {
   surfacePoint?: [number, number, number];
   surfaceNormal?: [number, number, number];
   pressure: number;
+  /** Tool size multiplier, 0.4 - 2.0. */
+  sizeMultiplier?: number;
   lastActive: number;
   mode: 'motion' | 'projection';
+  /** The local studio operator, who aims with the mouse rather than a phone. */
+  isHost?: boolean;
 }
 
 export interface MotionData {
