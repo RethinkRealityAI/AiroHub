@@ -7,7 +7,7 @@
  */
 import { TargetObjectType } from '../types';
 
-export type ObjectCategory = 'Canvas' | 'Street' | 'Objects';
+export type ObjectCategory = 'Canvas' | 'Street' | 'Objects' | 'Uploads';
 
 export interface PaintableObject {
   id: TargetObjectType;
@@ -156,7 +156,7 @@ export const OBJECT_BY_ID = new Map<TargetObjectType, PaintableObject>(
   PAINTABLE_OBJECTS.map((o) => [o.id, o])
 );
 
-export const OBJECT_CATEGORIES: ObjectCategory[] = ['Canvas', 'Street', 'Objects'];
+export const OBJECT_CATEGORIES: ObjectCategory[] = ['Canvas', 'Street', 'Objects', 'Uploads'];
 
 export function objectsInCategory(category: ObjectCategory): PaintableObject[] {
   return PAINTABLE_OBJECTS.filter((o) => o.category === category);

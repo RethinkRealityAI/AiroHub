@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 
 export type TargetObjectType =
+  | `up-${string}`
   | 'easel'
   | 'skateboard'
   | 'subway'

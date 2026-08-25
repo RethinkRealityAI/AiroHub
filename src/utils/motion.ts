@@ -210,6 +210,72 @@ export class AimTracker {
     return Math.atan2(dir.x, -dir.z);
   }
 
+  /**
+   * Lateral-translation assist. Rotation is still the backbone of aiming, but
+   * a player who keeps the phone upright and *slides* it sideways expects the
+   * cursor to follow. True position from a phone IMU is impossible (double
+   * integration drifts in seconds), so this is deliberately humble: world-
+   * frame linear acceleration → leaky velocity → cursor offset, with a slow
+   * bias filter eating sensor offset and the existing soft-boundary drift
+   * absorbing any residual error. Offsets are in the same angular units as
+   * yaw/pitch so the drift/clamp logic applies to the sum unchanged.
+   */
+  private accelBias = new THREE.Vector3();
+  private velX = 0;
+  private velY = 0;
+  private transX = 0;
+  private transY = 0;
+  private accelWorld = new THREE.Vector3();
+
+  /** m/s² below this is treated as rest — phones idle around ±0.05-0.1. */
+  private static ACCEL_DEADBAND = 0.22;
+  /** Velocity half-life ≈ 0.2s: glides while moving, stops when you stop. */
+  private static VEL_LEAK = 3.4;
+  /** Radian-equivalent cursor offset per metre of integrated travel. */
+  private static TRANSLATE_GAIN = 1.35;
+
+  /**
+   * Feeds gravity-free device acceleration (DeviceMotionEvent.acceleration,
+   * device frame, m/s²). Call from the devicemotion listener.
+   */
+  addTranslation(ax: number, ay: number, az: number, dtSeconds: number) {
+    if (!this.hasReference) return;
+    const dt = THREE.MathUtils.clamp(dtSeconds, 1 / 240, 0.1);
+
+    // Device frame → world frame, so "slide right" is screen-right whatever
+    // the phone's tilt. The device quaternion q includes the camera-style
+    // remap, so the device's own axes are recovered through it directly.
+    this.accelWorld.set(ax, ay, az).applyQuaternion(this.q);
+
+    // Slow bias filter: whatever survives averaging over ~2s is offset, not
+    // motion. Subtracting it kills residual gravity leakage and sensor bias.
+    const biasAlpha = Math.min(dt / 2.0, 1);
+    this.accelBias.lerp(this.accelWorld, biasAlpha);
+    let wx = this.accelWorld.x - this.accelBias.x;
+    let wy = this.accelWorld.y - this.accelBias.y;
+
+    const mag = Math.hypot(wx, wy);
+    if (mag < AimTracker.ACCEL_DEADBAND) {
+      wx = 0;
+      wy = 0;
+    }
+
+    const leak = Math.exp(-AimTracker.VEL_LEAK * dt);
+    this.velX = this.velX * leak + wx * dt;
+    this.velY = this.velY * leak + wy * dt;
+
+    this.transX = THREE.MathUtils.clamp(
+      this.transX + this.velX * dt * AimTracker.TRANSLATE_GAIN * 10,
+      -0.9,
+      0.9
+    );
+    this.transY = THREE.MathUtils.clamp(
+      this.transY + this.velY * dt * AimTracker.TRANSLATE_GAIN * 10,
+      -0.9,
+      0.9
+    );
+  }
+
   /** Marks the current pose as dead centre. */
   calibrate() {
     this.reference.copy(this.q);
@@ -220,6 +286,10 @@ export class AimTracker {
     this.refElevation = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1));
     this.yawDrift = 0;
     this.pitchDrift = 0;
+    this.velX = 0;
+    this.velY = 0;
+    this.transX = 0;
+    this.transY = 0;
     this.yawFilter.reset();
     this.pitchFilter.reset();
     this.rollFilter.reset();
@@ -255,23 +325,28 @@ export class AimTracker {
     const sPitch = this.pitchFilter.filter(pitch, timestampMs);
     const sRoll = this.rollFilter.filter(roll, timestampMs);
 
+    // Rotation plus the translation assist share one angular scale, so the
+    // drifting origin and edge clamps below govern their sum unchanged.
+    const aimYaw = sYaw + this.transX;
+    const aimPitch = sPitch + this.transY;
+
     // Map through the drifting origin, then let the origin follow overshoot.
     const half = this.gain * 0.5;
     const PAD = 0.015;
-    let x = 0.5 + (sYaw - this.yawDrift) * half;
+    let x = 0.5 + (aimYaw - this.yawDrift) * half;
     if (x < PAD) {
-      this.yawDrift = sYaw - (PAD - 0.5) / half;
+      this.yawDrift = aimYaw - (PAD - 0.5) / half;
       x = PAD;
     } else if (x > 1 - PAD) {
-      this.yawDrift = sYaw - (1 - PAD - 0.5) / half;
+      this.yawDrift = aimYaw - (1 - PAD - 0.5) / half;
       x = 1 - PAD;
     }
-    let y = 0.5 - (sPitch - this.pitchDrift) * half;
+    let y = 0.5 - (aimPitch - this.pitchDrift) * half;
     if (y < PAD) {
-      this.pitchDrift = sPitch - (0.5 - PAD) / half;
+      this.pitchDrift = aimPitch - (0.5 - PAD) / half;
       y = PAD;
     } else if (y > 1 - PAD) {
-      this.pitchDrift = sPitch - (0.5 - (1 - PAD)) / half;
+      this.pitchDrift = aimPitch - (0.5 - (1 - PAD)) / half;
       y = 1 - PAD;
     }
 

@@ -160,27 +160,30 @@ const ModeCard: React.FC<{
 
     <div className={stacked ? 'flex flex-col gap-2.5' : 'flex items-start gap-3'}>
       <AccentChip icon={card.icon} accent={card.accent} />
-      <div className="min-w-0">
-        <div className="flex items-baseline gap-2 mb-0.5">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2 mb-1">
           <span className="label-caps" style={{ color: card.accent }}>
             {card.tag}
           </span>
-          <span className="text-[13px] font-semibold text-white tracking-tight">{card.headline}</span>
+          <span className="text-[15px] font-semibold text-white tracking-tight whitespace-nowrap">
+            {card.headline}
+          </span>
         </div>
-        <p className="text-[11px] leading-relaxed text-white/55">{card.body}</p>
+        <div>
+          {card.image && !imageHidden && (
+            <img
+              src={card.image}
+              alt=""
+              loading="lazy"
+              draggable={false}
+              onError={() => onImageError(card.image!)}
+              className="float-right w-20 h-20 object-contain ml-2.5 -mt-1 select-none"
+            />
+          )}
+          <p className="text-[13px] leading-relaxed text-white/65">{card.body}</p>
+        </div>
       </div>
     </div>
-
-    {card.image && !imageHidden && (
-      <img
-        src={card.image}
-        alt=""
-        loading="lazy"
-        draggable={false}
-        onError={() => onImageError(card.image!)}
-        className="mt-3 w-full h-auto rounded-xl border border-white/10 select-none"
-      />
-    )}
   </motion.div>
 );
 
@@ -280,7 +283,7 @@ export const WelcomeGuide: React.FC<{
                 <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white leading-tight">
                   {title}
                 </h2>
-                <p className="text-[11px] text-white/50 mt-1 leading-snug">{subtitle}</p>
+                <p className="text-[12.5px] text-white/55 mt-1 leading-snug">{subtitle}</p>
               </div>
 
               <button
@@ -320,12 +323,12 @@ export const WelcomeGuide: React.FC<{
                     {CONTROLLER_TIPS.map((tip) => (
                       <span
                         key={tip.label}
-                        className="splat-chip glass rounded-full pl-2 pr-2.5 py-1.5 flex items-center gap-1.5 text-[10px] font-semibold text-white/75"
+                        className="splat-chip glass rounded-full pl-2.5 pr-3 py-1.5 flex items-center gap-1.5 text-[11.5px] font-semibold text-white/80"
                       >
                         {tip.icons.map((Icon, iconIndex) => (
                           <Icon
                             key={iconIndex}
-                            size={11}
+                            size={12}
                             className="text-[var(--color-airo-ember)] shrink-0"
                           />
                         ))}
@@ -345,7 +348,8 @@ export const WelcomeGuide: React.FC<{
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...cardSpring, delay: 0.24 }}
-                className="paint-btn tap w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-white text-[13px] font-bold tracking-wide flex items-center justify-center gap-2 shadow-[0_10px_28px_-8px_rgba(255,77,28,0.8)]"
+                className="paint-btn tap w-full py-4 px-10 text-white text-[14px] font-bold tracking-wide flex items-center justify-center gap-2"
+                style={{ '--paint': 'linear-gradient(120deg, #FF4D1C, #FF7A34 70%, #FFB020)' } as React.CSSProperties}
               >
                 <SprayCan size={16} />
                 Let's paint

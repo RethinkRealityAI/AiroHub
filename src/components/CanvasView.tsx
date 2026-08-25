@@ -29,6 +29,7 @@ import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
 import { WelcomeGuide } from './WelcomeGuide';
 import { ColorWell } from '../ui/ColorWell';
 import { OBJECT_BY_ID, PAINTABLE_OBJECTS } from '../paint/objectCatalog';
+import { ensureCustomModels } from '../paint/customModels';
 import { prefetchModels } from '../paint/modelRegistry';
 import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
 import { sounds } from '../utils/audio';
@@ -70,6 +71,20 @@ export default function CanvasView() {
   const orbitRef = useRef<any>(null);
 
   const [objectId, setObjectId] = useState<TargetObjectType>('skateboard');
+  const objectIdRef = useRef(objectId);
+  useEffect(() => {
+    objectIdRef.current = objectId;
+  }, [objectId]);
+  /**
+   * Guards state responses: a peer that just (re)connected and still sits on
+   * defaults must not answer a state request and downgrade the room. It earns
+   * the right to answer by learning the room (applied state, changed object,
+   * painted) — or by incumbency, 8s connected with nobody contradicting it.
+   */
+  const roomStateKnown = useRef(false);
+  const connectedAt = useRef(Date.now());
+  const canAnswerState = () =>
+    roomStateKnown.current || Date.now() - connectedAt.current > 8000;
   const [finish, setFinish] = useState<Finish>('original');
   const [objectLoading, setObjectLoading] = useState(true);
 
@@ -135,6 +150,12 @@ export default function CanvasView() {
   const connectionRef = useRef<AiroConnection | null>(null);
   const controllerUrl = `${window.location.origin}/controller/${roomId}`;
 
+  // Fold admin-uploaded models into the picker once the registry answers.
+  const [, setCatalogTick] = useState(0);
+  useEffect(() => {
+    ensureCustomModels().then((count) => count > 0 && setCatalogTick((t) => t + 1));
+  }, []);
+
   /**
    * Rebroadcasts stamps the studio painted (host pointer strokes and the paint
    * it derives for motion-aiming phones) so controllers' local textures track
@@ -146,6 +167,7 @@ export default function CanvasView() {
   );
   const broadcastStamps = useCallback(
     (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[], strokeId: string) => {
+      roomStateKnown.current = true;
       let entry = stampBatchers.current.get(playerId);
       if (!entry || entry.tool !== tool || entry.color !== color || entry.strokeId !== strokeId) {
         entry?.batcher.dispose();
@@ -192,9 +214,31 @@ export default function CanvasView() {
     }).connect();
     connectionRef.current = conn;
 
-    conn.on('connection', ({ status }) =>
-      setConnection(status === 'connected' ? 'connected' : status === 'error' ? 'offline' : 'connecting')
-    );
+    conn.on('connection', ({ status }) => {
+      setConnection(status === 'connected' ? 'connected' : status === 'error' ? 'offline' : 'connecting');
+      if (status === 'connected') {
+        connectedAt.current = Date.now();
+        conn.emit('request-state', { playerId: HOST_ID });
+      }
+    });
+
+    // A peer answered our state request: adopt the room's object and bake
+    // their artwork in as our baseline.
+    conn.on('canvas-state', ({ target, dataUrl, objectType }) => {
+      if (target !== HOST_ID) return;
+      roomStateKnown.current = true;
+      if (objectType && objectType !== objectIdRef.current) {
+        ensureCustomModels().finally(() => setObjectId(objectType));
+      }
+      if (typeof dataUrl === 'string' && dataUrl.length > 100) {
+        const image = new Image();
+        image.onload = () => {
+          paintSurface.setBaseline(image);
+          paintSurface.commit();
+        };
+        image.src = dataUrl;
+      }
+    });
 
     conn.on('player-list-update', (roster: any[]) => {
       setPlayers((prev) => {
@@ -204,7 +248,14 @@ export default function CanvasView() {
           const existing = prev.find((p) => p.id === entry.id);
           next.push(
             existing
-              ? { ...existing, slot: entry.slot, name: entry.name, color: entry.color, mode: entry.mode }
+              ? {
+                  ...existing,
+                  slot: entry.slot,
+                  name: entry.name,
+                  color: entry.color,
+                  mode: entry.mode,
+                  tool: entry.tool ?? existing.tool,
+                }
               : {
                   id: entry.id,
                   slot: entry.slot,
@@ -329,14 +380,21 @@ export default function CanvasView() {
       const now = Date.now();
       if (now - (lastStateSend.get(playerId) ?? 0) < 4000) return;
       lastStateSend.set(playerId, now);
+      if (!canAnswerState()) return;
       const dataUrl = paintSurface.toSyncDataURL(1024);
-      // A blank canvas produces a tiny webp; still worth skipping the send.
-      if (dataUrl.length < 2000 || dataUrl.length > 900000) return;
-      conn.emit('canvas-state', { target: playerId, dataUrl });
+      // The object choice always syncs; the artwork rides along when it is
+      // non-trivial and within the broadcast size budget.
+      const withArt = dataUrl.length >= 2000 && dataUrl.length <= 900000;
+      conn.emit('canvas-state', {
+        target: playerId,
+        objectType: objectIdRef.current,
+        ...(withArt ? { dataUrl } : {}),
+      });
     });
 
     conn.on('change-object', ({ objectType }) => {
-      if (objectType) setObjectId(objectType);
+      roomStateKnown.current = true;
+      if (objectType) ensureCustomModels().finally(() => setObjectId(objectType));
     });
 
     conn.on('settings', ({ playerId, color, tool, size, playerName }) => {
@@ -448,6 +506,7 @@ export default function CanvasView() {
     (next: TargetObjectType) => {
       setObjectId(next);
       sounds.playClick(1.3);
+      roomStateKnown.current = true;
       connectionRef.current?.emit('change-object', { objectType: next });
     },
     []
@@ -669,7 +728,7 @@ export default function CanvasView() {
               </div>
             </div>
 
-            <div className="flex-1 flex justify-center min-w-0">
+            <div className="flex-1 flex justify-center min-w-0 overflow-hidden px-1">
               <ObjectTrigger
                 objectId={objectId}
                 customName={customInfo?.name}
@@ -708,6 +767,7 @@ export default function CanvasView() {
               <GlassIconButton onClick={() => setGuideOpen(true)} title="How it works" size={38}>
                 <HelpCircle size={15} className="text-[var(--color-airo-aqua)]" />
               </GlassIconButton>
+              <span className="hidden md:contents">
               <GlassIconButton onClick={() => setAiSheet(true)} title="AI copilot" size={38}>
                 <Wand2 size={15} className="text-[var(--color-airo-violet)]" />
               </GlassIconButton>
@@ -721,9 +781,12 @@ export default function CanvasView() {
               >
                 {muted ? <VolumeX size={15} /> : <Volume2 size={15} className="text-[var(--color-airo-flame)]" />}
               </GlassIconButton>
+              </span>
+              <span className="hidden sm:contents">
               <GlassIconButton onClick={toggleFullscreen} title="Fullscreen (F)" size={38}>
                 <Maximize size={15} />
               </GlassIconButton>
+              </span>
             </div>
           </motion.header>
         )}
@@ -810,54 +873,61 @@ export default function CanvasView() {
             transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.08 }}
             className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex justify-center safe-bottom"
           >
-            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center max-w-[min(100%,980px)]">
-              <Segmented
-                layoutId="host-tool"
-                value={hostTool}
-                onChange={(value) => {
-                  setHostTool(value);
-                  sounds.playClick(1.2);
-                }}
-                options={[
-                  { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
-                  { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
-                ]}
-              />
+            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,980px)]">
+              {/* Row 1 on phones: tool + colour. */}
+              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                <Segmented
+                  layoutId="host-tool"
+                  className="flex-1 md:flex-none"
+                  value={hostTool}
+                  onChange={(value) => {
+                    setHostTool(value);
+                    sounds.playClick(1.2);
+                  }}
+                  options={[
+                    { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
+                    { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+                  ]}
+                />
+                <ColorWell color={hostColor} onChange={handleHostColor} />
+              </div>
 
-              <ColorWell color={hostColor} onChange={handleHostColor} />
+              {/* Row 2 on phones: size + finish. */}
+              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                <div className="flex items-center gap-2 px-1 md:px-2 flex-1 md:flex-none md:min-w-[130px]">
+                  <span className="label-caps text-white/40 shrink-0">Size</span>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={2}
+                    step={0.05}
+                    value={hostSize}
+                    onChange={(e) => setHostSize(Number(e.target.value))}
+                    className="airo-slider flex-1"
+                    aria-label="Tool size"
+                  />
+                </div>
 
-              <div className="flex items-center gap-2 px-2 min-w-[130px]">
-                <span className="label-caps text-white/40 shrink-0">Size</span>
-                <input
-                  type="range"
-                  min={0.4}
-                  max={2}
-                  step={0.05}
-                  value={hostSize}
-                  onChange={(e) => setHostSize(Number(e.target.value))}
-                  className="airo-slider flex-1"
-                  aria-label="Tool size"
+                <div className="w-px h-7 bg-white/12 hidden md:block" />
+
+                <Segmented
+                  layoutId="host-finish"
+                  size="sm"
+                  value={finish}
+                  onChange={(value) => {
+                    setFinish(value);
+                    sounds.playClick(1.1);
+                  }}
+                  options={[
+                    { value: 'original', label: 'Textured' },
+                    { value: 'primer', label: 'Primer' },
+                  ]}
                 />
               </div>
 
               <div className="w-px h-7 bg-white/12 hidden md:block" />
 
-              <Segmented
-                layoutId="host-finish"
-                size="sm"
-                value={finish}
-                onChange={(value) => {
-                  setFinish(value);
-                  sounds.playClick(1.1);
-                }}
-                options={[
-                  { value: 'original', label: 'Textured' },
-                  { value: 'primer', label: 'Primer' },
-                ]}
-              />
-
-              <div className="w-px h-7 bg-white/12 hidden md:block" />
-
+              <div className="flex items-center justify-center gap-2 w-full md:w-auto md:contents">
               <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
                 <Undo2 size={15} />
               </GlassIconButton>
@@ -885,13 +955,14 @@ export default function CanvasView() {
                 <Download size={14} />
                 <span>Save</span>
               </button>
+              </div>
             </GlassPanel>
           </motion.div>
         )}
       </AnimatePresence>
 
       {/* --------------------------- status readouts --------------------------- */}
-      <div className="absolute right-3 md:right-4 bottom-24 md:bottom-28 z-20 flex flex-col items-end gap-2 pointer-events-none">
+      <div className="absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex flex-col items-end gap-2 pointer-events-none">
         <AnimatePresence>
           {objectLoading && (
             <motion.div

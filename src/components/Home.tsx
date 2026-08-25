@@ -13,7 +13,7 @@
  * so they still look finished if that skin is ever absent.
  */
 import React, { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { SprayCan, ArrowRight, QrCode, Monitor, Smartphone } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
@@ -101,7 +101,8 @@ export default function Home() {
             <GlassPanel strong className="p-5 sm:p-6">
               <button
                 onClick={createStudio}
-                className="paint-btn tap flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FFB020] py-3.5 text-[13px] font-bold tracking-wide text-white shadow-[0_12px_30px_-8px_rgba(255,77,28,0.7)]"
+                className="paint-btn tap flex w-full items-center justify-center gap-2 px-10 py-4 text-[14px] font-bold tracking-wide text-white"
+                style={{ '--paint': 'linear-gradient(120deg, #FF4D1C, #FF7A34 70%, #FFB020)' } as React.CSSProperties}
               >
                 <SprayCan size={16} />
                 Create a Studio
@@ -162,6 +163,13 @@ export default function Home() {
             <span className="text-white/20">·</span>
             <Smartphone size={12} className="shrink-0" />
             phones as controllers
+            <span className="text-white/20">·</span>
+            <Link
+              to="/admin"
+              className="pointer-events-auto text-white/35 transition-colors hover:text-white/70"
+            >
+              Admin
+            </Link>
           </motion.p>
         </footer>
       </div>

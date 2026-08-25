@@ -43,7 +43,12 @@ const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
 export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => {
-  const { tool, color, name: playerName, slot: playerSlot } = player;
+  const { color, name: playerName, slot: playerSlot } = player;
+  // The tool is tracked as state driven from the LIVE player object each
+  // frame: roster handlers mutate players outside the React render path, so
+  // binding the tool at render time is how a phone's spray→brush switch used
+  // to get stuck until an unrelated re-render came along.
+  const [tool, setTool] = useState<'spray' | 'brush'>(player.tool);
   const { camera } = useThree();
 
   const groupRef = useRef<THREE.Group>(null);
@@ -86,6 +91,7 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
   }, [tool]);
 
   useFrame((_, delta) => {
+    if (player.tool !== tool) setTool(player.tool);
     const group = groupRef.current;
     if (!group) return;
 

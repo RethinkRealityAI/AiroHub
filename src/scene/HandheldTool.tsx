@@ -24,8 +24,12 @@ const PARTICLES = 260;
  */
 const BASE_LEAN = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.16, 0, 0));
 
-/** Stand the rig upright (spray) / pen-tilt it (brush) inside the group. */
-const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
+/**
+ * Stand the rig upright inside the group — both tools are held the way a
+ * person actually holds them at a wall: can nozzle on top, brush bristles
+ * pointing up over the handle (not dangling tip-down like a pen).
+ */
+const POSTURE_X = { spray: Math.PI / 2, brush: Math.PI / 2 } as const;
 
 /**
  * Spin about the can's own vertical axis. The generated can model bakes
@@ -41,8 +45,8 @@ const SPIN_Z = { spray: 0, brush: 0 } as const;
  * near the top of the screen, body running past the bottom edge. The brush
  * sits lower and smaller so the whole tool (tip to handle) stays visible.
  */
-const SCALE = { spray: 2.6, brush: 1.9 } as const;
-const BASE_Y = { spray: 1.25, brush: -1.25 } as const;
+const SCALE = { spray: 2.6, brush: 2.15 } as const;
+const BASE_Y = { spray: 1.25, brush: 1.05 } as const;
 
 interface HandheldToolProps {
   tool: 'spray' | 'brush';

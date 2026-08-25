@@ -43,7 +43,16 @@ function getLoader(): GLTFLoader {
 
 const cache = new Map<string, Promise<LoadedModel>>();
 
+/** Absolute URLs for admin-uploaded models, keyed by their catalog id. */
+const customUrls = new Map<string, string>();
+
+export function registerModelUrl(id: string, url: string) {
+  customUrls.set(id, url);
+}
+
 export function modelUrl(id: string): string {
+  const custom = customUrls.get(id);
+  if (custom) return custom;
   return `${import.meta.env.BASE_URL || '/'}models/${id}.glb`.replace(/\/{2,}/g, '/');
 }
 

@@ -103,7 +103,7 @@ export const ObjectPickerSheet: React.FC<{
     title="Choose a canvas"
     subtitle="Every object is a real 3D model you can paint from any angle"
   >
-    {OBJECT_CATEGORIES.map((category) => (
+    {OBJECT_CATEGORIES.filter((category) => objectsInCategory(category).length > 0).map((category) => (
       <section key={category} className="mb-5 last:mb-0">
         <h3 className="label-caps text-white/40 mb-2 px-0.5">{category}</h3>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">

@@ -37,6 +37,7 @@ import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
 import { StampBatcher, StampPacket, PaintStamp, BatchContext, packStamps, unpackStamps } from '../paint/stamps';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
+import { ensureCustomModels } from '../paint/customModels';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
 import { AimTracker, ShakeDetector } from '../utils/motion';
 import { TargetObjectType, PlayerInfo } from '../types';
@@ -334,6 +335,13 @@ export default function ControllerView() {
   const [color, setColor] = useState('#FF4D1C');
   const [toolSize, setToolSize] = useState(1);
   const [objectId, setObjectId] = useState<TargetObjectType>('skateboard');
+  const objectIdRef = useRef(objectId);
+  useEffect(() => {
+    objectIdRef.current = objectId;
+  }, [objectId]);
+  /** See CanvasView: only peers that know the room answer state requests. */
+  const roomStateKnown = useRef(false);
+  const connectedAt = useRef(Date.now());
   const [finish, setFinish] = useState<Finish>('original');
 
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
@@ -377,6 +385,12 @@ export default function ControllerView() {
 
   const orbitRef = useRef<any>(null);
   const trackerRef = useRef(new AimTracker());
+
+  // Fold admin-uploaded models into the picker once the registry answers.
+  const [, setCatalogTick] = useState(0);
+  useEffect(() => {
+    ensureCustomModels().then((count) => count > 0 && setCatalogTick((t) => t + 1));
+  }, []);
   const shakeDetector = useRef(new ShakeDetector());
   const lastMotionSend = useRef(0);
   const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -417,7 +431,26 @@ export default function ControllerView() {
       setColor(assigned.color);
       sounds.playClick(1.5);
     });
-    conn.on('change-object', ({ objectType }) => objectType && setObjectId(objectType));
+    conn.on('change-object', ({ objectType }) => {
+      roomStateKnown.current = true;
+      if (objectType) ensureCustomModels().finally(() => setObjectId(objectType));
+    });
+
+    const lastStateSend = new Map<string, number>();
+    conn.on('request-state', ({ playerId }) => {
+      if (!playerId || playerId === playerIdRef.current) return;
+      if (!roomStateKnown.current && Date.now() - connectedAt.current < 8000) return;
+      const now = Date.now();
+      if (now - (lastStateSend.get(playerId) ?? 0) < 4000) return;
+      lastStateSend.set(playerId, now);
+      const dataUrl = paintSurface.toSyncDataURL(1024);
+      const withArt = dataUrl.length >= 2000 && dataUrl.length <= 900000;
+      conn.emit('canvas-state', {
+        target: playerId,
+        objectType: objectIdRef.current,
+        ...(withArt ? { dataUrl } : {}),
+      });
+    });
     conn.on('clear-canvas', () => {
       paintSurface.clear();
       paintSurface.commit();
@@ -444,11 +477,17 @@ export default function ControllerView() {
     // the reply in as a baseline layer under our own stroke log.
     conn.on('connection', ({ status }) => {
       if (status === 'connected') {
+        connectedAt.current = Date.now();
         conn.emit('request-state', { playerId: playerIdRef.current });
       }
     });
-    conn.on('canvas-state', ({ target, dataUrl }) => {
-      if (target !== playerIdRef.current || typeof dataUrl !== 'string') return;
+    conn.on('canvas-state', ({ target, dataUrl, objectType }) => {
+      if (target !== playerIdRef.current) return;
+      roomStateKnown.current = true;
+      if (objectType && objectType !== objectIdRef.current) {
+        ensureCustomModels().finally(() => setObjectId(objectType));
+      }
+      if (typeof dataUrl !== 'string' || dataUrl.length < 100) return;
       const image = new Image();
       image.onload = () => {
         paintSurface.setBaseline(image);
@@ -531,6 +570,13 @@ export default function ControllerView() {
   }, []);
 
   const handleDeviceMotion = useCallback((event: DeviceMotionEvent) => {
+    // Gravity-free acceleration drives the lateral-translation aim assist:
+    // sliding the phone sideways moves the cursor even with zero rotation.
+    const linear = event.acceleration;
+    if (linear && linear.x !== null && linear.y !== null && linear.z !== null) {
+      trackerRef.current.addTranslation(linear.x, linear.y, linear.z, (event.interval || 16.7) / 1000);
+    }
+
     const accel = event.accelerationIncludingGravity || event.acceleration;
     if (!accel || accel.x === null || accel.y === null || accel.z === null) return;
 
@@ -1247,6 +1293,7 @@ export default function ControllerView() {
         onClose={() => setObjectSheet(false)}
         objectId={objectId}
         onSelect={(next) => {
+          roomStateKnown.current = true;
           setObjectId(next);
           sounds.playClick(1.3);
           connectionRef.current?.emit('change-object', { objectType: next });
