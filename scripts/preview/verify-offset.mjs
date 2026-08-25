@@ -16,6 +16,14 @@ const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
+// The first-run welcome guide would cover the stage in a fresh context.
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem('airo:guide:studio', '1');
+    localStorage.setItem('airo:guide:controller', '1');
+  } catch {}
+});
+
 await page.goto(`${BASE}/canvas/OFFSET1`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(11000);
 if (process.env.OBJECT) {

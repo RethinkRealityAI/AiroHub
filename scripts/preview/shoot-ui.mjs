@@ -48,6 +48,14 @@ async function open(spec, label) {
       : undefined,
   });
   const page = await context.newPage();
+// The first-run welcome guide would cover the stage in a fresh context.
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem('airo:guide:studio', '1');
+    localStorage.setItem('airo:guide:controller', '1');
+  } catch {}
+});
+
   page.on('console', (msg) => {
     if (msg.type() !== 'error') return;
     const text = msg.text();

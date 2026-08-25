@@ -57,6 +57,14 @@ async function dragPath(page, points) {
 /* ---------------- 1. Studio pointer painting ---------------- */
 {
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
+// The first-run welcome guide would cover the stage in a fresh context.
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem('airo:guide:studio', '1');
+    localStorage.setItem('airo:guide:controller', '1');
+  } catch {}
+});
+
   watch(page, 'studio-paint');
   await page.goto(`${BASE}/canvas/VERIFY1`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(12000); // model + shaders

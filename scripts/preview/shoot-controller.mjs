@@ -43,7 +43,12 @@ await page.waitForTimeout(1200);
 // Through the sensor gate: desktop Chromium has DeviceOrientationEvent but no
 // requestPermission, so this lands on sensorState=granted.
 await page.getByText('Enable motion aiming').click();
-await page.waitForTimeout(600);
+await page.waitForTimeout(900);
+
+// First-join welcome guide pops over the stage: capture it, then close.
+await page.screenshot({ path: `${OUT}/ctrl-guide.png` });
+await page.getByText("Let's paint").click();
+await page.waitForTimeout(500);
 
 /** Feed a burst of synthetic orientation events (upright phone ≈ beta 90). */
 const pose = (alpha, beta, gamma) =>

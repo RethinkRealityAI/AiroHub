@@ -21,7 +21,7 @@ import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
   Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Redo2,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, HelpCircle,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -31,6 +31,7 @@ import { useFitCamera } from '../scene/useFitCamera';
 import { HandheldTool } from '../scene/HandheldTool';
 import { SurfacePainter } from '../scene/SurfacePainter';
 import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
+import { WelcomeGuide } from './WelcomeGuide';
 import { ColorWell } from '../ui/ColorWell';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -356,6 +357,22 @@ export default function ControllerView() {
 
   const [objectSheet, setObjectSheet] = useState(false);
   const [nameSheet, setNameSheet] = useState(false);
+  // First-join guide: shown once per browser, reopenable from the header.
+  const [guideOpen, setGuideOpen] = useState(() => {
+    try {
+      return localStorage.getItem('airo:guide:controller') !== '1';
+    } catch {
+      return true;
+    }
+  });
+  const closeGuide = () => {
+    setGuideOpen(false);
+    try {
+      localStorage.setItem('airo:guide:controller', '1');
+    } catch {
+      /* private mode */
+    }
+  };
   const [nameDraft, setNameDraft] = useState('');
 
   const orbitRef = useRef<any>(null);
@@ -826,6 +843,9 @@ export default function ControllerView() {
               <WifiOff size={13} className="text-amber-400" />
             )}
           </span>
+          <GlassIconButton size={32} onClick={() => setGuideOpen(true)} title="How to play">
+            <HelpCircle size={13} className="text-[var(--color-airo-aqua)]" />
+          </GlassIconButton>
           <GlassIconButton
             size={32}
             onClick={() => setMuted(sounds.toggleMute())}
@@ -1113,11 +1133,10 @@ export default function ControllerView() {
                 navigator.vibrate?.([28, 18, 32, 14, 28]);
                 connectionRef.current?.emit('shake', { playerId: playerIdRef.current });
               }}
-              className={`tap flex-1 py-2.5 rounded-2xl flex items-center justify-center gap-1.5 text-[10px] font-bold border transition-colors ${
-                shaking
-                  ? 'bg-[var(--color-airo-ember)]/25 border-[var(--color-airo-ember)]/50 text-[var(--color-airo-ember)]'
-                  : 'bg-white/[0.06] border-white/12 text-white/75'
-              }`}
+              className="tap paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+              style={{ '--paint': shaking
+                  ? 'linear-gradient(135deg,#FFB020,#FF7A34)'
+                  : 'linear-gradient(135deg,rgba(255,176,32,0.55),rgba(255,122,52,0.55))' } as React.CSSProperties}
             >
               <Sparkles size={13} />
               Shake
@@ -1125,7 +1144,8 @@ export default function ControllerView() {
 
             <button
               onClick={undoLast}
-              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+              className="tap paint-btn-2 paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+              style={{ '--paint': 'linear-gradient(135deg,rgba(167,139,250,0.6),rgba(232,121,249,0.5))' } as React.CSSProperties}
             >
               <Undo2 size={13} />
               Undo
@@ -1133,7 +1153,8 @@ export default function ControllerView() {
 
             <button
               onClick={redoLast}
-              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+              className="tap paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+              style={{ '--paint': 'linear-gradient(135deg,rgba(34,211,238,0.6),rgba(52,211,153,0.5))' } as React.CSSProperties}
             >
               <Redo2 size={13} />
               Redo
@@ -1147,7 +1168,8 @@ export default function ControllerView() {
                 navigator.vibrate?.(36);
                 connectionRef.current?.emit('clear-canvas', {});
               }}
-              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 hover:text-red-300 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+              className="tap paint-btn-2 paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+              style={{ '--paint': 'linear-gradient(135deg,rgba(220,38,38,0.62),rgba(255,77,28,0.55))' } as React.CSSProperties}
             >
               <Trash2 size={13} />
               Clear
@@ -1159,11 +1181,10 @@ export default function ControllerView() {
                   setFinish((f) => (f === 'original' ? 'primer' : 'original'));
                   sounds.playClick(1.15);
                 }}
-                className={`tap flex-1 py-2.5 rounded-2xl flex items-center justify-center gap-1.5 text-[10px] font-bold border transition-colors ${
-                  finish === 'primer'
-                    ? 'bg-white/20 border-white/35 text-white'
-                    : 'bg-white/[0.06] border-white/12 text-white/75'
-                }`}
+                className="tap paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+                style={{ '--paint': finish === 'primer'
+                    ? 'linear-gradient(135deg,rgba(245,245,244,0.85),rgba(148,163,184,0.8))'
+                    : 'linear-gradient(135deg,rgba(148,163,184,0.5),rgba(255,255,255,0.35))' } as React.CSSProperties}
                 title="Toggle between the model's texture and a blank primer coat"
               >
                 <Hand size={13} />
@@ -1204,18 +1225,22 @@ export default function ControllerView() {
             )}
           </button>
 
-          <ColorWell
-            color={color}
-            onChange={(hex) => {
-              setColor(hex);
-              connectionRef.current?.emit('settings', { playerId: playerIdRef.current, color: hex });
-            }}
-            size={44}
-          />
+          <div className="splat-btn" style={{ '--paint': `${color}55` } as React.CSSProperties}>
+            <ColorWell
+              color={color}
+              onChange={(hex) => {
+                setColor(hex);
+                connectionRef.current?.emit('settings', { playerId: playerIdRef.current, color: hex });
+              }}
+              size={44}
+            />
+          </div>
         </div>
       </footer>
 
       {/* ------------------------------- sheets ------------------------------- */}
+
+      <WelcomeGuide open={guideOpen} onClose={closeGuide} role="controller" />
 
       <ObjectPickerSheet
         open={objectSheet}

@@ -181,7 +181,7 @@ export const Sheet: React.FC<{
           )}
           <header className="px-5 pt-3 pb-3 flex items-start justify-between gap-4 shrink-0">
             <div className="min-w-0">
-              <h2 className="text-[15px] font-semibold text-white tracking-tight">{title}</h2>
+              <h2 className="paint-title text-[15px] font-bold tracking-tight">{title}</h2>
               {subtitle && (
                 <p className="text-[11px] text-white/50 mt-0.5 leading-snug">{subtitle}</p>
               )}

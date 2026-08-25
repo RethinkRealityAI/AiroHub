@@ -17,7 +17,7 @@ import {
   Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, X, Zap,
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
-  Wifi, WifiOff, Boxes, Undo2, Redo2, History, Video,
+  Wifi, WifiOff, Boxes, Undo2, Redo2, History, Video, HelpCircle,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -26,6 +26,7 @@ import { StudioScene } from '../scene/StudioScene';
 import { Finish } from '../scene/PaintTarget';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
+import { WelcomeGuide } from './WelcomeGuide';
 import { ColorWell } from '../ui/ColorWell';
 import { OBJECT_BY_ID, PAINTABLE_OBJECTS } from '../paint/objectCatalog';
 import { prefetchModels } from '../paint/modelRegistry';
@@ -90,6 +91,22 @@ export default function CanvasView() {
     cameraSyncRef.current = cameraSyncIds;
   }, [cameraSyncIds]);
   const [inviteSheet, setInviteSheet] = useState(false);
+  // First-run guide: shown once per browser, reopenable from the help button.
+  const [guideOpen, setGuideOpen] = useState(() => {
+    try {
+      return localStorage.getItem('airo:guide:studio') !== '1';
+    } catch {
+      return true;
+    }
+  });
+  const closeGuide = () => {
+    setGuideOpen(false);
+    try {
+      localStorage.setItem('airo:guide:studio', '1');
+    } catch {
+      /* private mode */
+    }
+  };
   const [aiSheet, setAiSheet] = useState(false);
   const [uploadSheet, setUploadSheet] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -666,7 +683,8 @@ export default function CanvasView() {
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setInviteSheet(true)}
-                className="tap glass glass-sheen rounded-full pl-2 pr-3 py-1.5 flex items-center gap-2"
+                className="tap glass glass-sheen splat-btn-2 rounded-full pl-2 pr-3 py-1.5 flex items-center gap-2"
+                style={{ '--paint': 'rgba(34,211,238,0.34)' } as React.CSSProperties}
                 title="Invite players"
               >
                 <Users size={14} className="text-[var(--color-airo-aqua)]" />
@@ -687,6 +705,9 @@ export default function CanvasView() {
                 </div>
               </button>
 
+              <GlassIconButton onClick={() => setGuideOpen(true)} title="How it works" size={38}>
+                <HelpCircle size={15} className="text-[var(--color-airo-aqua)]" />
+              </GlassIconButton>
               <GlassIconButton onClick={() => setAiSheet(true)} title="AI copilot" size={38}>
                 <Wand2 size={15} className="text-[var(--color-airo-violet)]" />
               </GlassIconButton>
@@ -906,6 +927,8 @@ export default function CanvasView() {
       </div>
 
       {/* -------------------------------- sheets -------------------------------- */}
+
+      <WelcomeGuide open={guideOpen} onClose={closeGuide} role="studio" />
 
       <ObjectPickerSheet
         open={objectSheet}

@@ -15,6 +15,14 @@ const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
+// The first-run welcome guide would cover the stage in a fresh context.
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem('airo:guide:studio', '1');
+    localStorage.setItem('airo:guide:controller', '1');
+  } catch {}
+});
+
 page.on('pageerror', (e) => console.log('[pageerror]', String(e).slice(0, 200)));
 page.on('console', (m) => { if (m.type() === 'error' || /CONTEXT LOST/.test(m.text())) console.log('[console]', m.text().slice(0, 400)); });
 

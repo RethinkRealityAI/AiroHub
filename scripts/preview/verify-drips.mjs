@@ -8,6 +8,14 @@ const browser = await chromium.launch({
   args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'],
 });
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
+// The first-run welcome guide would cover the stage in a fresh context.
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem('airo:guide:studio', '1');
+    localStorage.setItem('airo:guide:controller', '1');
+  } catch {}
+});
+
 await page.goto(`${process.env.BASE || 'http://127.0.0.1:4173'}/canvas/DRIPS1`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(12000);
 

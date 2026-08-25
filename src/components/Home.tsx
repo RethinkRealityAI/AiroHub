@@ -1,131 +1,170 @@
 /**
- * Landing screen.
+ * Landing screen — a graffiti-studio hero.
  *
- * Two jobs: start a studio, and get phones into it. Everything else is
- * supporting detail, so the layout is a single glass card with the two actions
- * given equal weight and the QR code visible without a click.
+ * The whole viewport is a live 3D scene (LandingHero): the real spray can
+ * follows your pointer and paints splats onto a backdrop. The UI floats over
+ * it as a thin glass layer with exactly two jobs, unchanged from before:
+ *
+ *   Create a Studio  →  /canvas/:roomId    (fresh generated room code)
+ *   Join with a code →  /controller/:code  (typed session code)
+ *
+ * `.paint-title`, `.paint-btn` and `.splat-chip` are the paint-mask skin's
+ * hooks (see index.css); the button and chip also carry solid utility styling
+ * so they still look finished if that skin is ever absent.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { QRCodeSVG } from 'qrcode.react';
 import { motion } from 'motion/react';
-import { Smartphone, Monitor, Users, Boxes, Wand2, Copy, Check, SprayCan, ArrowRight } from 'lucide-react';
+import { SprayCan, ArrowRight, QrCode, Monitor, Smartphone } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
-import { PAINTABLE_OBJECTS } from '../paint/objectCatalog';
+import LandingHero from '../scene/LandingHero';
 
-const FEATURES = [
-  { icon: Users, label: '4-player multiplayer', tone: 'text-[var(--color-airo-aqua)]' },
-  { icon: Boxes, label: `${PAINTABLE_OBJECTS.length} paintable 3D objects`, tone: 'text-[var(--color-airo-flame)]' },
-  { icon: Smartphone, label: 'Phone motion aiming', tone: 'text-emerald-400' },
-  { icon: Wand2, label: 'AI stylist & appraiser', tone: 'text-[var(--color-airo-violet)]' },
-];
+/** Session codes: uppercase alphanumeric, 4-8 chars. */
+const CODE_RE = /^[A-Z0-9]{4,8}$/;
+
+const spring = { type: 'spring', stiffness: 260, damping: 30 } as const;
 
 export default function Home() {
   const navigate = useNavigate();
-  const [copied, setCopied] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
 
-  // One room code per mount; regenerating on re-render would invalidate any QR
-  // code somebody is mid-scan on.
+  // One room code per mount; regenerating on re-render would invalidate a
+  // code somebody has already read off the screen.
   const roomId = useMemo(
     () => Math.random().toString(36).slice(2, 8).toUpperCase(),
     []
   );
 
-  const controllerUrl = `${window.location.origin}/controller/${roomId}`;
+  const createStudio = () => navigate(`/canvas/${roomId}`);
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(controllerUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const joinValid = CODE_RE.test(joinCode);
+  const joinStudio = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (joinValid) navigate(`/controller/${joinCode}`);
   };
 
   return (
-    <div className="min-h-screen stage-vignette text-white flex items-center justify-center p-4 sm:p-6 safe-top safe-bottom">
-      <motion.div
-        initial={{ opacity: 0, y: 18 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ type: 'spring', stiffness: 260, damping: 30 }}
-        className="w-full max-w-4xl"
-      >
-        <GlassPanel strong className="p-6 sm:p-9">
-          <header className="flex flex-col items-center text-center mb-7">
-            <div className="w-14 h-14 rounded-[20px] bg-gradient-to-tr from-[#FF4D1C] to-[#FFB020] grid place-items-center shadow-[0_0_38px_rgba(255,77,28,0.5)] mb-4">
-              <SprayCan size={26} className="text-white" />
-            </div>
-            <h1 className="text-3xl sm:text-4xl font-bold tracking-tight">AiroHub</h1>
-            <p className="text-[13px] text-white/55 mt-2 max-w-md leading-relaxed">
-              A collaborative 3D spray-paint studio. Put a real object on the stage, then paint it from
-              any angle with up to four phones as spray cans.
-            </p>
-          </header>
+    <div className="relative min-h-[100svh] overflow-hidden bg-[var(--color-airo-void)] stage-vignette text-white">
+      {/* Live hero: spray can + paintable backdrop, behind everything. */}
+      <div className="absolute inset-0" aria-hidden>
+        <LandingHero />
+      </div>
 
-          <div className="flex flex-wrap items-center justify-center gap-2 mb-8">
-            {FEATURES.map(({ icon: Icon, label, tone }) => (
-              <span
-                key={label}
-                className="glass rounded-full px-3 py-1.5 flex items-center gap-1.5 text-[10px] font-semibold text-white/70"
-              >
-                <Icon size={11} className={tone} />
-                {label}
-              </span>
-            ))}
+      {/* Legibility washes — text sits left on desktop, bottom on mobile. */}
+      <div className="pointer-events-none absolute inset-0 hidden md:block bg-gradient-to-r from-black/65 via-black/25 to-transparent" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-72 md:hidden bg-gradient-to-t from-black/75 via-black/35 to-transparent" />
+
+      {/* Overlay UI. pointer-events-none on the frame so the hero keeps
+          tracking everywhere; re-enabled only on interactive pieces. */}
+      <div className="pointer-events-none relative z-10 flex min-h-[100svh] flex-col">
+        <header className="safe-top flex items-center px-5 pt-4 sm:px-8">
+          <motion.span
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...spring, delay: 0.05 }}
+            className="splat-chip pointer-events-auto inline-flex items-center gap-2 glass glass-sheen rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-[0.22em]"
+          >
+            <SprayCan size={13} className="text-[var(--color-airo-flame)]" />
+            AIROHUB
+          </motion.span>
+        </header>
+
+        <main className="flex flex-1 flex-col px-5 sm:px-10 md:justify-center lg:px-16">
+          {/* Title block: centred on mobile, left column on desktop so the
+              can gets the right half of the stage to spray on. */}
+          <div className="flex flex-1 flex-col items-center justify-center text-center md:flex-none md:items-start md:text-left">
+            <motion.h1
+              initial={{ opacity: 0, y: 22 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ ...spring, delay: 0.12 }}
+              className="paint-title text-6xl font-black leading-[0.95] tracking-tight sm:text-7xl lg:text-8xl"
+            >
+              AIROHUB
+            </motion.h1>
+            <motion.p
+              initial={{ opacity: 0, y: 18 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ ...spring, delay: 0.2 }}
+              className="mt-4 max-w-md text-[14px] leading-relaxed text-white/65 sm:text-[15px]"
+            >
+              Turn your phone into a spray can. Paint real 3D objects together, live.
+            </motion.p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-4">
-            {/* Studio */}
-            <div className="rounded-[22px] bg-white/[0.05] border border-white/12 p-5 flex flex-col">
-              <div className="w-11 h-11 rounded-2xl bg-[var(--color-airo-flame)]/15 border border-[var(--color-airo-flame)]/30 grid place-items-center text-[var(--color-airo-flame)] mb-3">
-                <Monitor size={20} strokeWidth={1.8} />
-              </div>
-              <h2 className="text-[15px] font-semibold mb-1">Open the studio</h2>
-              <p className="text-[11px] text-white/50 leading-relaxed flex-1 mb-4">
-                The big screen. Full 3D stage, 360° orbit, model upload and the AI copilot. Paint with your
-                mouse straight away, no phone required.
-              </p>
+          {/* Action card: near the bottom on mobile, in the column on desktop. */}
+          <motion.div
+            initial={{ opacity: 0, y: 26 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...spring, delay: 0.3 }}
+            className="pointer-events-auto mx-auto mt-6 w-full max-w-md md:mx-0 md:mt-9"
+          >
+            <GlassPanel strong className="p-5 sm:p-6">
               <button
-                onClick={() => navigate(`/canvas/${roomId}`)}
-                className="tap w-full py-3 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-[12px] font-bold tracking-wide flex items-center justify-center gap-2 shadow-[0_10px_26px_-8px_rgba(255,77,28,0.8)]"
+                onClick={createStudio}
+                className="paint-btn tap flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-[#FF4D1C] to-[#FFB020] py-3.5 text-[13px] font-bold tracking-wide text-white shadow-[0_12px_30px_-8px_rgba(255,77,28,0.7)]"
               >
-                Launch studio
+                <SprayCan size={16} />
+                Create a Studio
                 <ArrowRight size={15} />
               </button>
-            </div>
-
-            {/* Controller */}
-            <div className="rounded-[22px] bg-white/[0.05] border border-white/12 p-5 flex flex-col">
-              <div className="w-11 h-11 rounded-2xl bg-[var(--color-airo-aqua)]/15 border border-[var(--color-airo-aqua)]/30 grid place-items-center text-[var(--color-airo-aqua)] mb-3">
-                <Smartphone size={20} strokeWidth={1.8} />
-              </div>
-              <h2 className="text-[15px] font-semibold mb-1">Add a phone</h2>
-              <p className="text-[11px] text-white/50 leading-relaxed mb-4">
-                Scan to turn any phone into a spray can. Aim it at the screen, or paint directly on the
-                object in your hand.
+              <p className="mt-2 text-center font-mono text-[10px] tracking-[0.2em] text-white/30">
+                NEW STUDIO CODE · {roomId}
               </p>
 
-              <div className="flex items-center gap-4">
-                <div className="bg-white p-2 rounded-2xl shrink-0">
-                  <QRCodeSVG value={controllerUrl} size={104} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="label-caps text-white/40 mb-1">Room</div>
-                  <div className="text-2xl font-bold font-mono tracking-widest mb-2.5">{roomId}</div>
-                  <button
-                    onClick={copyLink}
-                    className="tap w-full py-2 rounded-xl bg-white/10 hover:bg-white/18 border border-white/12 text-[10px] font-bold flex items-center justify-center gap-1.5"
-                  >
-                    {copied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
-                    {copied ? 'Link copied' : 'Copy join link'}
-                  </button>
-                </div>
+              <div className="my-4 flex items-center gap-3">
+                <span className="h-px flex-1 bg-white/12" />
+                <span className="label-caps text-white/35">or join with a code</span>
+                <span className="h-px flex-1 bg-white/12" />
               </div>
-            </div>
-          </div>
 
-          <p className="mt-6 text-center text-[10px] text-white/30">
-            Models generated with Meshy · Painting composites over each object's own PBR texture
-          </p>
-        </GlassPanel>
-      </motion.div>
+              <form onSubmit={joinStudio} className="flex gap-2">
+                <input
+                  value={joinCode}
+                  onChange={(e) =>
+                    setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))
+                  }
+                  placeholder="CODE"
+                  aria-label="Session code"
+                  maxLength={8}
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  spellCheck={false}
+                  enterKeyHint="go"
+                  className="min-w-0 flex-1 rounded-2xl border border-white/15 bg-white/[0.07] px-4 py-3 font-mono text-sm uppercase tracking-[0.3em] text-white placeholder:tracking-[0.18em] placeholder:text-white/25 focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={!joinValid}
+                  className="tap rounded-2xl border border-[var(--color-airo-aqua)]/40 bg-[var(--color-airo-aqua)]/15 px-5 text-[12px] font-bold text-[var(--color-airo-aqua)] disabled:opacity-40"
+                >
+                  Join
+                </button>
+              </form>
+
+              <p className="mt-4 flex items-center justify-center gap-2 text-[11px] text-white/40 md:justify-start">
+                <QrCode size={13} className="shrink-0 text-[var(--color-airo-aqua)]" />
+                On a phone? Scan the studio's QR to jump straight in.
+              </p>
+            </GlassPanel>
+          </motion.div>
+        </main>
+
+        <footer className="safe-bottom px-5 pb-4 pt-5 sm:px-8">
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.55, duration: 0.5 }}
+            className="flex items-center justify-center gap-2 text-[10px] text-white/35 md:justify-start"
+          >
+            <Monitor size={12} className="shrink-0" />
+            Works best: studio on a big screen
+            <span className="text-white/20">·</span>
+            <Smartphone size={12} className="shrink-0" />
+            phones as controllers
+          </motion.p>
+        </footer>
+      </div>
     </div>
   );
 }

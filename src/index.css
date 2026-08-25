@@ -242,3 +242,151 @@ input[type="range"].airo-slider::-moz-range-thumb {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ------------------------------------------------------------------
+   Paint skin — real spray-paint artwork as UI chrome.
+
+   The masks in /ui/ are alpha-only webp stencils generated from actual
+   spray/brush art: the *paint layer* of a control is a ::before pseudo
+   element filled with any colour and clipped by a stencil, so every
+   button wears a genuine splat or stroke while its label stays crisp
+   on top. Panels and sheets keep the liquid-glass look; these accents
+   sit on interactive elements and titles only.
+   ------------------------------------------------------------------ */
+
+/** Wide button whose body IS a broad paint stroke. Colour via --paint. */
+@utility paint-btn {
+  position: relative;
+  isolation: isolate;
+  border: none;
+  background: transparent;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -14% -5%;
+    z-index: -1;
+    background: var(--paint, linear-gradient(135deg, #ff4d1c, #ff7a34));
+    -webkit-mask-image: url('/ui/mask-stroke-1.webp');
+    mask-image: url('/ui/mask-stroke-1.webp');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.45));
+  }
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+/** Variant stroke (aerosol streak instead of dry brush). */
+@utility paint-btn-2 {
+  &::before {
+    -webkit-mask-image: url('/ui/mask-stroke-2.webp');
+    mask-image: url('/ui/mask-stroke-2.webp');
+  }
+}
+
+/** Round control wearing a spray splat (with drips). Colour via --paint. */
+@utility splat-btn {
+  position: relative;
+  isolation: isolate;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -26%;
+    bottom: -48%; /* room for the drips */
+    z-index: -1;
+    background: var(--paint, rgba(255, 255, 255, 0.16));
+    -webkit-mask-image: url('/ui/mask-splat-1.webp');
+    mask-image: url('/ui/mask-splat-1.webp');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    pointer-events: none;
+  }
+}
+
+@utility splat-btn-2 {
+  &::before {
+    bottom: -26%;
+    -webkit-mask-image: url('/ui/mask-splat-2.webp');
+    mask-image: url('/ui/mask-splat-2.webp');
+  }
+}
+
+/** Loose splatter cluster accent for panel corners. Colour via --paint. */
+@utility splatter-accent {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    width: 130px;
+    height: 130px;
+    top: -28px;
+    right: -22px;
+    z-index: 0;
+    opacity: 0.5;
+    background: var(--paint, #22d3ee);
+    -webkit-mask-image: url('/ui/mask-splatter.webp');
+    mask-image: url('/ui/mask-splatter.webp');
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    pointer-events: none;
+  }
+}
+
+/** Display title: vivid gradient ink with a drop glow. */
+@utility paint-title {
+  position: relative;
+  background: linear-gradient(100deg, #ff4d1c 0%, #ffb020 30%, #e879f9 62%, #22d3ee 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 2px 12px rgba(255, 77, 28, 0.35));
+}
+
+/** Paint drips hanging from a top edge (title bars, hero fold). */
+@utility drip-edge {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset-inline: 6%;
+    top: 100%;
+    height: 42px;
+    background: var(--paint, #ff4d1c);
+    -webkit-mask-image: url('/ui/mask-drips.webp');
+    mask-image: url('/ui/mask-drips.webp');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    pointer-events: none;
+  }
+}
+
+/** Small chip wearing a splat instead of a circle. */
+@utility splat-chip {
+  position: relative;
+  isolation: isolate;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -18%;
+    z-index: -1;
+    background: var(--paint, rgba(255, 77, 28, 0.9));
+    -webkit-mask-image: url('/ui/mask-splat-2.webp');
+    mask-image: url('/ui/mask-splat-2.webp');
+    -webkit-mask-size: 100% 100%;
+    mask-size: 100% 100%;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+  }
+}
