@@ -167,8 +167,17 @@ export class AimTracker {
   /** World elevation of the pointing ray at the calibration pose. */
   private refElevation = 0;
 
-  private yawFilter = new OneEuroFilter(1.1, 0.014);
-  private pitchFilter = new OneEuroFilter(1.1, 0.014);
+  /** Rotation speed (rad/s, EMA-smoothed) — gates the translation assist. */
+  private prevQ = new THREE.Quaternion();
+  private prevQt = 0;
+  private rotSpeed = 0;
+
+  /**
+   * Tuned for a steady held aim: a lower resting cutoff smooths micro-jitter
+   * harder while the raised speed coefficient keeps deliberate flicks snappy.
+   */
+  private yawFilter = new OneEuroFilter(0.85, 0.024);
+  private pitchFilter = new OneEuroFilter(0.85, 0.024);
   private rollFilter = new OneEuroFilter(1.4, 0.02);
 
   /**
@@ -211,14 +220,17 @@ export class AimTracker {
   }
 
   /**
-   * Lateral-translation assist. Rotation is still the backbone of aiming, but
-   * a player who keeps the phone upright and *slides* it sideways expects the
-   * cursor to follow. True position from a phone IMU is impossible (double
-   * integration drifts in seconds), so this is deliberately humble: world-
-   * frame linear acceleration → leaky velocity → cursor offset, with a slow
-   * bias filter eating sensor offset and the existing soft-boundary drift
-   * absorbing any residual error. Offsets are in the same angular units as
-   * yaw/pitch so the drift/clamp logic applies to the sum unchanged.
+   * Lateral-translation assist. Rotation is the backbone of aiming; this only
+   * covers the player who holds the phone still and *slides* it sideways.
+   *
+   * The hard-won constraint (this caused a real regression): swinging the
+   * phone through a rotation moves the sensor along an arc, which reads as
+   * genuine linear acceleration — integrating it while the player is doing
+   * ordinary rotational aiming shoves the cursor around and makes tracking
+   * feel broken. So translation is gated OFF whenever the device is rotating:
+   * above ~14°/s the assist contributes nothing and rotational aiming is
+   * exactly the pure-gyro behaviour. Only a rotationally-quiet, deliberately
+   * sliding phone engages it.
    */
   private accelBias = new THREE.Vector3();
   private velX = 0;
@@ -228,11 +240,32 @@ export class AimTracker {
   private accelWorld = new THREE.Vector3();
 
   /** m/s² below this is treated as rest — phones idle around ±0.05-0.1. */
-  private static ACCEL_DEADBAND = 0.22;
-  /** Velocity half-life ≈ 0.2s: glides while moving, stops when you stop. */
-  private static VEL_LEAK = 3.4;
+  private static ACCEL_DEADBAND = 0.35;
+  /** Velocity half-life ≈ 0.15s: glides while moving, stops when you stop. */
+  private static VEL_LEAK = 4.5;
   /** Radian-equivalent cursor offset per metre of integrated travel. */
-  private static TRANSLATE_GAIN = 1.35;
+  private static TRANSLATE_GAIN = 0.9;
+  /** rad/s of device rotation at which the assist is fully suppressed. */
+  private static ROT_GATE = 0.25;
+  /**
+   * ms the gate stays closed after rotation stops. At a sweep's turnaround
+   * the angular speed passes through zero exactly when tangential arc
+   * acceleration peaks — without this hold-off the assist grabs that spike.
+   */
+  private static ROT_HOLDOFF_MS = 650;
+  private lastRotAboveMs = -1e9;
+  /**
+   * Probation for fresh gate-open streaks. Rotation detection lags the real
+   * movement by ~150ms (the speed estimate is smoothed), so the moment a
+   * rotation STARTS, peak arc-acceleration arrives while the gate still looks
+   * open. New streaks therefore integrate into a pending buffer first: if
+   * rotation follows within the window the buffer is discarded; if the quiet
+   * holds, it commits retroactively so a genuine slide loses nothing.
+   */
+  private static COMMIT_DELAY_MS = 250;
+  private gateOpenSince = -1;
+  private pendingX = 0;
+  private pendingY = 0;
 
   /**
    * Feeds gravity-free device acceleration (DeviceMotionEvent.acceleration,
@@ -240,19 +273,49 @@ export class AimTracker {
    */
   addTranslation(ax: number, ay: number, az: number, dtSeconds: number) {
     if (!this.hasReference) return;
-    const dt = THREE.MathUtils.clamp(dtSeconds, 1 / 240, 0.1);
+    const dt = THREE.MathUtils.clamp(dtSeconds, 1 / 120, 0.05);
+
+    // Rotation gate — see the class comment. The hold-off keeps it closed
+    // through sweep turnarounds, where rotation momentarily stops exactly as
+    // tangential arc acceleration peaks. Rotating also dumps any built-up
+    // velocity so a rotation started mid-slide cannot keep coasting.
+    if (this.rotSpeed > AimTracker.ROT_GATE * 0.45) this.lastRotAboveMs = this.prevQt;
+    const inHoldoff = this.prevQt - this.lastRotAboveMs < AimTracker.ROT_HOLDOFF_MS;
+    const gate = inHoldoff
+      ? 0
+      : THREE.MathUtils.clamp(1 - this.rotSpeed / AimTracker.ROT_GATE, 0, 1);
+    if (gate < 0.6) {
+      this.velX *= 0.7;
+      this.velY *= 0.7;
+    }
+    if (gate <= 0.02) {
+      // Rotation: drop anything the lagging gate let through on its way shut.
+      this.pendingX = 0;
+      this.pendingY = 0;
+      this.gateOpenSince = -1;
+    } else if (this.gateOpenSince < 0) {
+      this.gateOpenSince = this.prevQt;
+    }
+    const committed =
+      this.gateOpenSince >= 0 && this.prevQt - this.gateOpenSince > AimTracker.COMMIT_DELAY_MS;
 
     // Device frame → world frame, so "slide right" is screen-right whatever
     // the phone's tilt. The device quaternion q includes the camera-style
     // remap, so the device's own axes are recovered through it directly.
     this.accelWorld.set(ax, ay, az).applyQuaternion(this.q);
 
-    // Slow bias filter: whatever survives averaging over ~2s is offset, not
-    // motion. Subtracting it kills residual gravity leakage and sensor bias.
-    const biasAlpha = Math.min(dt / 2.0, 1);
-    this.accelBias.lerp(this.accelWorld, biasAlpha);
-    let wx = this.accelWorld.x - this.accelBias.x;
-    let wy = this.accelWorld.y - this.accelBias.y;
+    // Slow bias filter: whatever survives averaging over ~2s at rest is
+    // offset, not motion. Frozen while rotating — arc acceleration would
+    // poison it.
+    if (gate > 0.8) {
+      const biasAlpha = Math.min(dt / 2.0, 1);
+      this.accelBias.lerp(this.accelWorld, biasAlpha);
+    }
+    // The orientation pipeline's -gamma convention mirrors the device X axis
+    // into world space, so world X is negated to make "slide right" read
+    // as screen-right (verified numerically).
+    let wx = -(this.accelWorld.x - this.accelBias.x) * gate;
+    let wy = (this.accelWorld.y - this.accelBias.y) * gate;
 
     const mag = Math.hypot(wx, wy);
     if (mag < AimTracker.ACCEL_DEADBAND) {
@@ -264,16 +327,19 @@ export class AimTracker {
     this.velX = this.velX * leak + wx * dt;
     this.velY = this.velY * leak + wy * dt;
 
-    this.transX = THREE.MathUtils.clamp(
-      this.transX + this.velX * dt * AimTracker.TRANSLATE_GAIN * 10,
-      -0.9,
-      0.9
-    );
-    this.transY = THREE.MathUtils.clamp(
-      this.transY + this.velY * dt * AimTracker.TRANSLATE_GAIN * 10,
-      -0.9,
-      0.9
-    );
+    const stepX = this.velX * dt * AimTracker.TRANSLATE_GAIN * 10;
+    const stepY = this.velY * dt * AimTracker.TRANSLATE_GAIN * 10;
+    if (committed) {
+      this.transX += this.pendingX + stepX;
+      this.transY += this.pendingY + stepY;
+      this.pendingX = 0;
+      this.pendingY = 0;
+    } else {
+      this.pendingX += stepX;
+      this.pendingY += stepY;
+    }
+    this.transX = THREE.MathUtils.clamp(this.transX, -0.5, 0.5);
+    this.transY = THREE.MathUtils.clamp(this.transY, -0.5, 0.5);
   }
 
   /** Marks the current pose as dead centre. */
@@ -290,6 +356,9 @@ export class AimTracker {
     this.velY = 0;
     this.transX = 0;
     this.transY = 0;
+    this.pendingX = 0;
+    this.pendingY = 0;
+    this.gateOpenSince = -1;
     this.yawFilter.reset();
     this.pitchFilter.reset();
     this.rollFilter.reset();
@@ -297,6 +366,16 @@ export class AimTracker {
 
   update(alpha: number, beta: number, gamma: number, timestampMs: number): AimSample {
     quaternionFromOrientation(this.q, alpha, beta, gamma, currentScreenAngle());
+
+    // Track how fast the device is rotating — the translation assist's gate.
+    if (this.prevQt > 0) {
+      const dtq = Math.max((timestampMs - this.prevQt) / 1000, 1 / 240);
+      const dot = Math.min(Math.abs(this.prevQ.dot(this.q)), 1);
+      const instant = (2 * Math.acos(dot)) / dtq;
+      this.rotSpeed += (instant - this.rotSpeed) * Math.min(dtq / 0.12, 1);
+    }
+    this.prevQ.copy(this.q);
+    this.prevQt = timestampMs;
 
     if (!this.hasReference) this.calibrate();
 
