@@ -30,11 +30,17 @@ if (TOOL === 'brush') {
   await page.keyboard.press('b');
   await page.waitForTimeout(400);
 }
+// Park the pointer far from the probe point for BOTH screenshots: the host's
+// floating 3D tool (and its player-colour band and reticle) follows the mouse,
+// so leaving it near the stroke would count as "paint" in the diff.
+const PARK = { x: 40, y: 120 };
+const TX = Number(process.env.TX || 850), TY = Number(process.env.TY || 560);
+await page.mouse.move(PARK.x, PARK.y);
+await page.waitForTimeout(900);
 const before = PNG.sync.read(await page.screenshot());
 
-// Hold a stationary spray at an exact point on the deck (right of centre so
-// symmetry can't mask a horizontal offset).
-const TX = Number(process.env.TX || 850), TY = Number(process.env.TY || 560);
+// Hold a stationary stroke at an exact point (right of centre so symmetry
+// can't mask a horizontal offset).
 await page.mouse.move(TX, TY);
 await page.mouse.down();
 // keep frames alive with sub-pixel jiggle that stays within one CSS px
@@ -43,17 +49,24 @@ for (let i = 0; i < 25; i++) {
   await page.waitForTimeout(60);
 }
 await page.mouse.up();
-await page.waitForTimeout(500);
+// Park the pointer again so the after-shot matches the before-shot except for
+// the paint itself, then let the idle float settle.
+await page.mouse.move(PARK.x, PARK.y);
+await page.waitForTimeout(900);
 const after = PNG.sync.read(await page.screenshot({ path: `${OUT}/verify-offset.png` }));
 
-// Red paint on a white deck keeps R high and pulls G/B down, so classify by
-// red dominance appearing where it wasn't before.
-const isRed = (d, i) => d[i] > 110 && d[i] - d[i + 1] > 45 && d[i] - d[i + 2] > 45;
+// With the tool parked identically in both shots, any meaningful colour
+// change IS paint — no per-colour classifier needed (that misfired on
+// objects that already contain the paint colour, like the brick wall).
 let sx = 0, sy = 0, n = 0;
 for (let y = 0; y < after.height; y++) {
   for (let x = 0; x < after.width; x++) {
     const i = (y * after.width + x) * 4;
-    if (isRed(after.data, i) && !isRed(before.data, i)) { sx += x; sy += y; n++; }
+    const delta =
+      Math.abs(after.data[i] - before.data[i]) +
+      Math.abs(after.data[i + 1] - before.data[i + 1]) +
+      Math.abs(after.data[i + 2] - before.data[i + 2]);
+    if (delta > 70 && Math.hypot(x - PARK.x, y - PARK.y) > 160) { sx += x; sy += y; n++; }
   }
 }
 if (n < 30) {

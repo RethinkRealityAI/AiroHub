@@ -17,7 +17,7 @@ import {
   Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, X, Zap,
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
-  Wifi, WifiOff, Boxes, Undo2, History, Video,
+  Wifi, WifiOff, Boxes, Undo2, Redo2, History, Video,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -275,6 +275,9 @@ export default function CanvasView() {
       }
     });
 
+    conn.on('redo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.redoStroke(strokeId)) paintSurface.commit();
+    });
     conn.on('undo-stroke', ({ strokeId }) => {
       if (strokeId && paintSurface.undoStroke(strokeId)) {
         paintSurface.commit();
@@ -382,6 +385,7 @@ export default function CanvasView() {
   }, []);
 
   const undoRef = useRef<() => void>(() => {});
+  const redoRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     const onFsChange = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -394,7 +398,12 @@ export default function CanvasView() {
       if (key === 'o') setStageMode((m) => (m === 'paint' ? 'orbit' : 'paint'));
       if (key === 'z' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        undoRef.current();
+        if (e.shiftKey) redoRef.current();
+        else undoRef.current();
+      }
+      if (key === 'y' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        redoRef.current();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -448,6 +457,15 @@ export default function CanvasView() {
     connectionRef.current?.emit('undo-stroke', { strokeId });
   }, [paintSurface]);
   undoRef.current = undoLast;
+
+  const redoLast = useCallback(() => {
+    const strokeId = paintSurface.redoStroke();
+    if (!strokeId) return;
+    paintSurface.commit();
+    sounds.playClick(1.25);
+    connectionRef.current?.emit('redo-stroke', { strokeId });
+  }, [paintSurface]);
+  redoRef.current = redoLast;
 
   const [replaying, setReplaying] = useState(false);
   const replayArtwork = async () => {
@@ -821,6 +839,9 @@ export default function CanvasView() {
 
               <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
                 <Undo2 size={15} />
+              </GlassIconButton>
+              <GlassIconButton onClick={redoLast} title="Redo undone stroke (Ctrl+Shift+Z)" size={38}>
+                <Redo2 size={15} />
               </GlassIconButton>
               <GlassIconButton
                 onClick={replayArtwork}

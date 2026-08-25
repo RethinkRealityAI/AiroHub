@@ -27,6 +27,23 @@ const BASE_LEAN = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.16, 0, 
 /** Stand the rig upright (spray) / pen-tilt it (brush) inside the group. */
 const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
 
+/**
+ * Spin about the can's own vertical axis. The generated can model bakes
+ * nozzle-orifice detail on several sides, so no spin can hide it entirely
+ * (screenshot-verified sweep); zero avoids dragging the texture seam into
+ * view. The *spray direction* cues — mist and halo — always point into the
+ * screen regardless.
+ */
+const SPIN_Z = { spray: 0, brush: 0 } as const;
+
+/**
+ * The can is the hero of Aim mode, so it fills most of the viewport: nozzle
+ * near the top of the screen, body running past the bottom edge. The brush
+ * sits lower and smaller so the whole tool (tip to handle) stays visible.
+ */
+const SCALE = { spray: 2.6, brush: 1.9 } as const;
+const BASE_Y = { spray: 1.25, brush: -1.25 } as const;
+
 interface HandheldToolProps {
   tool: 'spray' | 'brush';
   color: string;
@@ -110,7 +127,7 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
       shakeX = (Math.random() - 0.5) * 0.28;
       shakeY = (Math.random() - 0.5) * 0.28;
     }
-    group.position.set(shakeX, idleY + shakeY - 0.72, 0);
+    group.position.set(shakeX, idleY + shakeY + BASE_Y[tool], 0);
 
     // Trigger recoil: the can dips slightly into the grip when pressed.
     const recoil = recoilRef.current;
@@ -130,10 +147,13 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
         const toSpawn = Math.floor(spawnDebt.current);
         spawnDebt.current -= toSpawn;
 
-        // The nozzle sits at the group origin (top of the upright can);
-        // spray leaves up-and-forward, into the screen toward the studio.
-        nozzleWorld.set(0, 0.05, 0).applyQuaternion(displayQuat.current).add(group.position);
-        sprayDir.set(0, 0.35, -1).normalize().applyQuaternion(displayQuat.current);
+        // The nozzle sits at the group origin (top of the upright can). Mist
+        // spawns *behind* the can and rushes into the screen toward the
+        // studio — the viewer only ever sees it leaving. The particle pool
+        // lives outside the scaled group, so the offset scales manually.
+        const s = SCALE[tool];
+        nozzleWorld.set(0, 0.12 * s, -0.32 * s).applyQuaternion(displayQuat.current).add(group.position);
+        sprayDir.set(0, 0.18, -1).normalize().applyQuaternion(displayQuat.current);
 
         for (let n = 0; n < toSpawn; n++) {
           const index = freeList.current.pop();
@@ -143,7 +163,7 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
           const spread = 0.55;
           p.vel
             .copy(sprayDir)
-            .multiplyScalar(3.6 + Math.random() * 1.4)
+            .multiplyScalar(4.2 + Math.random() * 1.6)
             .add(
               new THREE.Vector3(
                 (Math.random() - 0.5) * spread,
@@ -151,7 +171,7 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
                 (Math.random() - 0.5) * spread
               )
             );
-          p.maxLife = 0.3 + Math.random() * 0.25;
+          p.maxLife = 0.24 + Math.random() * 0.2;
           p.life = p.maxLife;
           p.scale = 0.035 + Math.random() * 0.075;
         }
@@ -188,21 +208,25 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
 
   return (
     <>
-      <group ref={groupRef} scale={1.85}>
+      <group ref={groupRef} scale={SCALE[tool]}>
         <group ref={recoilRef}>
           <group rotation={[POSTURE_X[tool], 0, 0]}>
-            {rig ? (
-              <primitive object={rig.root} />
-            ) : (
-              <mesh position={[0, 0, 0.8]}>
-                <capsuleGeometry args={[0.22, 0.9, 4, 14]} />
-                <meshStandardMaterial color={color} roughness={0.4} metalness={0.4} />
-              </mesh>
-            )}
+            <group rotation={[0, 0, SPIN_Z[tool]]}>
+              {rig ? (
+                <primitive object={rig.root} />
+              ) : (
+                <mesh position={[0, 0, 0.8]}>
+                  <capsuleGeometry args={[0.22, 0.9, 4, 14]} />
+                  <meshStandardMaterial color={color} roughness={0.4} metalness={0.4} />
+                </mesh>
+              )}
+            </group>
 
-            {/* Player-colour band around the body, matching the studio view. */}
-            <mesh position={[0, 0, 0.55]}>
-              <torusGeometry args={[0.24, 0.05, 12, 28]} />
+            {/* Player-colour band around the body, matching the studio view.
+                The brush handle is far thinner than the can, so its band is a
+                slim grip ring rather than a can collar. */}
+            <mesh position={[0, 0, tool === 'spray' ? 0.55 : 0.72]}>
+              <torusGeometry args={tool === 'spray' ? [0.24, 0.05, 12, 28] : [0.09, 0.028, 12, 28]} />
               <meshStandardMaterial
                 color={color}
                 emissive={color}
@@ -212,8 +236,9 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
             </mesh>
           </group>
 
-          {/* Aim halo above the nozzle — lights up while painting. */}
-          <mesh position={[0, 0.32, -0.12]} rotation={[Math.PI / 2.6, 0, 0]}>
+          {/* Aim halo just behind the nozzle, tilted into the screen — it
+              hints at where the aerosol goes, and lights up while painting. */}
+          <mesh position={[0, 0.14, -0.34]} rotation={[-Math.PI / 2.6, 0, 0]}>
             <ringGeometry args={[0.12, 0.16, 26]} />
             <meshBasicMaterial
               color={color}

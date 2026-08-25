@@ -20,7 +20,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
-  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Eye, EyeOff,
+  Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Redo2,
+  ChevronDown, ChevronUp,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -345,7 +346,9 @@ export default function ControllerView() {
   });
 
   const [sensorState, setSensorState] = useState<'idle' | 'granted' | 'denied' | 'unsupported'>('idle');
-  const [showCan, setShowCan] = useState(true);
+  /** The bottom tool dock collapses to keep the stage immersive; the colour
+   *  button stays on screen either way. */
+  const [dockOpen, setDockOpen] = useState(true);
   const [triggerActive, setTriggerActive] = useState(false);
   const [shaking, setShaking] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -415,6 +418,9 @@ export default function ControllerView() {
     });
     conn.on('undo-stroke', ({ strokeId }) => {
       if (strokeId && paintSurface.undoStroke(strokeId)) paintSurface.commit();
+    });
+    conn.on('redo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.redoStroke(strokeId)) paintSurface.commit();
     });
 
     // Late-join sync: ask the studio for the artwork as it stands, and bake
@@ -594,6 +600,15 @@ export default function ControllerView() {
     sounds.playClick(1.1);
     navigator.vibrate?.(14);
     connectionRef.current?.emit('undo-stroke', { strokeId });
+  };
+
+  const redoLast = () => {
+    const strokeId = paintSurface.redoStroke();
+    if (!strokeId) return;
+    paintSurface.commit();
+    sounds.playClick(1.25);
+    navigator.vibrate?.(14);
+    connectionRef.current?.emit('redo-stroke', { strokeId });
   };
 
   const recalibrate = () => {
@@ -860,21 +875,19 @@ export default function ControllerView() {
               }}
             >
               {/* The handheld 3D tool, driven live by the motion sensors. */}
-              {showCan && (
-                <div className="absolute inset-0 pointer-events-none">
-                  <Canvas dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
-                    <Suspense fallback={null}>
-                      <AimStage
-                        tool={tool}
-                        color={color}
-                        pressed={triggerActive}
-                        shaking={shaking}
-                        trackerRef={trackerRef}
-                      />
-                    </Suspense>
-                  </Canvas>
-                </div>
-              )}
+              <div className="absolute inset-0 pointer-events-none">
+                <Canvas dpr={[1, 2]} gl={{ antialias: true, alpha: true }}>
+                  <Suspense fallback={null}>
+                    <AimStage
+                      tool={tool}
+                      color={color}
+                      pressed={triggerActive}
+                      shaking={shaking}
+                      trackerRef={trackerRef}
+                    />
+                  </Suspense>
+                </Canvas>
+              </div>
 
               <button
                 onClick={(e) => {
@@ -889,34 +902,22 @@ export default function ControllerView() {
                 Recentre
               </button>
 
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowCan((v) => !v);
-                  sounds.playClick(1.1);
-                }}
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerUp={(e) => e.stopPropagation()}
-                title={showCan ? 'Hide the 3D can' : 'Show the 3D can'}
-                className="tap absolute top-3 left-3 glass glass-sheen rounded-full w-9 h-9 grid place-items-center z-20 text-white/70"
-              >
-                {showCan ? <Eye size={14} /> : <EyeOff size={14} />}
-              </button>
-
-              <div className="absolute bottom-4 inset-x-0 flex justify-center px-6 pointer-events-none">
-                <div
-                  className={`glass glass-sheen rounded-full px-4 py-2 text-[10px] font-bold tracking-[0.14em] uppercase text-center transition-colors ${
-                    triggerActive ? 'text-white' : 'text-white/60'
-                  }`}
-                  style={triggerActive ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
-                >
-                  {triggerActive
-                    ? tool === 'spray'
-                      ? 'Spraying'
-                      : 'Painting'
-                    : 'Point at the screen · hold to paint'}
+              {dockOpen && (
+                <div className="absolute bottom-4 inset-x-0 flex justify-center px-6 pointer-events-none">
+                  <div
+                    className={`glass glass-sheen rounded-full px-4 py-2 text-[10px] font-bold tracking-[0.14em] uppercase text-center transition-colors ${
+                      triggerActive ? 'text-white' : 'text-white/60'
+                    }`}
+                    style={triggerActive ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
+                  >
+                    {triggerActive
+                      ? tool === 'spray'
+                        ? 'Spraying'
+                        : 'Painting'
+                      : 'Point at the screen · hold to paint'}
+                  </div>
                 </div>
-              </div>
+              )}
             </motion.div>
           )}
 
@@ -977,13 +978,15 @@ export default function ControllerView() {
                 </AnimatePresence>
               </div>
 
-              <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10 px-4">
-                <span className="glass glass-sheen rounded-full px-3.5 py-1.5 text-[9px] font-bold tracking-[0.14em] uppercase text-white/70 text-center">
-                  {interaction === 'paint'
-                    ? `One finger paints · two fingers rotate & zoom`
-                    : 'Drag to orbit'}
-                </span>
-              </div>
+              {dockOpen && (
+                <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10 px-4">
+                  <span className="glass glass-sheen rounded-full px-3.5 py-1.5 text-[9px] font-bold tracking-[0.14em] uppercase text-white/70 text-center">
+                    {interaction === 'paint'
+                      ? `One finger paints · two fingers rotate & zoom`
+                      : 'Drag to orbit'}
+                  </span>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -1047,37 +1050,37 @@ export default function ControllerView() {
       </main>
 
       {/* -------------------------------- dock -------------------------------- */}
-      <footer className="shrink-0 p-3 safe-bottom z-30">
-        <GlassPanel className="p-2.5 flex flex-col gap-2.5">
-          <div className="flex items-center gap-2">
-            <Segmented
-              layoutId="controller-tool"
-              className="flex-1"
-              value={tool}
-              onChange={(next) => {
-                setTool(next);
-                sounds.playClick(1.2);
-                navigator.vibrate?.(12);
-                connectionRef.current?.emit('settings', {
-                  playerId: playerIdRef.current,
-                  tool: next,
-                  color,
-                });
-              }}
-              options={[
-                { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
-                { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
-              ]}
-            />
-            <ColorWell
-              color={color}
-              onChange={(hex) => {
-                setColor(hex);
-                connectionRef.current?.emit('settings', { playerId: playerIdRef.current, color: hex });
-              }}
-              size={40}
-            />
-          </div>
+      <footer className="shrink-0 px-3 pb-3 safe-bottom z-30">
+        <AnimatePresence initial={false}>
+          {dockOpen && (
+            <motion.div
+              key="dock"
+              initial={{ opacity: 0, y: 16, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: 'auto' }}
+              exit={{ opacity: 0, y: 16, height: 0 }}
+              transition={{ duration: 0.2, ease: 'easeOut' }}
+              className="overflow-hidden"
+            >
+              <GlassPanel className="p-2.5 flex flex-col gap-2.5 mb-2">
+          <Segmented
+            layoutId="controller-tool"
+            className="w-full"
+            value={tool}
+            onChange={(next) => {
+              setTool(next);
+              sounds.playClick(1.2);
+              navigator.vibrate?.(12);
+              connectionRef.current?.emit('settings', {
+                playerId: playerIdRef.current,
+                tool: next,
+                color,
+              });
+            }}
+            options={[
+              { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
+              { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+            ]}
+          />
 
           <div className="flex items-center gap-3 px-1">
             <span className="label-caps text-white/40 shrink-0">Size</span>
@@ -1129,6 +1132,14 @@ export default function ControllerView() {
             </button>
 
             <button
+              onClick={redoLast}
+              className="tap flex-1 py-2.5 rounded-2xl bg-white/[0.06] border border-white/12 text-white/75 flex items-center justify-center gap-1.5 text-[10px] font-bold"
+            >
+              <Redo2 size={13} />
+              Redo
+            </button>
+
+            <button
               onClick={() => {
                 sounds.playWhoosh();
                 paintSurface.clear();
@@ -1160,7 +1171,48 @@ export default function ControllerView() {
               </button>
             )}
           </div>
-        </GlassPanel>
+              </GlassPanel>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Always-present slim bar: dock handle on the left, colour on the
+            right — collapsing the tools never takes the colour away. */}
+        <div className="flex items-center justify-between gap-2">
+          <button
+            onClick={() => {
+              setDockOpen((v) => !v);
+              sounds.playClick(1.1);
+              navigator.vibrate?.(8);
+            }}
+            className="tap glass glass-sheen rounded-full h-11 pl-3.5 pr-4 flex items-center gap-1.5 text-[10px] font-bold text-white/75"
+            title={dockOpen ? 'Hide the tool dock' : 'Show the tool dock'}
+          >
+            {dockOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+            {dockOpen ? (
+              'Hide'
+            ) : (
+              <>
+                {tool === 'spray' ? (
+                  <SprayCan size={13} className="text-[var(--color-airo-flame)]" />
+                ) : (
+                  <Brush size={13} className="text-[var(--color-airo-aqua)]" />
+                )}
+                Tools
+                <span className="text-white/40 font-mono text-[9px]">{toolSize.toFixed(1)}×</span>
+              </>
+            )}
+          </button>
+
+          <ColorWell
+            color={color}
+            onChange={(hex) => {
+              setColor(hex);
+              connectionRef.current?.emit('settings', { playerId: playerIdRef.current, color: hex });
+            }}
+            size={44}
+          />
+        </div>
       </footer>
 
       {/* ------------------------------- sheets ------------------------------- */}

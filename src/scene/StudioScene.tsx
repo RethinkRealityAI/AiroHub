@@ -159,6 +159,12 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       const host = playersRef.current.find((p) => p.isHost);
       if (!host) return;
       host.isPainting = true;
+      // The stroke id must be minted HERE, where the host's stroke begins.
+      // The frame loop only mints ids on its own begin() transition, which
+      // this pre-empts — without this line every host stroke shared one id,
+      // so undo swallowed them together and replay repainted them in the
+      // first stroke's colour.
+      strokeIds.current.set(host.id, `${host.id}#${++strokeSeq.current}`);
       getPainter(host.id).begin({ tool: host.tool, size: host.sizeMultiplier ?? 1 });
       if (host.tool === 'spray') sounds.startSpray(1);
       else sounds.startBrush();

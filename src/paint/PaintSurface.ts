@@ -153,6 +153,7 @@ export class PaintSurface {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.log = [];
     this.loggedStamps = 0;
+    this.redoStack = [];
     this.baseline = null;
     this.dirty = true;
   }
@@ -188,7 +189,18 @@ export class PaintSurface {
     let entry: Extract<LogEntry, { kind: 'stamps' }> | null = null;
     if (strokeId) {
       const last = this.log[this.log.length - 1];
-      if (last && last.kind === 'stamps' && last.strokeId === strokeId) {
+      // Coalesce only a true continuation: same stroke id AND same tool and
+      // colour. A reused id with a different colour must open a fresh entry,
+      // or the stamps would draw in the new colour live but *record* under
+      // the old entry's colour — replay would then repaint them wrong, and
+      // undo would swallow several visually separate strokes at once.
+      if (
+        last &&
+        last.kind === 'stamps' &&
+        last.strokeId === strokeId &&
+        last.tool === tool &&
+        last.color === color
+      ) {
         entry = last;
       } else {
         entry = { kind: 'stamps', strokeId, tool, color, stamps: [] };
@@ -220,17 +232,53 @@ export class PaintSurface {
     return this.log.length ? this.log[this.log.length - 1].strokeId : null;
   }
 
-  /** Removes one stroke and repaints the remaining history. */
+  /**
+   * Undone strokes park here so they can be redone. Kept independent of new
+   * painting (multiplayer strokes keep arriving; strict linear history would
+   * constantly invalidate everyone's redo) — a redone stroke simply re-lands
+   * on top of the log.
+   */
+  private redoStack: Extract<LogEntry, { kind: 'stamps' }>[] = [];
+
+  /** Removes one stroke, parks it for redo, and repaints the rest. */
   undoStroke(strokeId: string): boolean {
     for (let i = this.log.length - 1; i >= 0; i--) {
       if (this.log[i].strokeId === strokeId) {
         const [removed] = this.log.splice(i, 1);
-        if (removed.kind === 'stamps') this.loggedStamps -= removed.stamps.length;
+        if (removed.kind === 'stamps') {
+          this.loggedStamps -= removed.stamps.length;
+          this.redoStack.push(removed);
+          if (this.redoStack.length > 40) this.redoStack.shift();
+        }
         this.repaintFromLog();
         return true;
       }
     }
     return false;
+  }
+
+  /** Stroke id the next redo would restore, if any. */
+  lastUndoneStrokeId(): string | null {
+    return this.redoStack.length ? this.redoStack[this.redoStack.length - 1].strokeId : null;
+  }
+
+  /**
+   * Restores an undone stroke — the one matching `strokeId`, or the most
+   * recently undone. Returns its stroke id so the caller can broadcast the
+   * redo to peers (they hold the same parked entry from the mirrored undo).
+   */
+  redoStroke(strokeId?: string): string | null {
+    let index = this.redoStack.length - 1;
+    if (strokeId) {
+      index = this.redoStack.map((e) => e.strokeId).lastIndexOf(strokeId);
+    }
+    if (index < 0) return null;
+    const [entry] = this.redoStack.splice(index, 1);
+    this.log.push(entry);
+    this.loggedStamps += entry.stamps.length;
+    this.trimLog();
+    this.repaintFromLog();
+    return entry.strokeId;
   }
 
   private repaintFromLog() {

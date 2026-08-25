@@ -7,7 +7,8 @@
  * and deposits stamps at each ray's own hit UV.
  *
  * Both tools are built from *small* ray-anchored dabs — spray as a scattered
- * cone, brush as a tight cluster — because the generated models are UV-atlased:
+ * cone, brush as a deterministic 3-dab ribbon — because the generated models
+ * are UV-atlased:
  * a single large disc stamped in texture space can cross an island boundary
  * and bleed paint onto an unrelated part of the model. Small per-ray dabs
  * cannot.
@@ -52,9 +53,8 @@ const BRUSH_DAB_WORLD_RADIUS = 0.075;
 const PATH_STEP_PX = 4;
 /** Hard cap on path samples per frame so a teleporting cursor can't stall. */
 const MAX_STEPS_PER_FRAME = 36;
-/** Rays per path sample. */
+/** Rays per spray path sample; the brush uses a fixed 3-dab ribbon instead. */
 const SPRAY_RAYS_PER_STEP = 14;
-const BRUSH_RAYS_PER_STEP = 6;
 
 /** Drip tuning. */
 const DRIP_HOLD_BEFORE_MS = 420;
@@ -165,7 +165,7 @@ export class SurfacePainter {
 
     if (!this.lastNdc) {
       this.lastNdc = new THREE.Vector2(ndcX, ndcY);
-      this.depositAt(ndcX, ndcY, stamps);
+      this.depositAt(ndcX, ndcY, stamps, 0, 0);
       return { stamps, hit: central, planePoint };
     }
 
@@ -177,7 +177,7 @@ export class SurfacePainter {
     if (distance < stepNdcSize * 0.4) {
       // Held still: aerosol keeps depositing, builds up, and starts to run.
       if (this.config.tool === 'spray') {
-        this.depositAt(ndcX, ndcY, stamps);
+        this.depositAt(ndcX, ndcY, stamps, 0, 0);
         this.holdMs += deltaSeconds * 1000;
         this.maybeSpawnDrips(ndcX, ndcY, deltaSeconds);
       }
@@ -185,10 +185,12 @@ export class SurfacePainter {
     }
 
     this.holdMs = 0;
+    const dirX = dx / distance;
+    const dirY = dy / distance;
     const steps = Math.min(Math.ceil(distance / stepNdcSize), MAX_STEPS_PER_FRAME);
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
-      this.depositAt(from.x + dx * t, from.y + dy * t, stamps);
+      this.depositAt(from.x + dx * t, from.y + dy * t, stamps, dirX, dirY);
     }
     this.lastNdc.set(ndcX, ndcY);
     return { stamps, hit: central, planePoint };
@@ -244,8 +246,12 @@ export class SurfacePainter {
     return viewportH / (2 * Math.max(distance, 0.01) * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
   }
 
-  /** Deposits one path sample: brush cluster, or a burst of spray grains. */
-  private depositAt(ndcX: number, ndcY: number, out: PaintStamp[]) {
+  /**
+   * Deposits one path sample: a solid brush ribbon segment, or a burst of
+   * spray grains. `dirX/dirY` is the stroke's screen direction (NDC,
+   * normalised) — zero for a stationary tap.
+   */
+  private depositAt(ndcX: number, ndcY: number, out: PaintStamp[], dirX: number, dirY: number) {
     const { tool, size } = this.config;
     const camera = this.getCamera() as THREE.PerspectiveCamera;
     const viewportH = Math.max(this.getViewportHeight(), 1);
@@ -256,51 +262,62 @@ export class SurfacePainter {
     const fovScale = this.pxPerWorldUnit(central.distance || 10);
     const aspect = (camera as any).aspect || 1;
 
-    const scatter = (
-      worldRadius: number,
-      rays: number,
-      dabWorldRadius: number,
-      dabClampMax: number,
-      opacity: (rand: number) => number,
-      bias: number
-    ) => {
-      const screenRadiusPx = worldRadius * size * fovScale;
-      const ndcRadiusY = (screenRadiusPx / viewportH) * 2;
-      const ndcRadiusX = ndcRadiusY / aspect;
-
-      for (let i = 0; i < rays; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        const rand = i === 0 ? 0 : Math.pow(Math.random(), bias);
-        const hit =
-          i === 0
-            ? central
-            : this.cast(ndcX + Math.cos(angle) * rand * ndcRadiusX, ndcY + Math.sin(angle) * rand * ndcRadiusY);
-        if (!hit || !hit.uv) continue;
-
-        const scale = this.texelsPerWorldUnit(hit);
-        const r = THREE.MathUtils.clamp(
-          dabWorldRadius * size * scale * (0.7 + Math.random() * 0.8),
-          0.8,
-          dabClampMax
-        );
-        out.push({ u: hit.uv.x, v: hit.uv.y, r, o: opacity(rand) });
-      }
-    };
-
     if (tool === 'brush') {
-      // A tight cluster of firm dabs instead of one big disc: same coverage,
-      // but each dab is anchored to its own hit so it can never bleed across
-      // a UV island edge.
-      scatter(BRUSH_WORLD_RADIUS, BRUSH_RAYS_PER_STEP, BRUSH_DAB_WORLD_RADIUS, 26, () => 0.9, 0.6);
-    } else {
-      scatter(
-        SPRAY_WORLD_RADIUS,
-        SPRAY_RAYS_PER_STEP,
-        SPRAY_DOT_WORLD_RADIUS,
-        9,
-        (rand) => (1 - rand * 0.55) * (0.32 + Math.random() * 0.3),
-        1.6
+      // A brush lays a *continuous ribbon*: one full-width dab on the path
+      // centre plus two half-offset dabs across the stroke, all fully
+      // deterministic — per-dab jitter is what used to read as spray blotches.
+      // Each dab is still anchored to its own raycast hit, so the ribbon can
+      // never bleed across a UV island edge the way one large disc could.
+      const dab = (x: number, y: number, dabWorldRadius: number) => {
+        const hit = x === ndcX && y === ndcY ? central : this.cast(x, y);
+        if (!hit || !hit.uv) return;
+        const scale = this.texelsPerWorldUnit(hit);
+        const r = THREE.MathUtils.clamp(dabWorldRadius * size * scale, 1, 30);
+        out.push({ u: hit.uv.x, v: hit.uv.y, r, o: 0.95 });
+      };
+
+      dab(ndcX, ndcY, BRUSH_DAB_WORLD_RADIUS * 1.35);
+
+      // Side dabs sit perpendicular to the stroke in *pixel* space (NDC is
+      // aspect-squashed); a stationary tap just uses a horizontal pair.
+      let tx = dirX * aspect;
+      let ty = dirY;
+      const tLen = Math.hypot(tx, ty);
+      let perpX = 1;
+      let perpY = 0;
+      if (tLen > 1e-6) {
+        perpX = -ty / tLen;
+        perpY = tx / tLen;
+      }
+      const offsetPx = 0.5 * BRUSH_WORLD_RADIUS * size * fovScale;
+      const offsetNdcX = (perpX * offsetPx * 2) / (viewportH * aspect);
+      const offsetNdcY = (perpY * offsetPx * 2) / viewportH;
+      dab(ndcX + offsetNdcX, ndcY + offsetNdcY, BRUSH_DAB_WORLD_RADIUS * 1.1);
+      dab(ndcX - offsetNdcX, ndcY - offsetNdcY, BRUSH_DAB_WORLD_RADIUS * 1.1);
+      return;
+    }
+
+    // Spray: a scattered cone of grains, dense in the middle, wispy outside.
+    const screenRadiusPx = SPRAY_WORLD_RADIUS * size * fovScale;
+    const ndcRadiusY = (screenRadiusPx / viewportH) * 2;
+    const ndcRadiusX = ndcRadiusY / aspect;
+
+    for (let i = 0; i < SPRAY_RAYS_PER_STEP; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const rand = i === 0 ? 0 : Math.pow(Math.random(), 1.6);
+      const hit =
+        i === 0
+          ? central
+          : this.cast(ndcX + Math.cos(angle) * rand * ndcRadiusX, ndcY + Math.sin(angle) * rand * ndcRadiusY);
+      if (!hit || !hit.uv) continue;
+
+      const scale = this.texelsPerWorldUnit(hit);
+      const r = THREE.MathUtils.clamp(
+        SPRAY_DOT_WORLD_RADIUS * size * scale * (0.7 + Math.random() * 0.8),
+        0.8,
+        9
       );
+      out.push({ u: hit.uv.x, v: hit.uv.y, r, o: (1 - rand * 0.55) * (0.32 + Math.random() * 0.3) });
     }
   }
 

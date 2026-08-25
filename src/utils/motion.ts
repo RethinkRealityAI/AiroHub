@@ -139,6 +139,15 @@ const UP = new THREE.Vector3(0, 1, 0);
 /**
  * Converts a stream of orientation events into a smoothed, calibrated aim
  * point. Instantiate one per controller.
+ *
+ * Yaw/pitch are decomposed in the **world (gravity) frame**, not the
+ * calibration-relative frame. The difference matters exactly when the phone is
+ * held like a real spray can: with a relative decomposition, calibrating at a
+ * reclined angle tilts the whole cursor plane with it, so turning left/right
+ * drags the cursor diagonally — it feels like the tracker assumes the phone is
+ * lying flat. In the world frame, rotation about the true vertical axis is
+ * always a pure horizontal sweep and elevation against gravity is always a
+ * pure vertical one, no matter how the phone is reclined at calibration.
  */
 export class AimTracker {
   private q = new THREE.Quaternion();
@@ -147,6 +156,16 @@ export class AimTracker {
   private dir = new THREE.Vector3();
   private upDir = new THREE.Vector3();
   private hasReference = false;
+
+  /**
+   * World heading of the pointing ray. Heading comes from atan2 and wraps at
+   * ±π, so it is unwrapped into a continuous accumulator before filtering —
+   * turning past "behind you" must not snap the cursor across the screen.
+   */
+  private headingRaw = 0;
+  private headingCont = 0;
+  /** World elevation of the pointing ray at the calibration pose. */
+  private refElevation = 0;
 
   private yawFilter = new OneEuroFilter(1.1, 0.014);
   private pitchFilter = new OneEuroFilter(1.1, 0.014);
@@ -181,10 +200,24 @@ export class AimTracker {
     return this.hasReference;
   }
 
+  /**
+   * World heading of a pointing ray. Undefined when the ray is near-vertical
+   * (nobody sprays the ceiling through this app), so hold the previous value
+   * there instead of letting atan2 of noise spin the cursor.
+   */
+  private headingOf(dir: THREE.Vector3, fallback: number): number {
+    if (Math.hypot(dir.x, dir.z) < 0.12) return fallback;
+    return Math.atan2(dir.x, -dir.z);
+  }
+
   /** Marks the current pose as dead centre. */
   calibrate() {
     this.reference.copy(this.q);
     this.hasReference = true;
+    this.dir.copy(FORWARD).applyQuaternion(this.q);
+    this.headingRaw = this.headingOf(this.dir, this.headingRaw);
+    this.headingCont = 0;
+    this.refElevation = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1));
     this.yawDrift = 0;
     this.pitchDrift = 0;
     this.yawFilter.reset();
@@ -197,17 +230,25 @@ export class AimTracker {
 
     if (!this.hasReference) this.calibrate();
 
-    // Cancel the calibration pose so aim is always relative to "centre".
+    // Kept for driving the on-screen 3D tool: the can tilts with the device.
     this.relative.copy(this.reference).invert().multiply(this.q);
 
-    this.dir.copy(FORWARD).applyQuaternion(this.relative);
-    this.upDir.copy(UP).applyQuaternion(this.relative);
+    // Aim decomposition happens in the world frame (see class doc): heading
+    // about the true vertical axis, elevation against gravity — then the
+    // calibrated heading/elevation are subtracted so calibration is "centre"
+    // without tilting the cursor plane.
+    this.dir.copy(FORWARD).applyQuaternion(this.q);
+    const rawHeading = this.headingOf(this.dir, this.headingRaw);
+    let step = rawHeading - this.headingRaw;
+    if (step > Math.PI) step -= Math.PI * 2;
+    else if (step < -Math.PI) step += Math.PI * 2;
+    this.headingCont += step;
+    this.headingRaw = rawHeading;
 
-    // Spherical decomposition of the pointing axis. atan2/asin here (rather
-    // than Euler extraction) is what keeps this stable when the phone is held
-    // upright.
-    const yaw = Math.atan2(this.dir.x, -this.dir.z);
-    const pitch = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1));
+    const yaw = this.headingCont;
+    const pitch = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1)) - this.refElevation;
+
+    this.upDir.copy(UP).applyQuaternion(this.relative);
     const roll = Math.atan2(this.upDir.x, this.upDir.y);
 
     const sYaw = this.yawFilter.filter(yaw, timestampMs);
