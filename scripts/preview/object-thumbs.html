@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>body{margin:0;background:#111}</style></head>
+<body>
+<script type="importmap">
+{"imports":{"three":"/node_modules/three/build/three.module.js","three/":"/node_modules/three/"}}
+</script>
+<script type="module">
+// Renders each catalog model to a transparent square thumbnail and exposes
+// the PNG dataURLs on window.__THUMBS__ for the node script to persist.
+import * as THREE from '/node_modules/three/build/three.module.js';
+import { GLTFLoader } from '/node_modules/three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from '/node_modules/three/examples/jsm/libs/meshopt_decoder.module.js';
+
+const IDS = window.__IDS__;
+const S = 512;
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+
+const gl = document.createElement('canvas');
+gl.width = S; gl.height = S;
+const renderer = new THREE.WebGLRenderer({ canvas: gl, antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setSize(S, S, false);
+renderer.setClearColor(0x000000, 0);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const thumbs = {};
+const errors = [];
+for (const id of IDS) {
+  try {
+    const gltf = await loader.loadAsync(`/models/${id}.glb`);
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+    const key = new THREE.DirectionalLight(0xffffff, 2.4); key.position.set(4, 6, 6); scene.add(key);
+    const rim = new THREE.DirectionalLight(0x88bbff, 1.2); rim.position.set(-5, 2, -4); scene.add(rim);
+
+    const obj = gltf.scene;
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const k = 4 / (Math.max(size.x, size.y, size.z) || 1);
+    obj.scale.setScalar(k);
+    obj.position.set(-center.x * k, -center.y * k, -center.z * k);
+    scene.add(obj);
+
+    const cam = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
+    cam.position.set(3.6, 2.2, 5.2);
+    cam.lookAt(0, 0, 0);
+    renderer.render(scene, cam);
+    thumbs[id] = gl.toDataURL('image/png');
+    scene.clear();
+  } catch (e) {
+    errors.push(id + ': ' + (e && e.message ? e.message : e));
+  }
+}
+window.__THUMBS__ = thumbs;
+window.__ERRORS__ = errors;
+window.__READY__ = true;
+</script></body></html>
