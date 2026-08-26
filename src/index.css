@@ -390,3 +390,62 @@ input[type="range"].airo-slider::-moz-range-thumb {
     mask-repeat: no-repeat;
   }
 }
+
+/* ==================================================================
+   Landing hero — appended modifiers.
+
+   Everything above is untouched. These are narrow overrides of the
+   paint-skin utilities, tuned for the one place where the artwork
+   sits at hero scale over a live 3D stage. They are plain (unlayered)
+   selectors on purpose: that puts them above Tailwind's utilities
+   layer, so a modifier always wins over the utility it modifies.
+   ================================================================== */
+
+/** Slow drift across the title's own gradient — `paint-title` supplies the
+    ink, this only widens it and moves it. Reads as wet paint catching the
+    light rather than as a colour animation. */
+@keyframes airo-ink-flow {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 100% 50%;
+  }
+}
+.paint-title-flow {
+  /* Only half again as wide as the box: the whole ramp stays on the word, so
+     the drift re-weights the brand gradient instead of scrolling through it. */
+  background-size: 150% 100%;
+  animation: airo-ink-flow 11s ease-in-out infinite alternate;
+}
+
+/** Drip variant for the headline: shorter and softer than the panel-edge
+    default, and inset further, so the subhead below stays legible. */
+.drip-edge-soft::after {
+  height: 30px;
+  opacity: 0.62;
+  inset-inline: 12%;
+}
+
+/** Moves the splatter cluster to the opposite corner. The default corner is
+    top-right, which on the landing card lands squarely on the CTA. */
+.splatter-accent-bl::after {
+  top: auto;
+  right: auto;
+  bottom: -52px;
+  left: -46px;
+  width: 150px;
+  height: 150px;
+  opacity: 0.36;
+}
+
+/** Hover life for the hero's paint-stroke CTA. The button body IS the
+    stroke, so the hover has to happen on the paint itself — no pill, no
+    background, nothing behind the label. */
+.paint-cta::before {
+  transition: transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1), filter 240ms ease;
+}
+.paint-cta:hover::before {
+  transform: scale(1.035);
+  filter: drop-shadow(0 10px 26px rgba(255, 77, 28, 0.5)) saturate(1.08);
+}
