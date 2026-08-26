@@ -21,7 +21,7 @@ import { SprayMist } from './SprayMist';
 import { StudioEnvironment } from './StudioEnvironment';
 import { useFitCamera } from './useFitCamera';
 import { SurfacePainter } from './SurfacePainter';
-import { SmoothedCursor } from '../utils/motion';
+import { InterpolatedCursor } from '../utils/motion';
 import { TargetObjectType, PlayerState } from '../types';
 import { sounds } from '../utils/audio';
 
@@ -86,8 +86,8 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
   /** Current stroke id per painter, for undo grouping across peers. */
   const strokeIds = useRef(new Map<string, string>());
   const strokeSeq = useRef(0);
-  /** Receive-side smoothing of each remote cursor. */
-  const cursors = useRef(new Map<string, SmoothedCursor>());
+  /** Receive-side jitter-buffer interpolation of each remote cursor. */
+  const cursors = useRef(new Map<string, InterpolatedCursor>());
 
   const hostDragging = useRef(false);
   const hostPointer = useRef(new THREE.Vector2());
@@ -220,11 +220,18 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       } else {
         let cursor = cursors.current.get(player.id);
         if (!cursor) {
-          cursor = new SmoothedCursor();
+          cursor = new InterpolatedCursor();
           cursors.current.set(player.id, cursor);
         }
-        cursor.setTarget(player.cursorPx.x / CANVAS_RES, player.cursorPx.y / CANVAS_RES);
-        const smoothed = cursor.step(delta);
+        // Drain the packets that arrived since the last frame (with their
+        // true arrival stamps) and render ~90ms behind, so uneven network
+        // delivery interpolates into a continuous path instead of lurching.
+        const queued = player.cursorSamples;
+        if (queued && queued.length > 0) {
+          for (const s of queued) cursor.push(s.x, s.y, s.at);
+          queued.length = 0;
+        }
+        const smoothed = cursor.step(performance.now());
         ndcX = smoothed.x * 2 - 1;
         ndcY = -(smoothed.y * 2 - 1);
         // The studio derives paint only for motion-mode (gyro) players; players

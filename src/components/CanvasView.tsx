@@ -283,6 +283,12 @@ export default function CanvasView() {
       if (!player || typeof x !== 'number') return;
       player.cursorPx.x = x * CANVAS_RES;
       player.cursorPx.y = y * CANVAS_RES;
+      // Arrival-stamped for the scene's jitter-buffer interpolation — the
+      // stamp must be taken here, at delivery, not when the frame loop reads.
+      (player.cursorSamples ??= []).push({ x, y, at: performance.now() });
+      if (player.cursorSamples.length > 60) {
+        player.cursorSamples.splice(0, player.cursorSamples.length - 60);
+      }
       player.lastActive = Date.now();
     });
 

@@ -36,6 +36,12 @@ export interface PlayerState {
   tool: 'spray' | 'brush';
   isPainting: boolean;
   cursorPx: { x: number; y: number };
+  /**
+   * Arrival-stamped aim samples (normalised 0..1, `at` = local
+   * performance.now() when the packet landed), drained each frame by the
+   * studio's jitter-buffer interpolation. Motion-mode players only.
+   */
+  cursorSamples?: { x: number; y: number; at: number }[];
   worldPos: [number, number, number];
   surfacePoint?: [number, number, number];
   surfaceNormal?: [number, number, number];

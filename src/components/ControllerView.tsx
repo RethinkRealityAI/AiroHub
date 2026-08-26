@@ -683,6 +683,9 @@ export default function ControllerView() {
 
   const startTrigger = (event?: React.PointerEvent) => {
     event?.preventDefault();
+    // The thumb landing on the glass physically rotates the phone for ~80ms;
+    // freeze aim deltas so pressing to spray cannot kick the cursor.
+    trackerRef.current.notifyTriggerEdge(true, performance.now());
     setTriggerActive(true);
     navigator.vibrate?.(22);
     if (live.current.tool === 'spray') sounds.startSpray(1);
@@ -699,6 +702,7 @@ export default function ControllerView() {
   const stopTrigger = (event?: React.PointerEvent) => {
     event?.preventDefault();
     if (!triggerActive) return;
+    trackerRef.current.notifyTriggerEdge(false, performance.now());
     setTriggerActive(false);
     sounds.stopSpray();
     sounds.stopBrush();

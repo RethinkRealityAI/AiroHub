@@ -1,15 +1,23 @@
 /**
  * Device orientation → aim vector.
  *
- * The previous controller aimed by taking raw deltas of the `alpha` and `beta`
- * Euler angles. That is unstable in practice: the Euler triplet is not a linear
- * space, so the mapping warps badly as the phone tilts, it gimbal-locks when
- * the phone is held near-vertical (exactly how you hold a spray can), and it
- * ignores screen rotation entirely.
+ * The controller aims like a **gyro mouse**, not a laser pointer. Earlier
+ * versions decomposed the phone's absolute pointing direction in the world
+ * (gravity) frame — heading about the vertical axis, elevation against
+ * gravity. That is mathematically faithful to where the phone points, but it
+ * is not what the wrist *means*: with any roll in the player's grip (and no
+ * one holds a phone perfectly plumb — pressing a thumb on the glass adds
+ * more), a pure wrist-"up" motion changes world heading too, so vertical
+ * strokes drifted sideways and fine shapes felt impossible.
  *
- * This module instead reconstructs the real device quaternion, cancels the
- * calibration pose, and reads the aim direction off the device's own -Z axis.
- * That behaves correctly at every attitude and makes "recentre" exact.
+ * The fix is the technique competitive gyro-aiming settled on ("player-space
+ * gyro"): integrate per-event rotation *deltas* read in the device's own
+ * frame — pitch from rotation about the device's X axis, yaw from the
+ * world-vertical component with the player-space magnitude relaxation. Like a
+ * mouse it is roll-invariant, has no heading seam, ratchets naturally at the
+ * screen edges, and — crucially — deltas can simply be *discarded* while the
+ * thumb is landing on the trigger, so pressing to spray no longer kicks the
+ * cursor.
  */
 import * as THREE from 'three';
 
@@ -56,15 +64,6 @@ export function currentScreenAngle(): number {
    One Euro filter
    ------------------------------------------------------------------ */
 
-/**
- * One Euro filter — an adaptive low-pass that trades jitter against lag based
- * on how fast the signal is moving.
- *
- * Phone IMUs are noisy at rest, which makes a held aim visibly shimmer, but a
- * fixed low-pass strong enough to kill that shimmer would smear fast flicks.
- * One Euro smooths hard when slow and barely at all when fast, which is exactly
- * the behaviour a spray can wants.
- */
 class LowPass {
   private y: number | null = null;
   filter(value: number, alpha: number): number {
@@ -79,6 +78,12 @@ class LowPass {
   }
 }
 
+/**
+ * One Euro filter — an adaptive low-pass that trades jitter against lag based
+ * on how fast the signal is moving. Used for the cosmetic roll readout; the
+ * aim path itself uses tightening + two-band smoothing on rotation deltas,
+ * which holds steadier at rest without adding flick lag.
+ */
 export class OneEuroFilter {
   private xFilter = new LowPass();
   private dxFilter = new LowPass();
@@ -127,45 +132,56 @@ export interface AimSample {
   /** Normalised cursor, 0..1 across the stage. */
   x: number;
   y: number;
-  /** Raw angular offsets in radians, useful for tool tilt. */
+  /** Integrated angular offsets in radians, useful for tool tilt. */
   yaw: number;
   pitch: number;
   roll: number;
 }
 
-const FORWARD = new THREE.Vector3(0, 0, -1);
 const UP = new THREE.Vector3(0, 1, 0);
 
 /**
  * Converts a stream of orientation events into a smoothed, calibrated aim
- * point. Instantiate one per controller.
- *
- * Yaw/pitch are decomposed in the **world (gravity) frame**, not the
- * calibration-relative frame. The difference matters exactly when the phone is
- * held like a real spray can: with a relative decomposition, calibrating at a
- * reclined angle tilts the whole cursor plane with it, so turning left/right
- * drags the cursor diagonally — it feels like the tracker assumes the phone is
- * lying flat. In the world frame, rotation about the true vertical axis is
- * always a pure horizontal sweep and elevation against gravity is always a
- * pure vertical one, no matter how the phone is reclined at calibration.
+ * point. Instantiate one per controller. See the module comment for why this
+ * integrates player-space rotation deltas instead of decomposing the absolute
+ * pointing direction.
  */
 export class AimTracker {
   private q = new THREE.Quaternion();
   private reference = new THREE.Quaternion();
   private relative = new THREE.Quaternion();
-  private dir = new THREE.Vector3();
   private upDir = new THREE.Vector3();
   private hasReference = false;
 
+  /** Body-frame rotation delta between consecutive samples. */
+  private dq = new THREE.Quaternion();
+  private inv = new THREE.Quaternion();
+  private omega = new THREE.Vector3();
+  private upDev = new THREE.Vector3();
+
+  /** Integrated aim, radians from centre. The player-space "mouse position". */
+  private yawAcc = 0;
+  private pitchAcc = 0;
+
   /**
-   * World heading of the pointing ray. Heading comes from atan2 and wraps at
-   * ±π, so it is unwrapped into a continuous accumulator before filtering —
-   * turning past "behind you" must not snap the cursor across the screen.
+   * Banded low-pass of the orientation itself. Deltas are extracted from this
+   * smoothed pose, whose cutoff opens with movement speed — and because the
+   * deltas are integrated, a transiently narrow cutoff never loses reach: the
+   * smoothed pose always converges to the real one, so the integral of its
+   * deltas equals the true total rotation.
    */
-  private headingRaw = 0;
-  private headingCont = 0;
-  /** World elevation of the pointing ray at the calibration pose. */
-  private refElevation = 0;
+  private qSmooth = new THREE.Quaternion();
+  private qSmoothPrev = new THREE.Quaternion();
+
+  /**
+   * Noise-cancelling movement-speed estimate: an EMA of the player-space
+   * delta-rate *vector*. Sensor noise alternates direction sample to sample
+   * and cancels here, while a real sweep accumulates — this is what lets the
+   * tracker distinguish "holding still on a noisy IMU" (which can read as
+   * 20°/s of per-sample rate) from an actual 20°/s stroke.
+   */
+  private rateY = 0;
+  private rateP = 0;
 
   /** Rotation speed (rad/s, EMA-smoothed) — gates the translation assist. */
   private prevQ = new THREE.Quaternion();
@@ -173,18 +189,19 @@ export class AimTracker {
   private rotSpeed = 0;
 
   /**
-   * Tuned for a steady held aim: a lower resting cutoff smooths micro-jitter
-   * harder while the raised speed coefficient keeps deliberate flicks snappy.
+   * Deltas are dropped until this stamp: pressing or releasing the trigger
+   * physically rotates the phone for ~80 ms, and in a delta model that wobble
+   * can simply never enter the integrator. (An absolute decomposition cannot
+   * do this — dropping samples there just defers the same snap.)
    */
-  private yawFilter = new OneEuroFilter(0.85, 0.024);
-  private pitchFilter = new OneEuroFilter(0.85, 0.024);
+  private suppressUntil = -1e9;
+
   private rollFilter = new OneEuroFilter(1.4, 0.02);
 
   /**
    * Soft-boundary drift, in radians. When the aim saturates at a screen edge,
    * the neutral origin slides with the overshoot so that reversing direction
-   * responds immediately — without this, turning far past an edge leaves a
-   * dead zone the player has to wind back through.
+   * responds immediately — mouse-style ratcheting instead of a dead zone.
    */
   private yawDrift = 0;
   private pitchDrift = 0;
@@ -195,6 +212,29 @@ export class AimTracker {
    * corners without moving your feet" and "hold a steady line".
    */
   gain = 1 / (50 * DEG2RAD);
+
+  /** Player-space yaw: how far world-yaw may be amplified toward the local
+   *  yaw/roll magnitude. 1.41 is the published sweet spot. */
+  private static RELAX = 1.41;
+  /** EMA bandwidth of the movement-speed estimate (Hz). */
+  private static RATE_EMA_HZ = 2.5;
+  /** Below this speed, deltas are quadratically "tightened" toward zero — the
+   *  last shimmer of a held aim vanishes without any hold lag. */
+  private static TIGHTEN_RATE = 6 * DEG2RAD;
+  /** Orientation low-pass band: CUT_LO Hz when holding still (≤ RATE_LO),
+   *  opening to CUT_HI Hz (effectively raw) at RATE_HI and above. */
+  private static RATE_LO = 6 * DEG2RAD;
+  private static RATE_HI = 50 * DEG2RAD;
+  private static CUT_LO = 0.35;
+  private static CUT_HI = 25;
+  /** Precision curve: slow deliberate rotations get a finer ratio, fast
+   *  flicks a coarser one, so small shapes and full reach coexist. */
+  private static ACCEL_LO = 25 * DEG2RAD;
+  private static ACCEL_HI = 210 * DEG2RAD;
+  private static SCALE_LO = 0.85;
+  private static SCALE_HI = 1.3;
+  private static PRESS_SUPPRESS_MS = 120;
+  private static RELEASE_SUPPRESS_MS = 80;
 
   /**
    * Copies the latest calibrated device rotation, for driving the on-screen
@@ -210,13 +250,50 @@ export class AimTracker {
   }
 
   /**
-   * World heading of a pointing ray. Undefined when the ray is near-vertical
-   * (nobody sprays the ceiling through this app), so hold the previous value
-   * there instead of letting atan2 of noise spin the cursor.
+   * Call on trigger press/release edges. Aim deltas (and the translation
+   * assist) are ignored for a short window so the mechanical jolt of the
+   * thumb landing on or leaving the glass cannot move the cursor.
    */
-  private headingOf(dir: THREE.Vector3, fallback: number): number {
-    if (Math.hypot(dir.x, dir.z) < 0.12) return fallback;
-    return Math.atan2(dir.x, -dir.z);
+  notifyTriggerEdge(pressed: boolean, timestampMs: number) {
+    this.suppressUntil =
+      timestampMs +
+      (pressed ? AimTracker.PRESS_SUPPRESS_MS : AimTracker.RELEASE_SUPPRESS_MS);
+    this.rateY = 0;
+    this.rateP = 0;
+  }
+
+  /**
+   * Body-frame angular displacement between two orientations, forced onto the
+   * short arc (quaternion double-cover would otherwise occasionally hand back
+   * the long way round as a huge delta). Returns the rotation angle.
+   */
+  private omegaBetween(prev: THREE.Quaternion, cur: THREE.Quaternion, out: THREE.Vector3): number {
+    this.dq.copy(this.inv.copy(prev).invert()).multiply(cur);
+    if (this.dq.w < 0) this.dq.set(-this.dq.x, -this.dq.y, -this.dq.z, -this.dq.w);
+    const w = THREE.MathUtils.clamp(this.dq.w, -1, 1);
+    const angle = 2 * Math.acos(w);
+    const s = Math.sqrt(Math.max(1 - w * w, 0));
+    if (angle > 1e-7 && s > 1e-7) {
+      out.set(this.dq.x / s, this.dq.y / s, this.dq.z / s).multiplyScalar(angle);
+    } else {
+      out.set(0, 0, 0);
+    }
+    return angle;
+  }
+
+  /**
+   * Player-space yaw displacement of a body-frame delta (see update()).
+   *
+   * @param relax how far world-yaw may be amplified toward the local
+   *   yaw/roll magnitude. Passed in because it must fade to 1 at rest: the
+   *   amplification borrows the roll axis's magnitude, which on a noisy IMU
+   *   would amplify hold shimmer on the yaw channel by the same factor.
+   */
+  private playerYaw(omega: THREE.Vector3, source: THREE.Quaternion, relax: number): number {
+    this.upDev.copy(UP).applyQuaternion(this.inv.copy(source).invert());
+    const worldYaw = omega.dot(this.upDev);
+    const yawRollMag = Math.hypot(omega.y, omega.z);
+    return Math.sign(worldYaw) * Math.min(Math.abs(worldYaw) * relax, yawRollMag);
   }
 
   /**
@@ -274,6 +351,16 @@ export class AimTracker {
   addTranslation(ax: number, ay: number, az: number, dtSeconds: number) {
     if (!this.hasReference) return;
     const dt = THREE.MathUtils.clamp(dtSeconds, 1 / 120, 0.05);
+
+    // The thumb landing on the trigger is also an acceleration spike.
+    if (this.prevQt < this.suppressUntil) {
+      this.velX *= 0.5;
+      this.velY *= 0.5;
+      this.pendingX = 0;
+      this.pendingY = 0;
+      this.gateOpenSince = -1;
+      return;
+    }
 
     // Rotation gate — see the class comment. The hold-off keeps it closed
     // through sweep turnarounds, where rotation momentarily stops exactly as
@@ -346,10 +433,11 @@ export class AimTracker {
   calibrate() {
     this.reference.copy(this.q);
     this.hasReference = true;
-    this.dir.copy(FORWARD).applyQuaternion(this.q);
-    this.headingRaw = this.headingOf(this.dir, this.headingRaw);
-    this.headingCont = 0;
-    this.refElevation = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1));
+    this.yawAcc = 0;
+    this.pitchAcc = 0;
+    this.qSmooth.copy(this.q);
+    this.rateY = 0;
+    this.rateP = 0;
     this.yawDrift = 0;
     this.pitchDrift = 0;
     this.velX = 0;
@@ -359,20 +447,88 @@ export class AimTracker {
     this.pendingX = 0;
     this.pendingY = 0;
     this.gateOpenSince = -1;
-    this.yawFilter.reset();
-    this.pitchFilter.reset();
     this.rollFilter.reset();
   }
 
   update(alpha: number, beta: number, gamma: number, timestampMs: number): AimSample {
     quaternionFromOrientation(this.q, alpha, beta, gamma, currentScreenAngle());
 
-    // Track how fast the device is rotating — the translation assist's gate.
+    let yawDisp = 0;
+    let pitchDisp = 0;
+
     if (this.prevQt > 0) {
-      const dtq = Math.max((timestampMs - this.prevQt) / 1000, 1 / 240);
-      const dot = Math.min(Math.abs(this.prevQ.dot(this.q)), 1);
-      const instant = (2 * Math.acos(dot)) / dtq;
-      this.rotSpeed += (instant - this.rotSpeed) * Math.min(dtq / 0.12, 1);
+      const dtq = THREE.MathUtils.clamp((timestampMs - this.prevQt) / 1000, 1 / 240, 0.1);
+
+      // Raw body-frame delta: feeds the translation-assist gate and the
+      // movement-speed estimate, never the cursor directly.
+      const angle = this.omegaBetween(this.prevQ, this.q, this.omega);
+      this.rotSpeed += (angle / dtq - this.rotSpeed) * Math.min(dtq / 0.12, 1);
+
+      // Player-space decomposition of the raw delta:
+      //  · pitch is rotation about the device's own X (pure wrist flexion —
+      //    roll-invariant, so vertical strokes stay vertical however the
+      //    phone is gripped);
+      //  · yaw takes its direction from the world-vertical component (turning
+      //    left is always screen-left whatever the tilt) and its magnitude
+      //    from the local yaw/roll plane, relaxed toward RELAX× world yaw.
+      const rawY = this.playerYaw(this.omega, this.q, AimTracker.RELAX);
+      const rawP = this.omega.x;
+
+      // Noise-cancelling speed estimate (see the field comment).
+      const aRate = 1 - Math.exp(-2 * Math.PI * AimTracker.RATE_EMA_HZ * dtq);
+      this.rateY += (rawY / dtq - this.rateY) * aRate;
+      this.rateP += (rawP / dtq - this.rateP) * aRate;
+      const vecRate = Math.hypot(this.rateY, this.rateP);
+
+      if (timestampMs < this.suppressUntil) {
+        // Thumb landing on / leaving the trigger: absorb the wobble. Snapping
+        // the smoothed pose to the raw one means whatever small persistent
+        // tilt the press leaves behind is adopted without cursor movement.
+        this.qSmooth.copy(this.q);
+        this.rateY = 0;
+        this.rateP = 0;
+      } else {
+        // Banded orientation low-pass: ~CUT_LO Hz while holding (kills IMU
+        // shimmer), opening to effectively-raw once genuinely moving. Reach
+        // is never lost to the band — the integral of the smoothed pose's
+        // deltas converges to the true total rotation.
+        const band = THREE.MathUtils.clamp(
+          (vecRate - AimTracker.RATE_LO) / (AimTracker.RATE_HI - AimTracker.RATE_LO),
+          0,
+          1
+        );
+        const cutoff =
+          AimTracker.CUT_LO +
+          (AimTracker.CUT_HI - AimTracker.CUT_LO) * band * band * (3 - 2 * band);
+        const aQ = 1 - Math.exp(-2 * Math.PI * cutoff * dtq);
+        this.qSmoothPrev.copy(this.qSmooth);
+        this.qSmooth.slerp(this.q, aQ);
+
+        this.omegaBetween(this.qSmoothPrev, this.qSmooth, this.omega);
+        const relax = 1 + (AimTracker.RELAX - 1) * band;
+        let yDisp = this.playerYaw(this.omega, this.qSmooth, relax);
+        let pDisp = this.omega.x;
+
+        // Tightening: quadratically squash what little the low-pass lets
+        // through below the movement threshold. A held aim is pixel-still.
+        if (vecRate < AimTracker.TIGHTEN_RATE) {
+          const k = vecRate / AimTracker.TIGHTEN_RATE;
+          yDisp *= k * k;
+          pDisp *= k * k;
+        }
+
+        // Precision curve: finer ratio for careful strokes, coarser for
+        // flicks, judged on real movement speed rather than noisy samples.
+        const t = THREE.MathUtils.clamp(
+          (vecRate - AimTracker.ACCEL_LO) / (AimTracker.ACCEL_HI - AimTracker.ACCEL_LO),
+          0,
+          1
+        );
+        const scale =
+          AimTracker.SCALE_LO + (AimTracker.SCALE_HI - AimTracker.SCALE_LO) * t * t * (3 - 2 * t);
+        yawDisp = yDisp * scale;
+        pitchDisp = pDisp * scale;
+      }
     }
     this.prevQ.copy(this.q);
     this.prevQt = timestampMs;
@@ -382,32 +538,22 @@ export class AimTracker {
     // Kept for driving the on-screen 3D tool: the can tilts with the device.
     this.relative.copy(this.reference).invert().multiply(this.q);
 
-    // Aim decomposition happens in the world frame (see class doc): heading
-    // about the true vertical axis, elevation against gravity — then the
-    // calibrated heading/elevation are subtracted so calibration is "centre"
-    // without tilting the cursor plane.
-    this.dir.copy(FORWARD).applyQuaternion(this.q);
-    const rawHeading = this.headingOf(this.dir, this.headingRaw);
-    let step = rawHeading - this.headingRaw;
-    if (step > Math.PI) step -= Math.PI * 2;
-    else if (step < -Math.PI) step += Math.PI * 2;
-    this.headingCont += step;
-    this.headingRaw = rawHeading;
-
-    const yaw = this.headingCont;
-    const pitch = Math.asin(THREE.MathUtils.clamp(this.dir.y, -1, 1)) - this.refElevation;
+    // Integrate. Positive world-yaw (turning left, CCW from above) must move
+    // the cursor left, matching the previous world-frame mapping's handedness;
+    // positive device pitch (wrist up) moves it up.
+    this.yawAcc -= yawDisp;
+    this.pitchAcc += pitchDisp;
 
     this.upDir.copy(UP).applyQuaternion(this.relative);
-    const roll = Math.atan2(this.upDir.x, this.upDir.y);
-
-    const sYaw = this.yawFilter.filter(yaw, timestampMs);
-    const sPitch = this.pitchFilter.filter(pitch, timestampMs);
-    const sRoll = this.rollFilter.filter(roll, timestampMs);
+    const roll = this.rollFilter.filter(
+      Math.atan2(this.upDir.x, this.upDir.y),
+      timestampMs
+    );
 
     // Rotation plus the translation assist share one angular scale, so the
     // drifting origin and edge clamps below govern their sum unchanged.
-    const aimYaw = sYaw + this.transX;
-    const aimPitch = sPitch + this.transY;
+    const aimYaw = this.yawAcc + this.transX;
+    const aimPitch = this.pitchAcc + this.transY;
 
     // Map through the drifting origin, then let the origin follow overshoot.
     const half = this.gain * 0.5;
@@ -429,7 +575,7 @@ export class AimTracker {
       y = 1 - PAD;
     }
 
-    return { x, y, yaw: sYaw, pitch: sPitch, roll: sRoll };
+    return { x, y, yaw: this.yawAcc, pitch: this.pitchAcc, roll };
   }
 
   reset() {
@@ -438,46 +584,154 @@ export class AimTracker {
 }
 
 /* ------------------------------------------------------------------
-   Receive-side smoothing
+   Receive-side interpolation
    ------------------------------------------------------------------ */
 
 /**
- * Motion arrives over the network at ~30 Hz but the stage renders at 60-120 Hz.
- * Stepping the cursor straight to each received sample produces visible
- * staircasing in the paint stroke, so the studio eases toward the newest target
- * every frame instead. Critically damped so it never overshoots into a wobble.
+ * Motion arrives over the network at ~40 Hz with real delivery jitter —
+ * packets bunch up and gap. The old approach eased toward the *newest* sample
+ * every frame, which is the worst of both worlds: it lags behind steady
+ * movement yet still lurches when two packets arrive together. This is the
+ * standard game-netcode answer instead: buffer samples with their arrival
+ * times and render the cursor a fixed ~90 ms behind "now", interpolating a
+ * Catmull-Rom curve through the actual received positions. Output velocity is
+ * then continuous no matter how unevenly the packets landed, so remote
+ * strokes come out as smooth curves rather than chains of kinks.
  */
-export class SmoothedCursor {
-  private current = { x: 0.5, y: 0.5 };
-  private target = { x: 0.5, y: 0.5 };
+export class InterpolatedCursor {
+  private samples: { x: number; y: number; at: number }[] = [];
+  private out = { x: 0.5, y: 0.5 };
   private primed = false;
 
-  setTarget(x: number, y: number) {
-    this.target.x = x;
-    this.target.y = y;
+  /**
+   * The playhead is a *slewed clock*, not `now - delay` directly: it pauses
+   * at the buffer's end during a feed stall and replays the missed path at up
+   * to ~2× speed once packets resume, instead of teleporting across the gap.
+   * (Adaptive playout, as in VoIP jitter buffers.)
+   */
+  private playhead = -1;
+  private lastStepAt = -1;
+
+  /**
+   * @param minSpacingMs de-jitter re-timing floor. TCP head-of-line blocking
+   *   delivers bunches of packets microseconds apart that carry tens of ms of
+   *   real path — interpolated on raw arrival stamps, the playhead would tear
+   *   through those positions unboundedly fast. Bunched packets are spread
+   *   back out to at least this spacing. Must sit below the sender's real
+   *   cadence (the controller emits every 25ms) or the timeline drifts.
+   */
+  constructor(
+    private delayMs = 90,
+    private minSpacingMs = 18
+  ) {}
+
+  /** @param atMs arrival stamp on this machine's performance.now() clock. */
+  push(x: number, y: number, atMs: number) {
+    const s = this.samples;
+    const prev = s[s.length - 1];
+    const at = prev ? Math.max(atMs, prev.at + this.minSpacingMs) : atMs;
+    s.push({ x, y, at });
+    if (s.length > 48) s.splice(0, s.length - 48);
     if (!this.primed) {
-      this.current.x = x;
-      this.current.y = y;
+      this.out.x = x;
+      this.out.y = y;
       this.primed = true;
     }
   }
 
-  /** @param responsiveness higher converges faster; 18-26 feels right. */
-  step(delta: number, responsiveness = 22): { x: number; y: number } {
-    const t = 1 - Math.exp(-responsiveness * delta);
-    this.current.x += (this.target.x - this.current.x) * t;
-    this.current.y += (this.target.y - this.current.y) * t;
-    return this.current;
+  step(nowMs: number): { x: number; y: number } {
+    const s = this.samples;
+    if (s.length === 0) return this.out;
+
+    const target = nowMs - this.delayMs;
+    if (this.playhead < 0) this.playhead = Math.min(target, s[0].at);
+    const frameDt = this.lastStepAt < 0 ? 0 : THREE.MathUtils.clamp(nowMs - this.lastStepAt, 0, 100);
+    this.lastStepAt = nowMs;
+
+    // Slew toward real time: behind (after a stall) → catch up at ≤1.7×,
+    // replaying the buffered path rather than jumping over it; ahead
+    // (delay budget shrank) → slow-motion briefly instead of stepping back.
+    const err = target - this.playhead;
+    const speed = THREE.MathUtils.clamp(1 + err / 250, 0.35, 1.7);
+    this.playhead = Math.min(this.playhead + frameDt * speed, s[s.length - 1].at);
+
+    const t = this.playhead;
+    if (t <= s[0].at) {
+      this.out.x = s[0].x;
+      this.out.y = s[0].y;
+      return this.out;
+    }
+    const last = s[s.length - 1];
+    if (t >= last.at) {
+      this.out.x = last.x;
+      this.out.y = last.y;
+      return this.out;
+    }
+
+    let i = s.length - 2;
+    while (i > 0 && s[i].at > t) i--;
+    const p1 = s[i];
+    const p2 = s[i + 1];
+    const p0 = s[i - 1] ?? p1;
+    const p3 = s[i + 2] ?? p2;
+
+    const span = Math.max(p2.at - p1.at, 1e-3);
+    const u = (t - p1.at) / span;
+
+    // Cubic Hermite with Catmull-Rom (finite-difference) tangents on the
+    // non-uniform arrival timeline — C¹ continuous through every sample.
+    // Tangents are capped relative to the segment chord: bunched arrivals
+    // make the finite differences explode otherwise, and an exploded tangent
+    // is a visible squiggle in the stroke.
+    const chord = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const capTangent = (mx: number, my: number): [number, number] => {
+      const mag = Math.hypot(mx, my);
+      const cap = chord * 3 + 1e-6;
+      if (mag > cap) {
+        const k = cap / mag;
+        return [mx * k, my * k];
+      }
+      return [mx, my];
+    };
+    const [m1x, m1y] = capTangent(
+      (span * (p2.x - p0.x)) / Math.max(p2.at - p0.at, 1e-3),
+      (span * (p2.y - p0.y)) / Math.max(p2.at - p0.at, 1e-3)
+    );
+    const [m2x, m2y] = capTangent(
+      (span * (p3.x - p1.x)) / Math.max(p3.at - p1.at, 1e-3),
+      (span * (p3.y - p1.y)) / Math.max(p3.at - p1.at, 1e-3)
+    );
+
+    const u2 = u * u;
+    const u3 = u2 * u;
+    const h00 = 2 * u3 - 3 * u2 + 1;
+    const h10 = u3 - 2 * u2 + u;
+    const h01 = -2 * u3 + 3 * u2;
+    const h11 = u3 - u2;
+
+    this.out.x = THREE.MathUtils.clamp(
+      h00 * p1.x + h10 * m1x + h01 * p2.x + h11 * m2x,
+      0,
+      1
+    );
+    this.out.y = THREE.MathUtils.clamp(
+      h00 * p1.y + h10 * m1y + h01 * p2.y + h11 * m2y,
+      0,
+      1
+    );
+    return this.out;
   }
 
   get value() {
-    return this.current;
+    return this.out;
   }
 
   reset(x = 0.5, y = 0.5) {
-    this.current = { x, y };
-    this.target = { x, y };
+    this.samples.length = 0;
+    this.out = { x, y };
     this.primed = false;
+    this.playhead = -1;
+    this.lastStepAt = -1;
   }
 }
 
