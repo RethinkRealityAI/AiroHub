@@ -360,6 +360,8 @@ export default function ControllerView() {
   const [dockOpen, setDockOpen] = useState(true);
   const [triggerActive, setTriggerActive] = useState(false);
   const [shaking, setShaking] = useState(false);
+  const [centredFlash, setCentredFlash] = useState(false);
+  const centredTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [muted, setMuted] = useState(false);
   const [objectLoading, setObjectLoading] = useState(false);
 
@@ -587,6 +589,19 @@ export default function ControllerView() {
     if (shakeTimer.current) clearTimeout(shakeTimer.current);
     shakeTimer.current = setTimeout(() => setShaking(false), 450);
 
+    // Shaking the can rattles it — and in aim mode it also re-centres the
+    // aim, so the gesture earns its keep beyond the sound. The suppression
+    // window keeps the tail of the shake from dragging the freshly-centred
+    // cursor straight back off screen.
+    if (live.current.mode === 'aim') {
+      trackerRef.current.calibrate();
+      trackerRef.current.suppressFor(650, performance.now());
+      connectionRef.current?.emit('calibrate', { playerId: playerIdRef.current });
+      setCentredFlash(true);
+      if (centredTimer.current) clearTimeout(centredTimer.current);
+      centredTimer.current = setTimeout(() => setCentredFlash(false), 1400);
+    }
+
     sounds.playCanRattle();
     navigator.vibrate?.([28, 18, 32, 14, 28]);
     connectionRef.current?.emit('shake', { playerId: playerIdRef.current, intensity });
@@ -631,6 +646,7 @@ export default function ControllerView() {
   useEffect(
     () => () => {
       if (shakeTimer.current) clearTimeout(shakeTimer.current);
+      if (centredTimer.current) clearTimeout(centredTimer.current);
       sounds.stopSpray();
       sounds.stopBrush();
     },
@@ -815,7 +831,7 @@ export default function ControllerView() {
           <h1 className="text-xl font-bold tracking-tight mb-1.5">Become the spray can</h1>
           <p className="text-[12px] text-white/55 leading-relaxed mb-6">
             Allow motion access and your phone turns into the can — point it at the studio screen,
-            hold to spray, shake to rattle.
+            hold to spray, shake to re-centre your aim.
           </p>
           <button
             onClick={requestSensors}
@@ -980,11 +996,13 @@ export default function ControllerView() {
                     }`}
                     style={triggerActive ? { background: `${color}33`, borderColor: `${color}88` } : undefined}
                   >
-                    {triggerActive
-                      ? tool === 'spray'
-                        ? 'Spraying'
-                        : 'Painting'
-                      : 'Point at the screen · hold to paint'}
+                    {centredFlash
+                      ? 'Aim centred'
+                      : triggerActive
+                        ? tool === 'spray'
+                          ? 'Spraying'
+                          : 'Painting'
+                        : 'Point at the screen · hold to paint'}
                   </div>
                 </div>
               )}

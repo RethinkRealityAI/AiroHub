@@ -78,7 +78,7 @@ const CONTROLLER_CARDS: GuideCard[] = [
 ];
 
 const CONTROLLER_TIPS: GuideTip[] = [
-  { icons: [Sparkles], label: 'Shake phone = rattle the can' },
+  { icons: [Sparkles], label: 'Shake phone = re-centre your aim' },
   { icons: [Undo2, Redo2], label: 'Undo / Redo' },
   { icons: [Palette], label: 'Colour button is always on screen' },
   { icons: [ChevronDown], label: 'Collapse the dock for full immersion' },

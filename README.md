@@ -71,17 +71,27 @@ generate + optimize.
 
 ## Motion tracking
 
-`src/utils/motion.ts`.
+`src/utils/motion.ts` — full architecture notes in [docs/TRACKING.md](docs/TRACKING.md).
 
-Aiming reconstructs the real device quaternion from the orientation triplet, cancels a
-calibration pose, and reads the aim vector off the device's own −Z axis. It does not use
-raw `alpha`/`beta` deltas, which gimbal-lock exactly when the phone is held upright — the
-way you hold a spray can — and ignore screen rotation.
+The phone aims like a **gyro mouse**, not a laser pointer: player-space rotation
+*deltas* are integrated (pitch about the device's own X axis, yaw from the world
+vertical), which makes tracking roll-invariant — vertical strokes stay vertical
+however the phone is gripped — seam-free, and edge-ratcheting like a mouse. A
+noise-cancelling movement estimate gates a banded orientation low-pass plus
+tightening, so a held aim is pixel-still while flicks pass through with no lag.
+Trigger presses and releases suppress deltas for ~100 ms (the thumb landing on
+the glass physically rotates the phone), and **shaking the can re-centres the
+aim** on top of rattling it. On the studio side, motion packets are replayed
+through an arrival-stamped Catmull-Rom jitter buffer (~90 ms behind, slewed
+playhead) instead of chasing the newest sample, so remote strokes render as
+smooth curves under real network jitter.
 
-Signals are smoothed with a **One Euro filter**, which smooths hard when the hand is slow
-and barely at all when it flicks, so a held aim doesn't shimmer and a fast stroke doesn't
-lag. Shake detection requires several direction reversals in a window rather than a raw
-acceleration spike, so setting the phone down no longer rattles the can.
+Shake detection requires several direction reversals in a window rather than a
+raw acceleration spike, so setting the phone down doesn't rattle the can.
+
+```bash
+npm test   # 11 numeric regression checks over the whole tracking pipeline
+```
 
 ---
 

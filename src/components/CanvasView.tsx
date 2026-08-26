@@ -8,7 +8,7 @@
  * stays the focus.
  */
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { Canvas } from '@react-three/fiber';
 import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -106,6 +106,11 @@ export default function CanvasView() {
     cameraSyncRef.current = cameraSyncIds;
   }, [cameraSyncIds]);
   const [inviteSheet, setInviteSheet] = useState(false);
+  // Fresh studio from the landing page: put the invite QR front and centre so
+  // the creator can hand phones in immediately. If the first-run guide is up,
+  // the invite follows it once the guide closes.
+  const location = useLocation();
+  const pendingInvite = useRef<boolean>((location.state as any)?.justCreated === true);
   // First-run guide: shown once per browser, reopenable from the help button.
   const [guideOpen, setGuideOpen] = useState(() => {
     try {
@@ -122,6 +127,14 @@ export default function CanvasView() {
       /* private mode */
     }
   };
+  useEffect(() => {
+    if (pendingInvite.current && !guideOpen) {
+      pendingInvite.current = false;
+      setInviteSheet(true);
+      // Consume the navigation state so a refresh doesn't re-open the modal.
+      window.history.replaceState({}, '');
+    }
+  }, [guideOpen]);
   const [aiSheet, setAiSheet] = useState(false);
   const [uploadSheet, setUploadSheet] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -1023,6 +1036,32 @@ export default function CanvasView() {
         title="Invite players"
         subtitle="Up to four phones can join this studio"
       >
+        <div className="relative mx-auto mb-3 w-fit">
+          <div
+            className="absolute -inset-4 splatter-accent opacity-70 pointer-events-none"
+            style={{ '--paint': '#22D3EE' } as React.CSSProperties}
+          />
+          <div className="relative bg-white rounded-[26px] p-5 grid place-items-center shadow-[0_28px_90px_-28px_rgba(34,211,238,0.5)]">
+            <QRCodeSVG
+              value={controllerUrl}
+              size={Math.min(258, Math.floor(window.innerWidth * 0.56))}
+            />
+          </div>
+        </div>
+
+        <p className="text-[11.5px] text-white/60 text-center mb-1.5">
+          Scan with a phone camera to turn it into a spray can.
+        </p>
+        <div className="text-center mb-4">
+          <span className="label-caps text-white/40">Room code</span>
+          <div
+            className="paint-title text-3xl font-black tracking-[0.34em] mt-0.5 pl-[0.34em]"
+            aria-label={`Room code ${roomId}`}
+          >
+            {roomId}
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-2 mb-4">
           {[1, 2, 3, 4].map((slot) => {
             const player = remotePlayers.find((p) => p.slot === slot);
@@ -1071,14 +1110,6 @@ export default function CanvasView() {
             );
           })}
         </div>
-
-        <div className="bg-white rounded-2xl p-4 grid place-items-center mb-4">
-          <QRCodeSVG value={controllerUrl} size={182} />
-        </div>
-
-        <p className="text-[11px] text-white/55 text-center mb-3">
-          Scan with a phone camera to turn it into a spray can.
-        </p>
 
         <div className="flex gap-2">
           <input

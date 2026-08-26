@@ -255,9 +255,20 @@ export class AimTracker {
    * thumb landing on or leaving the glass cannot move the cursor.
    */
   notifyTriggerEdge(pressed: boolean, timestampMs: number) {
-    this.suppressUntil =
-      timestampMs +
-      (pressed ? AimTracker.PRESS_SUPPRESS_MS : AimTracker.RELEASE_SUPPRESS_MS);
+    this.suppressFor(
+      pressed ? AimTracker.PRESS_SUPPRESS_MS : AimTracker.RELEASE_SUPPRESS_MS,
+      timestampMs
+    );
+  }
+
+  /**
+   * Ignore aim deltas (and the translation assist) until `timestampMs +
+   * durationMs`. Used for trigger edges and for shake-to-recentre, where the
+   * tail of the shake would otherwise immediately drag the freshly-centred
+   * cursor away again.
+   */
+  suppressFor(durationMs: number, timestampMs: number) {
+    this.suppressUntil = Math.max(this.suppressUntil, timestampMs + durationMs);
     this.rateY = 0;
     this.rateP = 0;
   }

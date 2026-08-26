@@ -11,7 +11,9 @@
     "models:generate": "node scripts/generate-models.mjs",
     "models:optimize": "node scripts/optimize-models.mjs",
     "models:preview": "node scripts/preview/shoot-contact-sheet.mjs",
-    "shots": "node scripts/preview/shoot-ui.mjs"
+    "shots": "node scripts/preview/shoot-ui.mjs",
+    "test": "npm run test:aim",
+    "test:aim": "node scripts/test/aim-regression.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
