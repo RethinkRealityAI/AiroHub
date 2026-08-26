@@ -54,6 +54,30 @@ export interface PlayerState {
   isHost?: boolean;
 }
 
+/**
+ * One image placed on the shared paint layer.
+ *
+ * Anchored in UV rather than screen or world space, so every peer draws it in
+ * exactly the same place on the model no matter where its camera is pointing.
+ * `stampId` doubles as the stroke id, which is what makes a stamp a single
+ * undoable unit across the room.
+ */
+export interface ImageStampData {
+  playerId: string;
+  stampId: string;
+  /** The image itself, as a data URL kept inside the broadcast budget. */
+  img: string;
+  /** Texture-space centre, 0..1. */
+  u: number;
+  v: number;
+  /** Half the stamp's longest edge, in texture pixels. */
+  radiusPx: number;
+  /** Radians. */
+  rotation: number;
+  /** Recolours a white-on-alpha stencil; absent for full-colour uploads. */
+  tint?: string | null;
+}
+
 export interface MotionData {
   roomId: string;
   playerId?: string;

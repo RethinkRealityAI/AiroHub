@@ -29,6 +29,7 @@ export type AiroEvent =
   | 'motion'
   | 'action'
   | 'paint-stamps'
+  | 'image-stamp'
   | 'undo-stroke'
   | 'redo-stroke'
   | 'camera-sync'
@@ -120,6 +121,7 @@ export class AiroConnection {
       'motion',
       'action',
       'paint-stamps',
+      'image-stamp',
       'undo-stroke',
       'redo-stroke',
       'camera-sync',

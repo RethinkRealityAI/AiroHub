@@ -91,14 +91,70 @@ function tinted(kind: StampKind, color: string): HTMLCanvasElement {
    PaintSurface
    ------------------------------------------------------------------ */
 
-/** One undoable unit: a stroke's stamps, or a one-shot symbol stamp. */
+/* ------------------------------------------------------------------
+   Image stamps
+   ------------------------------------------------------------------ */
+
+/** Any image source a stamp can be built from. */
+export type StampImageSource = HTMLImageElement | ImageBitmap | HTMLCanvasElement;
+
+/**
+ * Longest edge kept for a stored stamp bitmap. Stamps live in the stroke log
+ * for the whole session so undo/replay can redraw them; storing the source at
+ * full resolution would put tens of megabytes behind a few taps. 512px is well
+ * above the largest radius the UI can place (2 × 180px).
+ */
+const STAMP_BITMAP_MAX = 512;
+
+function sourceSize(image: StampImageSource): { w: number; h: number } {
+  const w = (image as HTMLImageElement).naturalWidth || (image as HTMLCanvasElement).width || 1;
+  const h = (image as HTMLImageElement).naturalHeight || (image as HTMLCanvasElement).height || 1;
+  return { w: Math.max(w, 1), h: Math.max(h, 1) };
+}
+
+/**
+ * Bakes a stamp into a self-contained canvas: downscaled to the storage cap
+ * and, when a tint is given, recoloured through `source-in` so the shape's
+ * alpha survives while every texel takes the tint. The built-in stencils are
+ * white-on-alpha precisely so this reproduces the chosen colour exactly.
+ */
+function composeStampBitmap(image: StampImageSource, tint: string | null): HTMLCanvasElement {
+  const { w, h } = sourceSize(image);
+  const scale = Math.min(1, STAMP_BITMAP_MAX / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * scale));
+  c.height = Math.max(1, Math.round(h * scale));
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(image as CanvasImageSource, 0, 0, c.width, c.height);
+  if (tint) {
+    ctx.globalCompositeOperation = 'source-in';
+    ctx.fillStyle = tint;
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  return c;
+}
+
+/** One undoable unit: a stroke's stamps, a symbol stamp, or an image stamp. */
 type LogEntry =
   | { kind: 'stamps'; strokeId: string; tool: 'spray' | 'brush'; color: string; stamps: PaintStamp[] }
-  | { kind: 'symbol'; strokeId: string; symbol: string; x: number; y: number; color: string; text?: string };
+  | { kind: 'symbol'; strokeId: string; symbol: string; x: number; y: number; color: string; text?: string }
+  | {
+      kind: 'image';
+      strokeId: string;
+      /** Already tinted and size-capped, so replay is a straight blit. */
+      bitmap: HTMLCanvasElement;
+      u: number;
+      v: number;
+      radiusPx: number;
+      rotation: number;
+    };
 
 /** Keep the log bounded; the oldest strokes simply stop being undoable. */
 const LOG_MAX_ENTRIES = 600;
 const LOG_MAX_STAMPS = 120000;
+/** Image stamps are the memory-heavy entries; keep far fewer of them. */
+const LOG_MAX_IMAGES = 64;
 
 export class PaintSurface {
   canvas: HTMLCanvasElement;
@@ -115,6 +171,7 @@ export class PaintSurface {
    */
   private log: LogEntry[] = [];
   private loggedStamps = 0;
+  private loggedImages = 0;
   private replaying = false;
 
   /**
@@ -153,9 +210,22 @@ export class PaintSurface {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.log = [];
     this.loggedStamps = 0;
+    this.loggedImages = 0;
     this.redoStack = [];
     this.baseline = null;
     this.dirty = true;
+  }
+
+  /**
+   * Reads one texel straight off the paint layer (not the composited model
+   * texture). Exists so automated verification can assert what landed without
+   * depending on a camera, a model or the shader — see `__airoPaintProbe`.
+   */
+  samplePaint(u: number, v: number): [number, number, number, number] {
+    const x = Math.min(Math.max(Math.round(u * this.canvas.width), 0), this.canvas.width - 1);
+    const y = Math.min(Math.max(Math.round(v * this.canvas.height), 0), this.canvas.height - 1);
+    const data = this.ctx.getImageData(x, y, 1, 1).data;
+    return [data[0], data[1], data[2], data[3]];
   }
 
   /** Installs the joined-late snapshot and repaints with it underneath. */
@@ -217,6 +287,55 @@ export class PaintSurface {
     this.trimLog();
   }
 
+  /**
+   * Places an image on the surface as **one** undoable entry.
+   *
+   * `u`/`v` are 0..1 texture space and address the image's *centre*;
+   * `radiusPx` is half the stamp's longest edge in texture pixels, so the
+   * image is drawn at `max(w,h) = 2 * radiusPx` with its aspect preserved.
+   * A `tint` recolours the (white-on-alpha) source; pass null to keep a
+   * full-colour image such as a user upload as-is.
+   */
+  stampImage(
+    image: StampImageSource,
+    u: number,
+    v: number,
+    radiusPx: number,
+    rotationRad: number,
+    tint: string | null,
+    strokeId: string
+  ) {
+    const entry: Extract<LogEntry, { kind: 'image' }> = {
+      kind: 'image',
+      strokeId,
+      bitmap: composeStampBitmap(image, tint),
+      u,
+      v,
+      radiusPx: Math.max(radiusPx, 1),
+      rotation: rotationRad || 0,
+    };
+    this.log.push(entry);
+    this.loggedImages++;
+    this.trimLog();
+    this.drawImageStamp(entry);
+  }
+
+  private drawImageStamp(entry: Extract<LogEntry, { kind: 'image' }>) {
+    const { bitmap } = entry;
+    const longest = Math.max(bitmap.width, bitmap.height) || 1;
+    const scale = (entry.radiusPx * 2) / longest;
+    const w = bitmap.width * scale;
+    const h = bitmap.height * scale;
+
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(entry.u * this.canvas.width, entry.v * this.canvas.height);
+    if (entry.rotation) ctx.rotate(entry.rotation);
+    ctx.drawImage(bitmap, -w / 2, -h / 2, w, h);
+    ctx.restore();
+    this.dirty = true;
+  }
+
   private trimLog() {
     while (
       this.log.length > LOG_MAX_ENTRIES ||
@@ -224,6 +343,16 @@ export class PaintSurface {
     ) {
       const dropped = this.log.shift();
       if (dropped?.kind === 'stamps') this.loggedStamps -= dropped.stamps.length;
+      else if (dropped?.kind === 'image') this.loggedImages--;
+    }
+    // Image bitmaps are evicted on their own axis: dropping whole *strokes*
+    // to get under the bitmap budget would throw away far more history than
+    // the memory it reclaims, so retire the oldest image instead.
+    while (this.loggedImages > LOG_MAX_IMAGES) {
+      const index = this.log.findIndex((entry) => entry.kind === 'image');
+      if (index < 0) break;
+      this.log.splice(index, 1);
+      this.loggedImages--;
     }
   }
 
@@ -238,18 +367,17 @@ export class PaintSurface {
    * constantly invalidate everyone's redo) — a redone stroke simply re-lands
    * on top of the log.
    */
-  private redoStack: Extract<LogEntry, { kind: 'stamps' }>[] = [];
+  private redoStack: LogEntry[] = [];
 
   /** Removes one stroke, parks it for redo, and repaints the rest. */
   undoStroke(strokeId: string): boolean {
     for (let i = this.log.length - 1; i >= 0; i--) {
       if (this.log[i].strokeId === strokeId) {
         const [removed] = this.log.splice(i, 1);
-        if (removed.kind === 'stamps') {
-          this.loggedStamps -= removed.stamps.length;
-          this.redoStack.push(removed);
-          if (this.redoStack.length > 40) this.redoStack.shift();
-        }
+        if (removed.kind === 'stamps') this.loggedStamps -= removed.stamps.length;
+        else if (removed.kind === 'image') this.loggedImages--;
+        this.redoStack.push(removed);
+        if (this.redoStack.length > 40) this.redoStack.shift();
         this.repaintFromLog();
         return true;
       }
@@ -275,7 +403,8 @@ export class PaintSurface {
     if (index < 0) return null;
     const [entry] = this.redoStack.splice(index, 1);
     this.log.push(entry);
-    this.loggedStamps += entry.stamps.length;
+    if (entry.kind === 'stamps') this.loggedStamps += entry.stamps.length;
+    else if (entry.kind === 'image') this.loggedImages++;
     this.trimLog();
     this.repaintFromLog();
     return entry.strokeId;
@@ -286,14 +415,19 @@ export class PaintSurface {
     if (this.baseline) {
       this.ctx.drawImage(this.baseline, 0, 0, this.canvas.width, this.canvas.height);
     }
-    for (const entry of this.log) {
-      if (entry.kind === 'stamps') {
-        for (const stamp of entry.stamps) this.drawStamp(stamp, entry.tool, entry.color);
-      } else {
-        this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
-      }
-    }
+    for (const entry of this.log) this.replayEntry(entry);
     this.dirty = true;
+  }
+
+  /** Redraws a single log entry, whatever kind it is. */
+  private replayEntry(entry: LogEntry) {
+    if (entry.kind === 'stamps') {
+      for (const stamp of entry.stamps) this.drawStamp(stamp, entry.tool, entry.color);
+    } else if (entry.kind === 'image') {
+      this.drawImageStamp(entry);
+    } else {
+      this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
+    }
   }
 
   get isReplaying() {
@@ -336,8 +470,10 @@ export class PaintSurface {
         const target = Math.floor(totalUnits * (t * t * (3 - 2 * t)));
         while (drawnUnits < target && entryIndex < snapshot.length) {
           const entry = snapshot[entryIndex];
-          if (entry.kind === 'symbol') {
-            this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
+          if (entry.kind !== 'stamps') {
+            // Symbols and image stamps land in one go — they have no internal
+            // ordering to reveal — and are worth 40 units of the timeline.
+            this.replayEntry(entry);
             drawnUnits += 40;
             entryIndex++;
             continue;

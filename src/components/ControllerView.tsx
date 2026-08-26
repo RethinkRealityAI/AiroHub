@@ -21,7 +21,7 @@ import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
   Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Redo2,
-  ChevronDown, ChevronUp, HelpCircle,
+  ChevronDown, ChevronUp, HelpCircle, Stamp as StampIcon,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -36,13 +36,30 @@ import { ColorWell } from '../ui/ColorWell';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
 import { StampBatcher, StampPacket, PaintStamp, BatchContext, packStamps, unpackStamps } from '../paint/stamps';
+import {
+  BUILTIN_STAMPS,
+  StampAsset,
+  StampLibrary,
+  addUpload,
+  createStampApplier,
+  decodeStampImage,
+  loadStampLibrary,
+  markRecent,
+  removeUpload,
+  stampFromFile,
+  stampPayload,
+  stampRadiusPx,
+} from '../paint/stampAssets';
+import { StampStrip } from '../ui/StampSheet';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
 import { AimTracker, ShakeDetector } from '../utils/motion';
-import { TargetObjectType, PlayerInfo } from '../types';
+import { TargetObjectType, PlayerInfo, ImageStampData } from '../types';
 
 type ControllerMode = 'aim' | 'paint' | 'pad';
+/** What a one-finger gesture does inside the on-device 3D preview. */
+type Interaction = 'paint' | 'stamp' | 'orbit';
 
 /** Motion send rate; the studio interpolates the remainder to frame rate. */
 const MOTION_HZ = 40;
@@ -99,8 +116,10 @@ interface PreviewProps {
   color: string;
   tool: 'spray' | 'brush';
   size: number;
-  interaction: 'paint' | 'orbit';
+  interaction: Interaction;
   onStamps: (stamps: PaintStamp[], state: 'start' | 'paint' | 'end', context?: BatchContext) => void;
+  /** Fired when a tap in stamp mode resolves to a point on the model. */
+  onStampTap: (u: number, v: number) => void;
   /** Fired (throttled) whenever this phone's preview camera moves. */
   onCameraChange?: (azimuth: number, polar: number, distanceRatio: number) => void;
   orbitRef: React.MutableRefObject<any>;
@@ -116,6 +135,7 @@ function PreviewStage({
   size,
   interaction,
   onStamps,
+  onStampTap,
   onCameraChange,
   orbitRef,
   onLoadingChange,
@@ -243,6 +263,60 @@ function PreviewStage({
     };
   }, [gl, interaction, painter, onStamps]);
 
+  /* ---------------------------- stamp taps ---------------------------- */
+
+  const stampRay = useMemo(() => new THREE.Raycaster(), []);
+  const onStampTapRef = useRef(onStampTap);
+  onStampTapRef.current = onStampTap;
+
+  useEffect(() => {
+    if (interaction !== 'stamp') return;
+    const canvas = gl.domElement;
+    // One finger still orbits in stamp mode, so a *tap* — no travel, no dwell
+    // — is what places the stamp. Anything else is a camera gesture.
+    const press = { x: 0, y: 0, at: 0, id: -1, live: false };
+
+    const onDown = (event: PointerEvent) => {
+      press.live = true;
+      press.x = event.clientX;
+      press.y = event.clientY;
+      press.at = performance.now();
+      press.id = event.pointerId;
+    };
+    const onUp = (event: PointerEvent) => {
+      if (!press.live || event.pointerId !== press.id) return;
+      press.live = false;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 10) return;
+      if (performance.now() - press.at > 700) return;
+
+      const rect = canvas.getBoundingClientRect();
+      pointerNdc.current.set(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      stampRay.setFromCamera(pointerNdc.current, cameraRef.current);
+      for (const hit of stampRay.intersectObjects(meshRegistry.current, true)) {
+        if (hit.uv) {
+          onStampTapRef.current(hit.uv.x, hit.uv.y);
+          navigator.vibrate?.(16);
+          break;
+        }
+      }
+    };
+    const onCancel = () => {
+      press.live = false;
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, [gl, interaction, stampRay]);
+
   useFrame((_, delta) => {
     if (interaction !== 'paint') return;
     const painting = pointerDown.current;
@@ -330,7 +404,24 @@ export default function ControllerView() {
   );
 
   const [mode, setMode] = useState<ControllerMode>('aim');
-  const [interaction, setInteraction] = useState<'paint' | 'orbit'>('paint');
+  const [interaction, setInteraction] = useState<Interaction>('paint');
+
+  /* ------------------------------ stamps ------------------------------ */
+
+  const [stampLibrary, setStampLibrary] = useState<StampLibrary>(() => loadStampLibrary());
+  // Mirrored so the persisting helpers run once per action, not once per
+  // React updater invocation.
+  const libraryRef = useRef(stampLibrary);
+  const updateLibrary = useCallback((next: (library: StampLibrary) => StampLibrary) => {
+    libraryRef.current = next(libraryRef.current);
+    setStampLibrary(libraryRef.current);
+  }, []);
+  const [selectedStamp, setSelectedStamp] = useState<StampAsset | null>(BUILTIN_STAMPS[0]);
+  const [stampRotationDeg, setStampRotationDeg] = useState(0);
+  const [stampRandomise, setStampRandomise] = useState(true);
+  const [stampBusy, setStampBusy] = useState(false);
+  const [stampError, setStampError] = useState<string | null>(null);
+  const stampSeq = useRef(0);
   const [tool, setTool] = useState<'spray' | 'brush'>('spray');
   const [color, setColor] = useState('#FF4D1C');
   const [toolSize, setToolSize] = useState(1);
@@ -407,6 +498,9 @@ export default function ControllerView() {
   const padDrawing = useRef(false);
   const padLast = useRef<{ u: number; v: number } | null>(null);
 
+  /** Applies `image-stamp` broadcasts, decode-serialised so order holds. */
+  const applyImageStamp = useMemo(() => createStampApplier(paintSurface), [paintSurface]);
+
   /* --------------------------- connection --------------------------- */
 
   useEffect(() => {
@@ -468,6 +562,9 @@ export default function ControllerView() {
         paintSurface.commit();
       }
     });
+    // Stamps placed anywhere in the room. UV-anchored, so this phone's own
+    // texture lands them exactly where the studio did.
+    conn.on('image-stamp', (payload: ImageStampData) => applyImageStamp(payload));
     conn.on('undo-stroke', ({ strokeId }) => {
       if (strokeId && paintSurface.undoStroke(strokeId)) paintSurface.commit();
     });
@@ -688,6 +785,59 @@ export default function ControllerView() {
     sounds.playClick(1.25);
     navigator.vibrate?.(14);
     connectionRef.current?.emit('redo-stroke', { strokeId });
+  };
+
+  /* ---------------------------- stamp actions ---------------------------- */
+
+  /** Applies the selected stamp locally, then broadcasts it to the room. */
+  const placeStamp = async (u: number, v: number) => {
+    const asset = selectedStamp;
+    if (!asset) return;
+    const rotation = stampRandomise
+      ? (Math.random() - 0.5) * 0.36
+      : (stampRotationDeg * Math.PI) / 180;
+    const tint = asset.tintable ? live.current.color : null;
+    const radiusPx = stampRadiusPx(live.current.toolSize);
+    const stampId = `${playerIdRef.current}#stamp${++stampSeq.current}`;
+
+    try {
+      const img = await stampPayload(asset);
+      const image = await decodeStampImage(img);
+      paintSurface.stampImage(image, u, v, radiusPx, rotation, tint, stampId);
+      paintSurface.commit();
+      sounds.playWhoosh();
+      roomStateKnown.current = true;
+      updateLibrary((library) => markRecent(library, asset.id));
+      connectionRef.current?.emit('image-stamp', {
+        playerId: playerIdRef.current,
+        stampId,
+        img,
+        u,
+        v,
+        radiusPx,
+        rotation,
+        ...(tint ? { tint } : {}),
+      });
+    } catch (err) {
+      console.error('[stamp] placement failed', err);
+      setStampError('That stamp could not be prepared. Try another one.');
+    }
+  };
+
+  const handleStampUpload = async (file: File) => {
+    setStampBusy(true);
+    setStampError(null);
+    try {
+      const asset = await stampFromFile(file);
+      updateLibrary((library) => addUpload(library, asset));
+      setSelectedStamp(asset);
+      sounds.playClick(1.4);
+      navigator.vibrate?.(12);
+    } catch (err: any) {
+      setStampError(err?.message || 'Could not use that image as a stamp.');
+    } finally {
+      setStampBusy(false);
+    }
   };
 
   const recalibrate = () => {
@@ -1030,6 +1180,7 @@ export default function ControllerView() {
                     size={toolSize}
                     interaction={interaction}
                     onStamps={handleStamps}
+                    onStampTap={placeStamp}
                     onCameraChange={handleCameraChange}
                     orbitRef={orbitRef}
                     onLoadingChange={setObjectLoading}
@@ -1038,16 +1189,18 @@ export default function ControllerView() {
               </Canvas>
 
               <div className="absolute top-3 inset-x-3 flex items-center justify-between gap-2 z-20">
-                <Segmented
+                <Segmented<Interaction>
                   layoutId="controller-interaction"
                   size="sm"
                   value={interaction}
                   onChange={(next) => {
                     setInteraction(next);
+                    setStampError(null);
                     sounds.playClick(1.2);
                   }}
                   options={[
                     { value: 'paint', label: 'Paint', icon: <Pencil size={11} />, accent: '#22D3EE' },
+                    { value: 'stamp', label: 'Stamp', icon: <StampIcon size={11} />, accent: '#FFB020' },
                     { value: 'orbit', label: 'Rotate', icon: <Rotate3d size={11} />, accent: '#FF4D1C' },
                   ]}
                 />
@@ -1066,7 +1219,42 @@ export default function ControllerView() {
                 </AnimatePresence>
               </div>
 
-              {dockOpen && (
+              {/* The stamp shelf sits inside the stage, docked to its lower
+                  edge: picking and placing are one gesture loop, so it must
+                  never take a modal layer over the object. */}
+              {interaction === 'stamp' && (
+                <motion.div
+                  initial={{ opacity: 0, y: 14 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ type: 'spring', stiffness: 380, damping: 34 }}
+                  className="absolute bottom-2 inset-x-2 z-20 pointer-events-none"
+                >
+                  <StampStrip
+                    library={stampLibrary}
+                    selectedId={selectedStamp?.id ?? null}
+                    color={color}
+                    rotationDeg={stampRotationDeg}
+                    randomise={stampRandomise}
+                    busy={stampBusy}
+                    error={stampError}
+                    onSelect={(asset) => {
+                      setSelectedStamp(asset);
+                      setStampError(null);
+                      sounds.playClick(1.3);
+                      navigator.vibrate?.(10);
+                    }}
+                    onUpload={handleStampUpload}
+                    onRemoveUpload={(asset) => {
+                      updateLibrary((library) => removeUpload(library, asset.id));
+                      if (selectedStamp?.id === asset.id) setSelectedStamp(BUILTIN_STAMPS[0]);
+                    }}
+                    onRotate={(deg) => setStampRotationDeg(((deg % 360) + 360) % 360)}
+                    onToggleRandom={() => setStampRandomise((v) => !v)}
+                  />
+                </motion.div>
+              )}
+
+              {dockOpen && interaction !== 'stamp' && (
                 <div className="absolute bottom-3 inset-x-0 flex justify-center pointer-events-none z-10 px-4">
                   <span className="glass glass-sheen rounded-full px-3.5 py-1.5 text-[9px] font-bold tracking-[0.14em] uppercase text-white/70 text-center">
                     {interaction === 'paint'

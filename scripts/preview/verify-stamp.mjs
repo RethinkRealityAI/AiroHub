@@ -15,10 +15,14 @@ import { chromium } from 'playwright';
 
 const BASE = process.env.BASE || 'http://127.0.0.1:4173';
 
-// 8x8 solid red PNG.
+// 8x8 solid opaque red PNG. (The original literal here was a corrupt PNG —
+// its deflate stream was truncated, so browsers decoded row 0 and left the
+// remaining 56 pixels transparent, which no stamp implementation could turn
+// red at the probed centre. Only the fixture bytes changed; every assertion
+// below is untouched.)
 const RED_PNG =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAGElEQVQYV2P8z8Dwn4EIwDiqEF' +
-  'WNquGoQgCCrRP/rQpTkwAAAABJRU5ErkJggg==';
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAACXBIWXMAAAPoAAAD6AG1e1Jr' +
+  'AAAAEklEQVQY02P4z8DwHx9mGBkKAMLXf4FTfn5wAAAAAElFTkSuQmCC';
 
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_BIN || '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',

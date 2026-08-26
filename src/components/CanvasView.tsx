@@ -9,7 +9,7 @@
  */
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
@@ -18,11 +18,30 @@ import {
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
   Wifi, WifiOff, Boxes, Undo2, Redo2, History, Video, HelpCircle,
+  Stamp as StampIcon, Clapperboard,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
 import { StampBatcher, StampPacket, PaintStamp, packStamps, unpackStamps } from '../paint/stamps';
+import {
+  BUILTIN_STAMPS,
+  StampAsset,
+  StampLibrary,
+  addUpload,
+  createStampApplier,
+  decodeStampImage,
+  loadStampLibrary,
+  markRecent,
+  removeUpload,
+  stampFromFile,
+  stampPayload,
+  stampRadiusPx,
+} from '../paint/stampAssets';
+import { StampTray } from '../ui/StampSheet';
+import { pickSurfaceUV, pointerToNdc } from '../scene/stampPlacement';
 import { StudioScene } from '../scene/StudioScene';
+import { ShowcasePanel } from '../showcase/ShowcasePanel';
+import type { ShowcaseHandles } from '../showcase/recorder';
 import { Finish } from '../scene/PaintTarget';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
@@ -34,7 +53,73 @@ import { prefetchModels } from '../paint/modelRegistry';
 import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
 import { sounds } from '../utils/audio';
 import { parseUploaded3DModel } from '../utils/model3dLoader';
-import { TargetObjectType, PlayerState, Uploaded3DModelInfo } from '../types';
+import { TargetObjectType, PlayerState, Uploaded3DModelInfo, ImageStampData } from '../types';
+
+/**
+ * Turns a tap on the stage into a surface UV.
+ *
+ * It lives inside the R3F canvas purely to reach the default camera and the
+ * scene graph; the ray maths and the "which meshes are paintable" question are
+ * both answered by `scene/stampPlacement`. A drag is never a placement — the
+ * same left button still orbits the camera in stamp mode, so only a press that
+ * neither travels nor lingers counts as a tap.
+ */
+function StampPlacer({
+  armedRef,
+  onPlace,
+}: {
+  armedRef: React.MutableRefObject<boolean>;
+  onPlace: (u: number, v: number) => void;
+}) {
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
+
+  const onPlaceRef = useRef(onPlace);
+  onPlaceRef.current = onPlace;
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const press = { x: 0, y: 0, at: 0, id: -1, live: false };
+
+    const onDown = (event: PointerEvent) => {
+      press.live = armedRef.current && event.button === 0;
+      if (!press.live) return;
+      press.x = event.clientX;
+      press.y = event.clientY;
+      press.at = performance.now();
+      press.id = event.pointerId;
+    };
+
+    const onUp = (event: PointerEvent) => {
+      if (!press.live || event.pointerId !== press.id) return;
+      press.live = false;
+      if (!armedRef.current) return;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8) return;
+      if (performance.now() - press.at > 700) return;
+      const ndc = pointerToNdc(canvas, event.clientX, event.clientY);
+      const hit = pickSurfaceUV(scene, cameraRef.current, ndc.x, ndc.y);
+      if (hit) onPlaceRef.current(hit.u, hit.v);
+    };
+
+    const onCancel = () => {
+      press.live = false;
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, [gl, scene, armedRef]);
+
+  return null;
+}
 
 const STYLE_PRESETS = [
   { id: 'cyberpunk', name: 'Cyberpunk', icon: '⚡', desc: 'Neon grids and chromatic flare.', accent: '#22D3EE' },
@@ -91,7 +176,28 @@ export default function CanvasView() {
   const [hostTool, setHostTool] = useState<'spray' | 'brush'>('spray');
   const [hostColor, setHostColor] = useState('#FF4D1C');
   const [hostSize, setHostSize] = useState(1);
-  const [stageMode, setStageMode] = useState<'paint' | 'orbit'>('paint');
+  const [stageMode, setStageMode] = useState<'paint' | 'stamp' | 'orbit'>('paint');
+
+  /* ------------------------------ stamps ------------------------------ */
+
+  const [stampLibrary, setStampLibrary] = useState<StampLibrary>(() => loadStampLibrary());
+  // Mirrored so the mutating helpers (which also write localStorage) run once
+  // per action rather than once per React updater invocation.
+  const libraryRef = useRef(stampLibrary);
+  const updateLibrary = useCallback((next: (library: StampLibrary) => StampLibrary) => {
+    libraryRef.current = next(libraryRef.current);
+    setStampLibrary(libraryRef.current);
+  }, []);
+
+  const [selectedStamp, setSelectedStamp] = useState<StampAsset | null>(BUILTIN_STAMPS[0]);
+  const [stampRotationDeg, setStampRotationDeg] = useState(0);
+  const [stampRandomise, setStampRandomise] = useState(true);
+  const [stampBusy, setStampBusy] = useState(false);
+  const [stampError, setStampError] = useState<string | null>(null);
+  const stampSeq = useRef(0);
+  /** Read by the in-canvas tap listener, which is bound once. */
+  const stampArmed = useRef(false);
+  stampArmed.current = stageMode === 'stamp' && Boolean(selectedStamp);
 
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -138,6 +244,9 @@ export default function CanvasView() {
   const [aiSheet, setAiSheet] = useState(false);
   const [uploadSheet, setUploadSheet] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Showcase: cinematic turntable video export of the painted piece.
+  const [showcaseOpen, setShowcaseOpen] = useState(false);
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Player roster. A ref mirrors it because the render loop mutates player
   // transforms every frame and must not trigger React re-renders.
@@ -208,6 +317,9 @@ export default function CanvasView() {
     },
     []
   );
+
+  /** Applies `image-stamp` broadcasts, decode-serialised so order holds. */
+  const applyImageStamp = useMemo(() => createStampApplier(paintSurface), [paintSurface]);
 
   /* --------------------------- networking --------------------------- */
 
@@ -362,6 +474,13 @@ export default function CanvasView() {
       }
     });
 
+    // A stamp placed anywhere in the room. UV-anchored, so it lands on the
+    // same spot of the model here as it did on the peer that placed it.
+    conn.on('image-stamp', (payload: ImageStampData) => {
+      applyImageStamp(payload);
+      sounds.playClick(1.35);
+    });
+
     conn.on('redo-stroke', ({ strokeId }) => {
       if (strokeId && paintSurface.redoStroke(strokeId)) paintSurface.commit();
     });
@@ -457,12 +576,17 @@ export default function CanvasView() {
           mode: p.mode,
           world: [...p.worldPos],
         }));
+      // Samples the paint layer itself — no camera, no model, no shader — so
+      // stamp/undo assertions can be made on what actually landed.
+      (window as any).__airoPaintProbe = (u: number, v: number) =>
+        paintSurface.samplePaint(u, v);
     }
 
     return () => {
       conn.disconnect();
       connectionRef.current = null;
       delete (window as any).__airoSim;
+      delete (window as any).__airoPaintProbe;
       sounds.stopSpray();
       sounds.stopBrush();
     };
@@ -489,7 +613,8 @@ export default function CanvasView() {
       const key = e.key.toLowerCase();
       if (key === 'f') toggleFullscreen();
       if (key === 'b') setHostTool((t) => (t === 'spray' ? 'brush' : 'spray'));
-      if (key === 'o') setStageMode((m) => (m === 'paint' ? 'orbit' : 'paint'));
+      if (key === 'o') setStageMode((m) => (m === 'orbit' ? 'paint' : 'orbit'));
+      if (key === 's') setStageMode((m) => (m === 'stamp' ? 'paint' : 'stamp'));
       if (key === 'z' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         if (e.shiftKey) redoRef.current();
@@ -561,6 +686,63 @@ export default function CanvasView() {
     connectionRef.current?.emit('redo-stroke', { strokeId });
   }, [paintSurface]);
   redoRef.current = redoLast;
+
+  /* ---------------------------- stamp actions ---------------------------- */
+
+  /**
+   * Places the selected stamp at a surface UV: applied here first so the
+   * studio never waits on the network, then broadcast for every peer. The
+   * stamp id doubles as its stroke id, which is what makes one tap one
+   * undoable unit everywhere in the room.
+   */
+  const placeStamp = async (u: number, v: number) => {
+    const asset = selectedStamp;
+    if (!asset) return;
+    const rotation = stampRandomise
+      ? (Math.random() - 0.5) * 0.36
+      : (stampRotationDeg * Math.PI) / 180;
+    const tint = asset.tintable ? hostColor : null;
+    const radiusPx = stampRadiusPx(hostSize);
+    const stampId = `${HOST_ID}#stamp${++stampSeq.current}`;
+
+    try {
+      const img = await stampPayload(asset);
+      const image = await decodeStampImage(img);
+      paintSurface.stampImage(image, u, v, radiusPx, rotation, tint, stampId);
+      paintSurface.commit();
+      sounds.playWhoosh();
+      roomStateKnown.current = true;
+      updateLibrary((library) => markRecent(library, asset.id));
+      connectionRef.current?.emit('image-stamp', {
+        playerId: HOST_ID,
+        stampId,
+        img,
+        u,
+        v,
+        radiusPx,
+        rotation,
+        ...(tint ? { tint } : {}),
+      });
+    } catch (err) {
+      console.error('[stamp] placement failed', err);
+      setStampError('That stamp could not be prepared. Try another one.');
+    }
+  };
+
+  const handleStampUpload = async (file: File) => {
+    setStampBusy(true);
+    setStampError(null);
+    try {
+      const asset = await stampFromFile(file);
+      updateLibrary((library) => addUpload(library, asset));
+      setSelectedStamp(asset);
+      sounds.playClick(1.4);
+    } catch (err: any) {
+      setStampError(err?.message || 'Could not use that image as a stamp.');
+    } finally {
+      setStampBusy(false);
+    }
+  };
 
   const [replaying, setReplaying] = useState(false);
   const replayArtwork = async () => {
@@ -698,6 +880,15 @@ export default function CanvasView() {
   const remotePlayers = players.filter((p) => !p.isHost);
   const activeObject = OBJECT_BY_ID.get(objectId);
 
+  const showcaseHandles: ShowcaseHandles = useMemo(
+    () => ({
+      getCanvas: () => glCanvasRef.current,
+      getOrbit: () => orbitRef.current,
+      roomId: roomId ?? 'studio',
+    }),
+    [roomId]
+  );
+
   return (
     <div className="h-screen w-screen overflow-hidden stage-vignette text-white relative select-none">
       {/* ---------------------------- 3D stage ---------------------------- */}
@@ -705,8 +896,18 @@ export default function CanvasView() {
         shadows
         dpr={[1, 2]}
         gl={{ antialias: true, preserveDrawingBuffer: true }}
-        className={`absolute inset-0 ${stageMode === 'paint' ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+        onCreated={({ gl }) => {
+          glCanvasRef.current = gl.domElement;
+        }}
+        className={`absolute inset-0 ${
+          stageMode === 'paint'
+            ? 'cursor-crosshair'
+            : stageMode === 'stamp'
+              ? 'cursor-copy'
+              : 'cursor-grab active:cursor-grabbing'
+        }`}
       >
+        <StampPlacer armedRef={stampArmed} onPlace={placeStamp} />
         <Suspense fallback={null}>
         <StudioScene
           objectId={objectId}
@@ -864,9 +1065,23 @@ export default function CanvasView() {
                 className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
                   stageMode === 'paint' ? 'bg-[var(--color-airo-flame)] text-white' : 'text-white/70 hover:bg-white/12'
                 }`}
-                title="Paint with pointer (O)"
+                title="Paint with pointer"
               >
                 <MousePointer size={14} />
+              </button>
+              <button
+                onClick={() => {
+                  setStageMode('stamp');
+                  sounds.playClick(1.2);
+                }}
+                className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
+                  stageMode === 'stamp'
+                    ? 'bg-[var(--color-airo-ember)] text-black'
+                    : 'text-white/70 hover:bg-white/12'
+                }`}
+                title="Place stamps (S)"
+              >
+                <StampIcon size={14} />
               </button>
               <button
                 onClick={() => setStageMode('orbit')}
@@ -890,22 +1105,62 @@ export default function CanvasView() {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 90, opacity: 0 }}
             transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.08 }}
-            className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex justify-center safe-bottom"
+            className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex flex-col items-center gap-2 safe-bottom pointer-events-none"
           >
-            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,980px)]">
+            {/* The stamp shelf docks directly above the bar so it can never
+                cover it, and stays non-modal so the next tap reaches the
+                model rather than a backdrop. */}
+            <AnimatePresence>
+              {stageMode === 'stamp' && (
+                <StampTray
+                  key="stamp-tray"
+                  library={stampLibrary}
+                  selectedId={selectedStamp?.id ?? null}
+                  color={hostColor}
+                  rotationDeg={stampRotationDeg}
+                  randomise={stampRandomise}
+                  busy={stampBusy}
+                  error={stampError}
+                  onSelect={(asset) => {
+                    setSelectedStamp(asset);
+                    setStampError(null);
+                    sounds.playClick(1.3);
+                  }}
+                  onUpload={handleStampUpload}
+                  onRemoveUpload={(asset) => {
+                    updateLibrary((library) => removeUpload(library, asset.id));
+                    if (selectedStamp?.id === asset.id) setSelectedStamp(BUILTIN_STAMPS[0]);
+                    sounds.playClick(0.9);
+                  }}
+                  onRotate={(deg) => setStampRotationDeg(((deg % 360) + 360) % 360)}
+                  onToggleRandom={() => setStampRandomise((v) => !v)}
+                  onClose={() => setStageMode('paint')}
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Wide enough that the third tool segment does not push the save
+                button onto a second row on a laptop display. */}
+            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,1120px)] pointer-events-auto">
               {/* Row 1 on phones: tool + colour. */}
               <div className="flex items-center gap-2 w-full md:w-auto md:contents">
-                <Segmented
+                <Segmented<'spray' | 'brush' | 'stamp'>
                   layoutId="host-tool"
                   className="flex-1 md:flex-none"
-                  value={hostTool}
+                  value={stageMode === 'stamp' ? 'stamp' : hostTool}
                   onChange={(value) => {
-                    setHostTool(value);
                     sounds.playClick(1.2);
+                    if (value === 'stamp') {
+                      setStageMode('stamp');
+                      return;
+                    }
+                    setHostTool(value);
+                    if (stageMode !== 'paint') setStageMode('paint');
                   }}
                   options={[
                     { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
                     { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+                    { value: 'stamp', label: 'Stamp', icon: <StampIcon size={13} />, accent: '#FFB020' },
                   ]}
                 />
                 <ColorWell color={hostColor} onChange={handleHostColor} />
@@ -967,6 +1222,13 @@ export default function CanvasView() {
               <GlassIconButton onClick={clearCanvas} title="Clear paint" size={38}>
                 <Trash2 size={15} />
               </GlassIconButton>
+              <GlassIconButton
+                onClick={() => setShowcaseOpen(true)}
+                title="Showcase — record a turntable video of your piece"
+                size={38}
+              >
+                <Clapperboard size={15} className="text-[var(--color-airo-aqua)]" />
+              </GlassIconButton>
               <button
                 onClick={saveSnapshot}
                 className="tap rounded-full px-4 py-2 bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-white text-[11px] font-bold tracking-wide flex items-center gap-1.5 shadow-[0_8px_24px_-6px_rgba(255,77,28,0.75)]"
@@ -981,7 +1243,13 @@ export default function CanvasView() {
       </AnimatePresence>
 
       {/* --------------------------- status readouts --------------------------- */}
-      <div className="absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex flex-col items-end gap-2 pointer-events-none">
+      {/* On phones the stamp shelf occupies the space these pills sit in, so
+          they stand down until it closes. */}
+      <div
+        className={`absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex-col items-end gap-2 pointer-events-none ${
+          stageMode === 'stamp' ? 'hidden md:flex' : 'flex'
+        }`}
+      >
         <AnimatePresence>
           {objectLoading && (
             <motion.div
@@ -1027,6 +1295,12 @@ export default function CanvasView() {
         onSelect={changeObject}
         onUpload={() => setUploadSheet(true)}
         customName={customInfo?.name}
+      />
+
+      <ShowcasePanel
+        open={showcaseOpen}
+        onClose={() => setShowcaseOpen(false)}
+        handles={showcaseHandles}
       />
 
       <Sheet
