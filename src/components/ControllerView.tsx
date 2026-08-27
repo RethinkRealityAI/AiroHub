@@ -21,7 +21,7 @@ import * as THREE from 'three';
 import {
   Crosshair, SprayCan, Brush, Sparkles, Volume2, VolumeX, Trash2, Smartphone,
   Pencil, User, Rotate3d, Square, Check, Loader2, Wifi, WifiOff, Hand, Undo2, Redo2,
-  ChevronDown, ChevronUp, HelpCircle, Stamp as StampIcon,
+  ChevronDown, ChevronUp, HelpCircle, RefreshCw, Stamp as StampIcon,
 } from 'lucide-react';
 
 import { sounds } from '../utils/audio';
@@ -435,7 +435,9 @@ export default function ControllerView() {
   const connectedAt = useRef(Date.now());
   const [finish, setFinish] = useState<Finish>('original');
 
-  const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
+  const [connection, setConnection] = useState<
+    'connecting' | 'connected' | 'reconnecting' | 'offline'
+  >('connecting');
   const [player, setPlayer] = useState<PlayerInfo>({
     id: playerIdRef.current,
     slot: 1,
@@ -488,11 +490,12 @@ export default function ControllerView() {
   const lastMotionSend = useRef(0);
   const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Live mirrors read by sensor callbacks (registered once).
-  const live = useRef({ tool, color, toolSize, mode });
+  // Live mirrors read by sensor callbacks and the connection effect, both of
+  // which are registered once and would otherwise close over stale settings.
+  const live = useRef({ tool, color, toolSize, mode, name: player.name });
   useEffect(() => {
-    live.current = { tool, color, toolSize, mode };
-  }, [tool, color, toolSize, mode]);
+    live.current = { tool, color, toolSize, mode, name: player.name };
+  }, [tool, color, toolSize, mode, player.name]);
 
   const padRef = useRef<HTMLCanvasElement>(null);
   const padDrawing = useRef(false);
@@ -520,7 +523,15 @@ export default function ControllerView() {
     connectionRef.current = conn;
 
     conn.on('connection', ({ status }) =>
-      setConnection(status === 'connected' ? 'connected' : status === 'error' ? 'offline' : 'connecting')
+      setConnection(
+        status === 'connected'
+          ? 'connected'
+          : status === 'reconnecting'
+            ? 'reconnecting'
+            : status === 'error'
+              ? 'offline'
+              : 'connecting'
+      )
     );
     conn.on('player-assigned', (assigned: PlayerInfo) => {
       setPlayer(assigned);
@@ -573,12 +584,27 @@ export default function ControllerView() {
     });
 
     // Late-join sync: ask the studio for the artwork as it stands, and bake
-    // the reply in as a baseline layer under our own stroke log.
+    // the reply in as a baseline layer under our own stroke log. Peers throttle
+    // their answer per requester, so asking twice around a rejoin is free.
+    const requestRoomState = () => {
+      connectedAt.current = Date.now();
+      conn.emit('request-state', { playerId: playerIdRef.current });
+    };
     conn.on('connection', ({ status }) => {
-      if (status === 'connected') {
-        connectedAt.current = Date.now();
-        conn.emit('request-state', { playerId: playerIdRef.current });
-      }
+      if (status === 'connected') requestRoomState();
+    });
+    // Coming back from a drop, the transport re-registers our presence, but
+    // every peer's copy of our settings went with the old socket and the
+    // artwork moved on while we were away. Replay both.
+    conn.on('rejoined', () => {
+      conn.emit('settings', {
+        playerId: playerIdRef.current,
+        color: live.current.color,
+        tool: live.current.tool,
+        size: live.current.toolSize,
+        playerName: live.current.name,
+      });
+      requestRoomState();
     });
     conn.on('canvas-state', ({ target, dataUrl, objectType }) => {
       if (target !== playerIdRef.current) return;
@@ -1049,10 +1075,18 @@ export default function ControllerView() {
         <div className="flex items-center gap-1.5 shrink-0">
           <span
             className="glass rounded-full w-8 h-8 grid place-items-center"
-            title={connection === 'connected' ? 'Connected' : 'Not connected'}
+            title={
+              connection === 'connected'
+                ? 'Connected'
+                : connection === 'reconnecting'
+                  ? 'Reconnecting'
+                  : 'Not connected'
+            }
           >
             {connection === 'connected' ? (
               <Wifi size={13} className="text-emerald-400" />
+            ) : connection === 'reconnecting' ? (
+              <RefreshCw size={13} className="animate-spin text-amber-400" />
             ) : connection === 'connecting' ? (
               <Loader2 size={13} className="animate-spin text-white/50" />
             ) : (

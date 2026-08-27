@@ -310,7 +310,9 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
 
       <StudioEnvironment intensity={0.62} />
       <ambientLight intensity={0.35} />
-      <directionalLight position={[9, 14, 10]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />
+      {/* No mesh in the studio casts shadow maps — grounding comes from the
+          ContactShadows pass below, so this light stays a pure illuminator. */}
+      <directionalLight position={[9, 14, 10]} intensity={2.1} />
       <directionalLight position={[-11, 5, -6]} intensity={0.7} color="#7dd3fc" />
       <spotLight position={[0, 10, 13]} angle={0.7} penumbra={0.85} intensity={1.3} color="#fff6ec" />
 
@@ -330,7 +332,11 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
 
       <SprayMist players={players} />
 
-      <ContactShadows position={[0, -7.4, 0]} opacity={0.6} scale={44} blur={2.6} far={18} />
+      {/* 512 is plenty for a heavily blurred grounding blob and quarters the
+          per-frame depth+blur pixel work of the default 1024 target. Stays
+          live (no `frames` cap) so the players' hovering cans keep their
+          moving contact blobs. */}
+      <ContactShadows position={[0, -7.4, 0]} opacity={0.6} scale={44} blur={2.6} far={18} resolution={512} />
     </>
   );
 };

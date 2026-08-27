@@ -348,6 +348,19 @@ const StencilPreview: React.FC<{ asset: StampAsset; tint: string; size?: number 
 
 const HOST_ID = 'host-local';
 
+/**
+ * Ceiling on players minted from traffic alone. Presence caps the real room at
+ * MAX_PLAYERS; this only stops a peer that spams fresh ids from growing the
+ * roster without bound, so it sits above the roster size rather than at it.
+ */
+const MAX_REMOTE_PLAYERS = 8;
+/**
+ * How long a player minted from traffic outlives a roster that has not caught
+ * up with them. Long enough to cover a presence re-track after a drop, short
+ * enough that someone who genuinely left gives their slot colour back.
+ */
+const PROVISIONAL_GRACE_MS = 15000;
+
 function makeHost(color: string): PlayerState {
   return {
     id: HOST_ID,
@@ -421,7 +434,9 @@ export default function CanvasView() {
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
-  const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
+  const [connection, setConnection] = useState<
+    'connecting' | 'connected' | 'reconnecting' | 'offline'
+  >('connecting');
 
   const [objectSheet, setObjectSheet] = useState(false);
   /** Players whose gestures are allowed to rotate the studio camera. */
@@ -474,6 +489,60 @@ export default function CanvasView() {
   useEffect(() => {
     playersRef.current = players;
   }, [players]);
+
+  /**
+   * Resolves the sender of a packet, minting them if presence has not placed
+   * them on the roster yet.
+   *
+   * Presence and broadcast are separate guarantees: a controller whose
+   * `track` is still retrying — or whose sync simply has not landed here yet —
+   * broadcasts motion, stamps and actions perfectly well. Dropping that
+   * traffic is what produced "I can see them spraying but their remote never
+   * shows up on my screen". The entry is provisional: the presence roster
+   * overwrites the guessed name, colour and slot the moment it arrives.
+   */
+  const ensurePlayer = useCallback(
+    (
+      playerId: unknown,
+      hints?: {
+        name?: unknown;
+        tool?: 'spray' | 'brush';
+        color?: unknown;
+        mode?: 'motion' | 'projection';
+      }
+    ): PlayerState | null => {
+      if (typeof playerId !== 'string' || !playerId || playerId === HOST_ID) return null;
+      const known = playersRef.current.find((p) => p.id === playerId);
+      if (known) return known;
+      const remotes = playersRef.current.filter((p) => !p.isHost);
+      if (remotes.length >= MAX_REMOTE_PLAYERS) return null;
+      const taken = new Set(remotes.map((p) => p.color));
+      const player: PlayerState = {
+        id: playerId,
+        slot: remotes.length + 1,
+        name: typeof hints?.name === 'string' && hints.name ? hints.name : `Player ${remotes.length + 1}`,
+        color:
+          (typeof hints?.color === 'string' && hints.color) ||
+          SLOT_COLORS.find((c) => !taken.has(c)) ||
+          SLOT_COLORS[remotes.length % SLOT_COLORS.length],
+        tool: hints?.tool ?? 'spray',
+        isPainting: false,
+        cursorPx: { x: CANVAS_RES / 2, y: CANVAS_RES / 2 },
+        worldPos: [0, 0, 6],
+        pressure: 1,
+        sizeMultiplier: 1,
+        lastActive: Date.now(),
+        mode: hints?.mode ?? 'motion',
+      };
+      // Written into the ref synchronously, not just queued through setState:
+      // the packet that revealed this player is applied to the returned object
+      // in this same tick, and a motion sample dropped here is a lost frame.
+      playersRef.current = [...playersRef.current, player];
+      setPlayers(playersRef.current);
+      return player;
+    },
+    []
+  );
 
   const [customGroup, setCustomGroup] = useState<THREE.Group | null>(null);
   const [customInfo, setCustomInfo] = useState<Uploaded3DModelInfo | null>(null);
@@ -565,7 +634,15 @@ export default function CanvasView() {
     connectionRef.current = conn;
 
     conn.on('connection', ({ status }) => {
-      setConnection(status === 'connected' ? 'connected' : status === 'error' ? 'offline' : 'connecting');
+      setConnection(
+        status === 'connected'
+          ? 'connected'
+          : status === 'reconnecting'
+            ? 'reconnecting'
+            : status === 'error'
+              ? 'offline'
+              : 'connecting'
+      );
       if (status === 'connected') {
         connectedAt.current = Date.now();
         conn.emit('request-state', { playerId: HOST_ID });
@@ -622,6 +699,16 @@ export default function CanvasView() {
                 }
           );
         }
+        // Players minted from traffic survive a roster that has not listed
+        // them yet — evicting someone mid-stroke because their presence record
+        // is a beat behind is the ghost bug all over again. They keep their own
+        // slot number so a badge cannot be claimed twice, and age out through
+        // the roster once they go quiet.
+        const now = Date.now();
+        for (const p of prev) {
+          if (p.isHost || next.some((n) => n.id === p.id)) continue;
+          if (now - p.lastActive < PROVISIONAL_GRACE_MS) next.push({ ...p, slot: next.length });
+        }
         return next;
       });
     });
@@ -629,8 +716,9 @@ export default function CanvasView() {
     // Motion arrives at ~30 Hz. Mutating the ref (rather than setState) keeps
     // it off the React render path; the scene reads it every frame anyway.
     conn.on('motion', ({ playerId, x, y }) => {
-      const player = playersRef.current.find((p) => p.id === playerId);
-      if (!player || typeof x !== 'number') return;
+      if (typeof x !== 'number') return;
+      const player = playersRef.current.find((p) => p.id === playerId) ?? ensurePlayer(playerId);
+      if (!player) return;
       player.cursorPx.x = x * CANVAS_RES;
       player.cursorPx.y = y * CANVAS_RES;
       // Arrival-stamped for the scene's jitter-buffer interpolation — the
@@ -643,7 +731,9 @@ export default function CanvasView() {
     });
 
     conn.on('action', ({ playerId, action, state, color, size }) => {
-      const player = playersRef.current.find((p) => p.id === playerId);
+      const player =
+        playersRef.current.find((p) => p.id === playerId) ??
+        ensurePlayer(playerId, { tool: action, color });
       if (!player) return;
       const painting = state === 'start';
       player.tool = action || player.tool;
@@ -667,7 +757,9 @@ export default function CanvasView() {
     // texture is identical.
     conn.on('paint-stamps', (packet: StampPacket) => {
       const { playerId, tool, color, state, stamps, cursor, point, normal } = packet;
-      const player = playersRef.current.find((p) => p.id === playerId);
+      const player =
+        playersRef.current.find((p) => p.id === playerId) ??
+        ensurePlayer(playerId, { name: packet.playerName, tool, color, mode: 'projection' });
       if (player) {
         player.tool = tool || player.tool;
         if (color) player.color = color;
@@ -761,6 +853,7 @@ export default function CanvasView() {
     });
 
     conn.on('settings', ({ playerId, color, tool, size, playerName }) => {
+      ensurePlayer(playerId, { name: playerName, tool, color });
       setPlayers((prev) =>
         prev.map((p) =>
           p.id === playerId
@@ -816,6 +909,16 @@ export default function CanvasView() {
           mode: p.mode,
           world: [...p.worldPos],
         }));
+      // The roster as the render loop sees it, so verification can assert that
+      // a peer who is sending traffic actually has a cursor here.
+      (window as any).__airoPlayers = () =>
+        playersRef.current.map((p) => ({
+          id: p.id,
+          isHost: !!p.isHost,
+          isPainting: p.isPainting,
+          x: p.cursorPx.x,
+          y: p.cursorPx.y,
+        }));
       // Samples the paint layer itself — no camera, no model, no shader — so
       // stamp/undo assertions can be made on what actually landed.
       (window as any).__airoPaintProbe = (u: number, v: number) =>
@@ -826,6 +929,7 @@ export default function CanvasView() {
       conn.disconnect();
       connectionRef.current = null;
       delete (window as any).__airoSim;
+      delete (window as any).__airoPlayers;
       delete (window as any).__airoPaintProbe;
       sounds.stopSpray();
       sounds.stopBrush();
@@ -1156,9 +1260,11 @@ export default function CanvasView() {
     <div className="h-screen w-screen overflow-hidden stage-vignette text-white relative select-none">
       {/* ---------------------------- 3D stage ---------------------------- */}
       <Canvas
-        shadows
         dpr={[1, 2]}
-        gl={{ antialias: true, preserveDrawingBuffer: true }}
+        // No consumer reads this framebuffer back: Save exports the 2D paint
+        // canvas and the showcase records via captureStream(), so neither
+        // preserveDrawingBuffer nor shadow-map machinery earns its cost here.
+        gl={{ antialias: true, powerPreference: 'high-performance' }}
         onCreated={({ gl }) => {
           glCanvasRef.current = gl.domElement;
         }}
@@ -1551,6 +1657,11 @@ export default function CanvasView() {
             <>
               <Wifi size={12} className="text-emerald-400" />
               <span>{remotePlayers.length} phone{remotePlayers.length === 1 ? '' : 's'} connected</span>
+            </>
+          ) : connection === 'reconnecting' ? (
+            <>
+              <RefreshCw size={12} className="animate-spin text-amber-400" />
+              <span className="text-amber-300">Reconnecting…</span>
             </>
           ) : connection === 'connecting' ? (
             <>

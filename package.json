@@ -12,8 +12,9 @@
     "models:optimize": "node scripts/optimize-models.mjs",
     "models:preview": "node scripts/preview/shoot-contact-sheet.mjs",
     "shots": "node scripts/preview/shoot-ui.mjs",
-    "test": "npm run test:aim",
-    "test:aim": "node scripts/test/aim-regression.mjs"
+    "test": "npm run test:aim && npm run test:realtime",
+    "test:aim": "node scripts/test/aim-regression.mjs",
+    "test:realtime": "node scripts/test/realtime-reconnect.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
