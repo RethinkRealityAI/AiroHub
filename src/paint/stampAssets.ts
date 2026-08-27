@@ -64,6 +64,58 @@ export const BUILTIN_STAMPS: StampAsset[] = [
   origin: 'builtin' as const,
 }));
 
+/** Built-in stencils by their bare id (`crown`, `bolt`, …). */
+export const BUILTIN_BY_NAME = new Map(
+  BUILTIN_STAMPS.map((asset) => [asset.id.slice('builtin:'.length), asset])
+);
+
+/**
+ * Legacy stencil symbols, mapped onto the stencil set.
+ *
+ * The AI endpoints answer with `stencilSymbol` — a single character picked by
+ * the model (or by the curated fallbacks it ships with). That used to be typed
+ * straight onto the artwork; it now selects a real stencil instead. Written as
+ * escapes rather than literal characters so no pictograph appears in the
+ * source, and so the table is readable as data.
+ */
+const SYMBOL_STAMPS: Record<string, string> = {
+  '\u26A1': 'bolt', // high voltage
+  '\u{1F5F2}': 'bolt', // lightning mood
+  '\u{1F451}': 'crown', // crown
+  '\u2605': 'star', // black star
+  '\u2606': 'star', // white star
+  '\u2726': 'star', // four-pointed star
+  '\u2727': 'star',
+  '\u2B50': 'star', // white medium star
+  '\u{1F31F}': 'star', // glowing star
+  '\u2665': 'heart', // heart suit
+  '\u2764': 'heart', // heavy black heart
+  '\u{1F525}': 'flame', // fire
+  '\u2620': 'skull', // skull and crossbones
+  '\u{1F480}': 'skull', // skull
+  '\u27A4': 'arrow', // black rightwards arrowhead
+  '\u2794': 'arrow', // heavy wide-headed arrow
+  '\u{1F409}': 'flame', // dragon
+  '\u{1F680}': 'flame', // rocket
+  '\u{1F441}': 'ring', // eye
+  '\u{1F440}': 'ring', // eyes
+};
+
+/**
+ * The stencil an AI suggestion should place.
+ *
+ * Accepts a legacy symbol, a bare stencil id (`crown`) or anything at all —
+ * an unrecognised suggestion falls back to the ring, which reads as a
+ * deliberate mark rather than as a missing glyph.
+ */
+export function stampForSymbol(symbol?: string | null): StampAsset {
+  const raw = (symbol || '').trim();
+  const byName = BUILTIN_BY_NAME.get(raw.toLowerCase());
+  if (byName) return byName;
+  const mapped = SYMBOL_STAMPS[raw] ?? SYMBOL_STAMPS[[...raw][0] ?? ''];
+  return BUILTIN_BY_NAME.get(mapped ?? 'ring') ?? BUILTIN_STAMPS[0];
+}
+
 /**
  * Texture-pixel radius a stamp is placed at for a given tool-size multiplier.
  *

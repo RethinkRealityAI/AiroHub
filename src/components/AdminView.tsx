@@ -31,6 +31,7 @@ import {
   Loader2,
   Play,
   RefreshCw,
+  Ruler,
   Settings2,
   ShieldAlert,
   Sparkles,
@@ -40,6 +41,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
+import { ObjectThumb } from '../ui/ObjectPicker';
 import { PAINTABLE_OBJECTS, type PaintableObject } from '../paint/objectCatalog';
 import { analyzeModel, type ModelStats } from '../admin/analyze';
 import { optimizeGlb } from '../admin/optimize';
@@ -301,10 +303,10 @@ function BuiltinCard({
       <GlassPanel className="flex h-full flex-col gap-3 p-4">
         <div className="flex items-start gap-3">
           <div
-            className="glass grid h-11 w-11 shrink-0 place-items-center rounded-2xl text-xl"
+            className="glass grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-2xl"
             style={{ borderColor: `${accent}45` }}
           >
-            {def.icon}
+            <ObjectThumb thumb={def.thumb} label={def.label} size={34} accent={accent} />
           </div>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[14px] font-bold leading-tight">{def.label}</h3>
@@ -321,7 +323,10 @@ function BuiltinCard({
             <div className="font-mono text-[10.5px] text-white/45">
               {entry.sizeBytes != null ? formatBytes(entry.sizeBytes) : '· · ·'}
             </div>
-            <div className="mt-0.5 font-mono text-[9.5px] text-white/25">⌀ {def.targetSize} wu</div>
+            <div className="mt-0.5 flex items-center justify-end gap-1 font-mono text-[9.5px] text-white/25">
+              <Ruler size={9} aria-hidden />
+              {def.targetSize} wu
+            </div>
           </div>
         </div>
 
@@ -447,8 +452,8 @@ function CustomCard({
     >
       <GlassPanel className="flex h-full flex-col gap-3 p-4">
         <div className="flex items-start gap-3">
-          <div className="glass grid h-11 w-11 shrink-0 place-items-center rounded-2xl border-[#34D399]/35 text-xl">
-            🧩
+          <div className="glass grid h-11 w-11 shrink-0 place-items-center rounded-2xl border-[#34D399]/35">
+            <Boxes size={18} className="text-[#34D399]" />
           </div>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[14px] font-bold leading-tight">{row.name}</h3>
@@ -469,7 +474,10 @@ function CustomCard({
           </div>
           <div className="text-right">
             <div className="font-mono text-[10.5px] text-white/45">{formatBytes(Number(row.size_bytes))}</div>
-            <div className="mt-0.5 font-mono text-[9.5px] text-white/25">⌀ {Number(row.target_size)} wu</div>
+            <div className="mt-0.5 flex items-center justify-end gap-1 font-mono text-[9.5px] text-white/25">
+              <Ruler size={9} aria-hidden />
+              {Number(row.target_size)} wu
+            </div>
           </div>
         </div>
 

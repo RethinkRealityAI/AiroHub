@@ -14,10 +14,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
 import {
-  Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, X, Zap,
-  RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, QrCode, Layers,
-  Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2, Camera,
-  Wifi, WifiOff, Boxes, Undo2, Redo2, History, Video, HelpCircle,
+  Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, AlertTriangle,
+  RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, Layers,
+  Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2,
+  Wifi, WifiOff, Undo2, Redo2, History, Video, HelpCircle,
   Stamp as StampIcon, Clapperboard,
 } from 'lucide-react';
 
@@ -33,6 +33,7 @@ import {
   loadStampLibrary,
   markRecent,
   removeUpload,
+  stampForSymbol,
   stampFromFile,
   stampPayload,
   stampRadiusPx,
@@ -47,7 +48,7 @@ import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
 import { WelcomeGuide } from './WelcomeGuide';
 import { ColorWell } from '../ui/ColorWell';
-import { OBJECT_BY_ID, PAINTABLE_OBJECTS } from '../paint/objectCatalog';
+import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { prefetchModels } from '../paint/modelRegistry';
 import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
@@ -67,9 +68,16 @@ import { TargetObjectType, PlayerState, Uploaded3DModelInfo, ImageStampData } fr
 function StampPlacer({
   armedRef,
   onPlace,
+  pickCentreRef,
 }: {
   armedRef: React.MutableRefObject<boolean>;
   onPlace: (u: number, v: number) => void;
+  /**
+   * Filled in with a "where is the model right now" probe, so code outside the
+   * canvas — the AI copilot — can place a stamp somewhere the viewer can
+   * actually see rather than at a fixed UV.
+   */
+  pickCentreRef: React.MutableRefObject<(() => { u: number; v: number } | null) | null>;
 }) {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
@@ -79,6 +87,32 @@ function StampPlacer({
   onPlaceRef.current = onPlace;
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
+
+  // The UV under the middle of the frame. A generated model's atlas scatters
+  // its charts, so a hard-coded UV lands wherever that chart happens to be —
+  // often on a face nobody is looking at. Rays from the centre outwards find a
+  // spot that is genuinely on screen.
+  useEffect(() => {
+    pickCentreRef.current = () => {
+      const offsets: [number, number][] = [
+        [0, 0],
+        [0, 0.18],
+        [0, -0.18],
+        [0.22, 0],
+        [-0.22, 0],
+        [0.26, 0.2],
+        [-0.26, -0.2],
+      ];
+      for (const [x, y] of offsets) {
+        const hit = pickSurfaceUV(scene, cameraRef.current, x, y);
+        if (hit) return { u: hit.u, v: hit.v };
+      }
+      return null;
+    };
+    return () => {
+      pickCentreRef.current = null;
+    };
+  }, [scene, pickCentreRef]);
 
   useEffect(() => {
     const canvas = gl.domElement;
@@ -121,13 +155,196 @@ function StampPlacer({
   return null;
 }
 
+/**
+ * The style presets, as art.
+ *
+ * Each one ships a reference plate (`/ui/presets/*.webp`) showing what the
+ * transform actually lays down, so the picker is a row of small paintings
+ * rather than a row of labels. `id` is the wire value the AI endpoint expects
+ * and never changes; the plate filename is deliberately decoupled from it.
+ */
 const STYLE_PRESETS = [
-  { id: 'cyberpunk', name: 'Cyberpunk', icon: '⚡', desc: 'Neon grids and chromatic flare.', accent: '#22D3EE' },
-  { id: 'wildstyle80s', name: 'Wildstyle 84', icon: '👑', desc: 'Fat caps and gravity drips.', accent: '#FF4D1C' },
-  { id: 'banksy', name: 'Stencil', icon: '👁', desc: 'Monochrome wash, one red accent.', accent: '#E4E4E7' },
-  { id: 'popart', name: 'Pop Art', icon: '✦', desc: 'Ben-Day dots, primary bursts.', accent: '#FFB020' },
-  { id: 'cosmic', name: 'Cosmic', icon: '🚀', desc: 'Nebula haze and stardust.', accent: '#A78BFA' },
+  {
+    id: 'cyberpunk',
+    name: 'Cyberpunk',
+    art: '/ui/presets/preset-cyberpunk.webp',
+    desc: 'Neon grids and chromatic flare.',
+    accent: '#22D3EE',
+  },
+  {
+    id: 'wildstyle80s',
+    name: 'Wildstyle 84',
+    art: '/ui/presets/preset-wildstyle.webp',
+    desc: 'Fat caps and gravity drips.',
+    accent: '#FF4D1C',
+  },
+  {
+    id: 'banksy',
+    name: 'Stencil',
+    art: '/ui/presets/preset-stencil.webp',
+    desc: 'Monochrome wash, one red accent.',
+    accent: '#E4E4E7',
+  },
+  {
+    id: 'popart',
+    name: 'Pop Art',
+    art: '/ui/presets/preset-popart.webp',
+    desc: 'Ben-Day dots, primary bursts.',
+    accent: '#FFB020',
+  },
+  {
+    id: 'cosmic',
+    name: 'Cosmic',
+    art: '/ui/presets/preset-cosmic.webp',
+    desc: 'Nebula haze and stardust.',
+    accent: '#A78BFA',
+  },
 ];
+
+/** Where an AI-suggested stencil lands: centred, a little above the equator. */
+const AI_STAMP_UV = { u: 0.5, v: 0.35 };
+
+/** House ink for the copilot's paint-stroke buttons. */
+const AI_PAINT = 'linear-gradient(120deg, #7C3AED 0%, #A855F7 55%, #E879F9 100%)';
+
+/** Hex colours an AI answer offered, cleaned up for use as swatches. */
+function paletteOf(...values: unknown[]): string[] {
+  const flat = values.flatMap((value) => (Array.isArray(value) ? value : [value]));
+  const seen = new Set<string>();
+  return flat.filter(
+    (value): value is string =>
+      typeof value === 'string' &&
+      /^#[0-9a-f]{6}$/i.test(value.trim()) &&
+      !seen.has(value.toUpperCase()) &&
+      Boolean(seen.add(value.toUpperCase()))
+  );
+}
+
+/* ------------------------------------------------------------------
+   AI copilot presentation
+   ------------------------------------------------------------------ */
+
+/** One style preset, presented as a small painting with its own accent edge. */
+const PresetCard: React.FC<{
+  preset: (typeof STYLE_PRESETS)[number];
+  selected: boolean;
+  onSelect: () => void;
+}> = ({ preset, selected, onSelect }) => (
+  <button
+    type="button"
+    onClick={onSelect}
+    aria-pressed={selected}
+    className={`tap group relative flex flex-col overflow-hidden rounded-2xl border text-left transition-colors ${
+      selected ? 'border-white/40 bg-white/[0.12]' : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.08]'
+    }`}
+  >
+    <div className="relative h-[86px] shrink-0 overflow-hidden">
+      <img
+        src={preset.art}
+        alt=""
+        draggable={false}
+        className={`h-full w-full scale-[1.08] object-cover transition-transform duration-300 group-hover:scale-[1.14] ${
+          selected ? '' : 'opacity-80 saturate-[0.85]'
+        }`}
+      />
+      <span
+        aria-hidden
+        className="absolute inset-0"
+        style={{ background: 'linear-gradient(180deg, rgba(6,6,12,0) 38%, rgba(6,6,12,0.82) 100%)' }}
+      />
+      {selected && (
+        <span
+          className="absolute right-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-full"
+          style={{ background: preset.accent, boxShadow: `0 4px 14px -2px ${preset.accent}` }}
+        >
+          <Check size={11} className="text-black/80" />
+        </span>
+      )}
+    </div>
+    {/* The accent edge: a painted rule the width of the card. */}
+    <span
+      aria-hidden
+      className="block h-[2.5px] w-full transition-opacity"
+      style={{ background: preset.accent, opacity: selected ? 1 : 0.42 }}
+    />
+    <div className="px-2.5 pb-2.5 pt-2">
+      <div className="truncate text-[11.5px] font-bold tracking-tight text-white">{preset.name}</div>
+      <p className="mt-0.5 text-[9.5px] leading-snug text-white/45">{preset.desc}</p>
+    </div>
+  </button>
+);
+
+/** Colours an answer proposed, as a row of paint swatches. */
+const PaletteRow: React.FC<{
+  colors: string[];
+  active?: string;
+  onPick?: (hex: string) => void;
+}> = ({ colors, active, onPick }) =>
+  colors.length === 0 ? null : (
+    <div className="flex items-center gap-1.5">
+      {colors.map((hex) => {
+        const selected = active?.toUpperCase() === hex.toUpperCase();
+        return onPick ? (
+          <button
+            key={hex}
+            type="button"
+            onClick={() => onPick(hex)}
+            title={hex}
+            aria-label={`Use ${hex}`}
+            aria-pressed={selected}
+            className={`tap h-6 w-6 rounded-full border transition-transform ${
+              selected ? 'border-white/80 scale-110' : 'border-white/20 hover:border-white/50'
+            }`}
+            style={{ background: hex, boxShadow: selected ? `0 4px 14px -3px ${hex}` : undefined }}
+          />
+        ) : (
+          <span
+            key={hex}
+            title={hex}
+            className="h-5 w-5 rounded-full border border-white/20"
+            style={{ background: hex }}
+          />
+        );
+      })}
+    </div>
+  );
+
+/** The copilot's failure state — one quiet line, never a red wall. */
+const ResultNote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="mt-3.5 flex items-start gap-2 rounded-2xl border border-amber-400/25 bg-amber-400/[0.07] px-3.5 py-3 text-[11px] text-amber-200/90">
+    <AlertTriangle size={13} className="mt-px shrink-0" />
+    <span>{children}</span>
+  </div>
+);
+
+/** The stencil an answer suggested, drawn as the stamp it will actually place. */
+const StencilPreview: React.FC<{ asset: StampAsset; tint: string; size?: number }> = ({
+  asset,
+  tint,
+  size = 60,
+}) => (
+  <span
+    className="glass relative grid shrink-0 place-items-center rounded-2xl"
+    style={{ width: size, height: size }}
+  >
+    <span
+      aria-hidden
+      className="block h-[64%] w-[64%]"
+      style={{
+        background: tint,
+        WebkitMaskImage: `url(${asset.src})`,
+        maskImage: `url(${asset.src})`,
+        WebkitMaskSize: 'contain',
+        maskSize: 'contain',
+        WebkitMaskRepeat: 'no-repeat',
+        maskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        maskPosition: 'center',
+        filter: `drop-shadow(0 3px 10px ${tint}80)`,
+      }}
+    />
+  </span>
+);
 
 const HOST_ID = 'host-local';
 
@@ -195,6 +412,8 @@ export default function CanvasView() {
   const [stampBusy, setStampBusy] = useState(false);
   const [stampError, setStampError] = useState<string | null>(null);
   const stampSeq = useRef(0);
+  /** Set by `StampPlacer`: the UV under the middle of the live frame. */
+  const pickCentreRef = useRef<(() => { u: number; v: number } | null) | null>(null);
   /** Read by the in-canvas tap listener, which is bound once. */
   const stampArmed = useRef(false);
   stampArmed.current = stageMode === 'stamp' && Boolean(selectedStamp);
@@ -265,6 +484,12 @@ export default function CanvasView() {
   const [stylePreset, setStylePreset] = useState('cyberpunk');
   const [aiPrompt, setAiPrompt] = useState('NEON OVERDRIVE');
   const [aiBusy, setAiBusy] = useState(false);
+  /**
+   * Colour an AI stencil is stamped in. Seeded from whatever palette the last
+   * answer proposed and overridable by tapping a swatch; null means "whatever
+   * the painter is holding".
+   */
+  const [aiTint, setAiTint] = useState<string | null>(null);
   const [styleResult, setStyleResult] = useState<any>(null);
   const [conceptResult, setConceptResult] = useState<any>(null);
   const [critiqueResult, setCritiqueResult] = useState<any>(null);
@@ -556,11 +781,26 @@ export default function CanvasView() {
       sounds.playWhoosh();
     });
     conn.on('shake', () => sounds.playCanRattle());
-    conn.on('ai-stamp', ({ stencilSymbol, color, text }) => {
-      if (stencilSymbol) {
-        paintSurface.stampSymbol(stencilSymbol, CANVAS_RES / 2, CANVAS_RES / 2, color || '#FF4D1C', text);
-        sounds.playWhoosh();
-      }
+    // Legacy AI stencil broadcast. Peers on an older build still send a symbol
+    // character; it is resolved to a real stencil and applied through the
+    // image-stamp pipeline, so it lands as a proper undoable stamp rather than
+    // as typeset text in the middle of the texture.
+    conn.on('ai-stamp', ({ stencilSymbol, color, stampId }) => {
+      const asset = stampForSymbol(stencilSymbol);
+      stampPayload(asset)
+        .then((img) =>
+          applyImageStamp({
+            img,
+            u: AI_STAMP_UV.u,
+            v: AI_STAMP_UV.v,
+            radiusPx: stampRadiusPx(1.5),
+            rotation: 0,
+            tint: typeof color === 'string' ? color : '#FF4D1C',
+            stampId: stampId || `ai#${Math.random().toString(36).slice(2, 9)}`,
+          })
+        )
+        .catch((err) => console.error('[ai-stamp] could not prepare stencil', err));
+      sounds.playWhoosh();
     });
 
     // Test hook (only with ?debug in the URL): lets automated verification
@@ -690,19 +930,26 @@ export default function CanvasView() {
   /* ---------------------------- stamp actions ---------------------------- */
 
   /**
-   * Places the selected stamp at a surface UV: applied here first so the
-   * studio never waits on the network, then broadcast for every peer. The
-   * stamp id doubles as its stroke id, which is what makes one tap one
-   * undoable unit everywhere in the room.
+   * Places any stamp at a surface UV: applied here first so the studio never
+   * waits on the network, then broadcast for every peer. The stamp id doubles
+   * as its stroke id, which is what makes one placement one undoable unit
+   * everywhere in the room.
+   *
+   * Everything that puts a stamp on the model goes through here — the tray, a
+   * tap on the stage, and the AI copilot's suggestions — so all three converge
+   * identically and undo the same way.
    */
-  const placeStamp = async (u: number, v: number) => {
-    const asset = selectedStamp;
-    if (!asset) return;
-    const rotation = stampRandomise
-      ? (Math.random() - 0.5) * 0.36
-      : (stampRotationDeg * Math.PI) / 180;
-    const tint = asset.tintable ? hostColor : null;
-    const radiusPx = stampRadiusPx(hostSize);
+  const placeStampAsset = async (
+    asset: StampAsset,
+    u: number,
+    v: number,
+    options: { tint?: string; sizeMultiplier?: number; rotation?: number } = {}
+  ): Promise<boolean> => {
+    const rotation =
+      options.rotation ??
+      (stampRandomise ? (Math.random() - 0.5) * 0.36 : (stampRotationDeg * Math.PI) / 180);
+    const tint = asset.tintable ? options.tint || hostColor : null;
+    const radiusPx = stampRadiusPx(options.sizeMultiplier ?? hostSize);
     const stampId = `${HOST_ID}#stamp${++stampSeq.current}`;
 
     try {
@@ -723,10 +970,17 @@ export default function CanvasView() {
         rotation,
         ...(tint ? { tint } : {}),
       });
+      return true;
     } catch (err) {
       console.error('[stamp] placement failed', err);
       setStampError('That stamp could not be prepared. Try another one.');
+      return false;
     }
+  };
+
+  /** A tap on the stage places whatever the tray has selected. */
+  const placeStamp = (u: number, v: number) => {
+    if (selectedStamp) void placeStampAsset(selectedStamp, u, v);
   };
 
   const handleStampUpload = async (file: File) => {
@@ -808,6 +1062,7 @@ export default function CanvasView() {
         customPrompt: aiPrompt,
       });
       setStyleResult(data);
+      setAiTint(paletteOf(data.accentColor, data.secondaryColor)[0] ?? null);
       const apply: Record<string, () => void> = {
         cyberpunk: () => paintSurface.applyCyberpunkStyle(data.accentColor, data.secondaryColor, data.tagText),
         wildstyle80s: () => paintSurface.applyWildstyleDrips(data.accentColor, data.tagText),
@@ -828,8 +1083,11 @@ export default function CanvasView() {
 
   const generateConcept = async () => {
     setAiBusy(true);
+    sounds.playClick(1.3);
     try {
-      setConceptResult(await callAi('graffiti-tag', { prompt: aiPrompt, style: 'wildstyle' }));
+      const data = await callAi('graffiti-tag', { prompt: aiPrompt, style: 'wildstyle' });
+      setConceptResult(data);
+      setAiTint(paletteOf(data.recommendedPalette)[0] ?? null);
     } catch {
       setConceptResult({ error: 'The concept generator is unavailable right now.' });
     } finally {
@@ -848,23 +1106,26 @@ export default function CanvasView() {
     }
   };
 
-  const stampConcept = () => {
-    if (!conceptResult) return;
-    paintSurface.stampSymbol(
-      conceptResult.stencilSymbol || '⚡',
-      CANVAS_RES / 2,
-      CANVAS_RES / 2,
-      hostColor,
-      conceptResult.graffitiText || aiPrompt
-    );
-    paintSurface.commit();
-    connectionRef.current?.emit('ai-stamp', {
-      stencilSymbol: conceptResult.stencilSymbol,
-      text: conceptResult.graffitiText,
-      color: hostColor,
+  /**
+   * Puts an AI suggestion on the model.
+   *
+   * The old version typed the suggested character into the middle of the
+   * texture at 260px and called it a stencil. It now resolves to one of the
+   * shipped stencils and goes out as a normal `image-stamp`, so the studio,
+   * every phone and the undo stack all agree about what just happened — and it
+   * lands on the face of the model you are currently looking at.
+   */
+  const stampSuggestion = async (symbol: string | undefined, tint: string) => {
+    const spot = pickCentreRef.current?.() ?? AI_STAMP_UV;
+    const placed = await placeStampAsset(stampForSymbol(symbol), spot.u, spot.v, {
+      tint,
+      // Same size a hand-placed stamp gets: the tray's radius is already tuned
+      // to sit inside a single UV chart on these atlased models.
+      sizeMultiplier: hostSize,
+      // A hand-placed stencil is never perfectly square to the object.
+      rotation: (Math.random() - 0.5) * 0.28,
     });
-    sounds.playWhoosh();
-    setAiSheet(false);
+    if (placed) setAiSheet(false);
   };
 
   if (!roomId) {
@@ -879,6 +1140,8 @@ export default function CanvasView() {
 
   const remotePlayers = players.filter((p) => !p.isHost);
   const activeObject = OBJECT_BY_ID.get(objectId);
+  /** What an AI stencil would be stamped in right now. */
+  const activeAiTint = aiTint || hostColor;
 
   const showcaseHandles: ShowcaseHandles = useMemo(
     () => ({
@@ -907,7 +1170,7 @@ export default function CanvasView() {
               : 'cursor-grab active:cursor-grabbing'
         }`}
       >
-        <StampPlacer armedRef={stampArmed} onPlace={placeStamp} />
+        <StampPlacer armedRef={stampArmed} onPlace={placeStamp} pickCentreRef={pickCentreRef} />
         <Suspense fallback={null}>
         <StudioScene
           objectId={objectId}
@@ -1051,47 +1314,64 @@ export default function CanvasView() {
               <button
                 onClick={() => setAutoRotate((v) => !v)}
                 className={`tap w-[52px] py-1.5 rounded-[15px] grid place-items-center ${
-                  autoRotate ? 'bg-[var(--color-airo-aqua)]/25 text-[var(--color-airo-aqua)]' : 'text-white/70 hover:bg-white/12'
+                  autoRotate ? 'splat-chip text-black' : 'text-white/70 hover:bg-white/12'
                 }`}
+                style={autoRotate ? ({ '--paint': '#22D3EE' } as React.CSSProperties) : undefined}
                 title="Auto-rotate"
+                aria-pressed={autoRotate}
               >
                 <RefreshCw size={14} className={autoRotate ? 'animate-spin' : ''} />
               </button>
             </GlassPanel>
 
+            {/* The stage-mode island. The active mode wears a spray splat
+                rather than a solid chip, so the one piece of state on the left
+                rail matches the dock's paint-stroke toggles. */}
             <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
-              <button
-                onClick={() => setStageMode('paint')}
-                className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
-                  stageMode === 'paint' ? 'bg-[var(--color-airo-flame)] text-white' : 'text-white/70 hover:bg-white/12'
-                }`}
-                title="Paint with pointer"
-              >
-                <MousePointer size={14} />
-              </button>
-              <button
-                onClick={() => {
-                  setStageMode('stamp');
-                  sounds.playClick(1.2);
-                }}
-                className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
-                  stageMode === 'stamp'
-                    ? 'bg-[var(--color-airo-ember)] text-black'
-                    : 'text-white/70 hover:bg-white/12'
-                }`}
-                title="Place stamps (S)"
-              >
-                <StampIcon size={14} />
-              </button>
-              <button
-                onClick={() => setStageMode('orbit')}
-                className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
-                  stageMode === 'orbit' ? 'bg-white/22 text-white' : 'text-white/70 hover:bg-white/12'
-                }`}
-                title="Orbit camera (O)"
-              >
-                <Hand size={14} />
-              </button>
+              {(
+                [
+                  {
+                    mode: 'paint',
+                    icon: <MousePointer size={14} />,
+                    title: 'Paint with pointer',
+                    paint: '#FF4D1C',
+                    ink: 'text-white',
+                  },
+                  {
+                    mode: 'stamp',
+                    icon: <StampIcon size={14} />,
+                    title: 'Place stamps (S)',
+                    paint: '#FFB020',
+                    ink: 'text-black',
+                  },
+                  {
+                    mode: 'orbit',
+                    icon: <Hand size={14} />,
+                    title: 'Orbit camera (O)',
+                    paint: '#A78BFA',
+                    ink: 'text-white',
+                  },
+                ] as const
+              ).map((entry) => {
+                const active = stageMode === entry.mode;
+                return (
+                  <button
+                    key={entry.mode}
+                    onClick={() => {
+                      setStageMode(entry.mode);
+                      sounds.playClick(1.2);
+                    }}
+                    className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
+                      active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
+                    }`}
+                    style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
+                    title={entry.title}
+                    aria-pressed={active}
+                  >
+                    {entry.icon}
+                  </button>
+                );
+              })}
             </GlassPanel>
           </motion.div>
         )}
@@ -1146,6 +1426,7 @@ export default function CanvasView() {
               <div className="flex items-center gap-2 w-full md:w-auto md:contents">
                 <Segmented<'spray' | 'brush' | 'stamp'>
                   layoutId="host-tool"
+                  paint
                   className="flex-1 md:flex-none"
                   value={stageMode === 'stamp' ? 'stamp' : hostTool}
                   onChange={(value) => {
@@ -1187,14 +1468,15 @@ export default function CanvasView() {
                 <Segmented
                   layoutId="host-finish"
                   size="sm"
+                  paint
                   value={finish}
                   onChange={(value) => {
                     setFinish(value);
                     sounds.playClick(1.1);
                   }}
                   options={[
-                    { value: 'original', label: 'Textured' },
-                    { value: 'primer', label: 'Primer' },
+                    { value: 'original', label: 'Textured', accent: '#22D3EE' },
+                    { value: 'primer', label: 'Primer', accent: '#A78BFA' },
                   ]}
                 />
               </div>
@@ -1457,111 +1739,176 @@ export default function CanvasView() {
         open={aiSheet}
         onClose={() => setAiSheet(false)}
         centered
+        wide
         title="AI copilot"
-        subtitle="Restyle the piece, generate a concept, or get it appraised"
+        subtitle="Restyle the piece, sketch a concept, or have it appraised"
       >
         <div className="mb-4">
           <Segmented<'style' | 'concept' | 'critique'>
             layoutId="ai-tabs"
+            paint
             value={aiTab}
-            onChange={setAiTab}
+            onChange={(next) => {
+              setAiTab(next);
+              sounds.playClick(1.15);
+            }}
             options={[
               { value: 'style', label: 'Style', icon: <Palette size={12} />, accent: '#A78BFA' },
-              { value: 'concept', label: 'Concept', icon: <Sparkles size={12} />, accent: '#A78BFA' },
-              { value: 'critique', label: 'Appraise', icon: <Eye size={12} />, accent: '#A78BFA' },
+              { value: 'concept', label: 'Concept', icon: <Sparkles size={12} />, accent: '#E879F9' },
+              { value: 'critique', label: 'Appraise', icon: <Eye size={12} />, accent: '#22D3EE' },
             ]}
           />
         </div>
 
         {aiTab === 'style' && (
           <div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3.5">
               {STYLE_PRESETS.map((preset) => (
-                <button
+                <PresetCard
                   key={preset.id}
-                  onClick={() => setStylePreset(preset.id)}
-                  className={`tap text-left rounded-2xl p-3 border transition-colors ${
-                    stylePreset === preset.id
-                      ? 'bg-white/[0.14] border-white/35'
-                      : 'bg-white/[0.04] border-white/10 hover:bg-white/[0.08]'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[15px]">{preset.icon}</span>
-                    <span className="text-[12px] font-semibold flex-1">{preset.name}</span>
-                    {stylePreset === preset.id && <Check size={12} style={{ color: preset.accent }} />}
-                  </div>
-                  <p className="text-[10px] text-white/45">{preset.desc}</p>
-                </button>
+                  preset={preset}
+                  selected={stylePreset === preset.id}
+                  onSelect={() => {
+                    setStylePreset(preset.id);
+                    sounds.playClick(1.15);
+                  }}
+                />
               ))}
             </div>
+
+            <label className="label-caps mb-1.5 block text-white/35" htmlFor="ai-style-theme">
+              Theme words
+            </label>
             <input
+              id="ai-style-theme"
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
-              placeholder="Theme words, e.g. TOKYO OVERDRIVE"
-              className="w-full px-3 py-2.5 rounded-xl bg-black/40 border border-white/12 text-[12px] placeholder-white/30 focus:outline-none focus:border-[var(--color-airo-violet)] mb-3"
+              placeholder="e.g. TOKYO OVERDRIVE"
+              className="mb-3.5 w-full rounded-xl border border-white/12 bg-black/40 px-3 py-2.5 text-[12px] placeholder-white/25 focus:border-[var(--color-airo-violet)] focus:outline-none"
             />
+
             <button
               onClick={applyStyle}
               disabled={aiBusy}
-              className="tap w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-50 text-[12px] font-bold flex items-center justify-center gap-2"
+              className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2 px-6 py-3.5 text-[12.5px] font-bold tracking-wide text-white disabled:opacity-50"
+              style={{ '--paint': AI_PAINT } as React.CSSProperties}
             >
               {aiBusy ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
               {aiBusy ? 'Styling…' : 'Apply style'}
             </button>
-            {styleResult && (
-              <div className="mt-3 rounded-xl bg-white/[0.06] border border-white/12 p-3 text-[11px]">
-                {styleResult.error ? (
-                  <span className="text-amber-300">{styleResult.error}</span>
-                ) : (
-                  <>
-                    <div className="font-semibold text-fuchsia-300">{styleResult.transformedTitle}</div>
-                    <p className="text-white/55 italic mt-1 text-[10px]">"{styleResult.curatorNotes}"</p>
-                  </>
-                )}
-              </div>
-            )}
+
+            {styleResult &&
+              (styleResult.error ? (
+                <ResultNote>{styleResult.error}</ResultNote>
+              ) : (
+                <div className="mt-3.5 rounded-2xl border border-white/12 bg-white/[0.05] p-4">
+                  <div className="label-caps text-white/35">{styleResult.vibe || 'Applied'}</div>
+                  <h3 className="mt-0.5 truncate text-[15px] font-black tracking-tight">
+                    {styleResult.transformedTitle}
+                  </h3>
+                  <p className="mt-1.5 text-[11px] italic leading-relaxed text-white/55">
+                    “{styleResult.curatorNotes}”
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-3">
+                    <div className="flex items-center gap-2.5">
+                      <StencilPreview
+                        asset={stampForSymbol(styleResult.stencilSymbol)}
+                        tint={activeAiTint}
+                        size={40}
+                      />
+                      <div>
+                        <div className="label-caps mb-1.5 text-white/30">Palette</div>
+                        <PaletteRow
+                          colors={paletteOf(styleResult.accentColor, styleResult.secondaryColor)}
+                          active={activeAiTint}
+                          onPick={setAiTint}
+                        />
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => stampSuggestion(styleResult.stencilSymbol, activeAiTint)}
+                      className="tap glass glass-sheen flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10.5px] font-bold text-white/85 hover:text-white"
+                    >
+                      <StampIcon size={12} style={{ color: activeAiTint }} />
+                      Stamp its mark
+                    </button>
+                  </div>
+                </div>
+              ))}
           </div>
         )}
 
         {aiTab === 'concept' && (
           <div>
-            <div className="flex gap-2 mb-3">
+            <div className="mb-3.5 flex gap-2">
               <input
                 value={aiPrompt}
                 onChange={(e) => setAiPrompt(e.target.value)}
-                placeholder="e.g. PHANTOM, WILDSTYLE"
-                className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-black/40 border border-white/12 text-[12px] placeholder-white/30 focus:outline-none focus:border-[var(--color-airo-violet)]"
+                placeholder="A word to build a piece around, e.g. PHANTOM"
+                className="min-w-0 flex-1 rounded-xl border border-white/12 bg-black/40 px-3 py-2.5 text-[12px] placeholder-white/25 focus:border-[var(--color-airo-violet)] focus:outline-none"
               />
               <button
                 onClick={generateConcept}
                 disabled={aiBusy}
-                className="tap px-4 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 disabled:opacity-50 text-[11px] font-bold flex items-center gap-1.5"
+                className="paint-btn paint-btn-2 paint-cta tap flex shrink-0 items-center gap-1.5 px-5 text-[11px] font-bold text-white disabled:opacity-50"
+                style={{ '--paint': AI_PAINT } as React.CSSProperties}
               >
                 {aiBusy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
                 Generate
               </button>
             </div>
+
             {conceptResult &&
               (conceptResult.error ? (
-                <p className="text-[11px] text-amber-300">{conceptResult.error}</p>
+                <ResultNote>{conceptResult.error}</ResultNote>
               ) : (
-                <div className="rounded-xl bg-white/[0.06] border border-white/12 p-4">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-14 h-14 rounded-xl bg-black/50 border border-violet-500/40 grid place-items-center text-2xl">
-                      {conceptResult.stencilSymbol}
-                    </div>
-                    <div className="min-w-0">
-                      <h3 className="text-lg font-black tracking-tight uppercase truncate">{conceptResult.graffitiText}</h3>
-                      <p className="text-[10px] text-white/50 italic">{conceptResult.styleNotes}</p>
+                <div
+                  className="splatter-accent relative overflow-hidden rounded-2xl border border-white/12 bg-white/[0.05] p-4"
+                  style={{ '--paint': activeAiTint } as React.CSSProperties}
+                >
+                  <div className="relative z-10 flex items-start gap-3">
+                    <StencilPreview
+                      asset={stampForSymbol(conceptResult.stencilSymbol)}
+                      tint={activeAiTint}
+                      size={64}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="label-caps truncate text-white/35">
+                        {conceptResult.tagLine || conceptResult.title}
+                      </div>
+                      <h3 className="truncate text-[19px] font-black uppercase leading-tight tracking-tight">
+                        {conceptResult.graffitiText}
+                      </h3>
+                      <p className="mt-1 text-[10.5px] italic leading-snug text-white/50">
+                        {conceptResult.styleNotes}
+                      </p>
                     </div>
                   </div>
+
+                  <div className="relative z-10 mt-3.5 border-t border-white/10 pt-3">
+                    <div className="label-caps mb-2 text-white/30">Suggested palette</div>
+                    <PaletteRow
+                      colors={paletteOf(conceptResult.recommendedPalette)}
+                      active={activeAiTint}
+                      onPick={setAiTint}
+                    />
+                  </div>
+
                   <button
-                    onClick={stampConcept}
-                    className="tap w-full py-2.5 rounded-xl bg-[var(--color-airo-flame)] text-[11px] font-bold flex items-center justify-center gap-1.5"
+                    onClick={() => stampSuggestion(conceptResult.stencilSymbol, activeAiTint)}
+                    className="paint-btn paint-cta tap relative z-10 mt-4 flex w-full items-center justify-center gap-2 px-5 py-3 text-[12px] font-bold text-white"
+                    style={
+                      {
+                        '--paint': `linear-gradient(120deg, ${activeAiTint}, ${activeAiTint}c0)`,
+                      } as React.CSSProperties
+                    }
                   >
-                    <Zap size={13} /> Stamp on {activeObject?.label ?? 'object'}
+                    <StampIcon size={14} />
+                    Stamp it on the {activeObject?.label ?? 'object'}
                   </button>
+                  <p className="relative z-10 mt-2 text-center text-[9.5px] text-white/35">
+                    Placed as a real stencil, shared with every phone, undoable with Ctrl+Z.
+                  </p>
                 </div>
               ))}
           </div>
@@ -1569,31 +1916,52 @@ export default function CanvasView() {
 
         {aiTab === 'critique' && (
           <div>
-            <p className="text-[11px] text-white/55 mb-3">
-              Get a gallery-style appraisal of the piece currently on the {activeObject?.label ?? 'object'}.
+            <p className="mb-3.5 text-[11.5px] leading-relaxed text-white/55">
+              A gallery-style appraisal of the piece currently on the{' '}
+              {activeObject?.label ?? 'object'}.
             </p>
             <button
               onClick={generateCritique}
               disabled={aiBusy}
-              className="tap w-full py-3 rounded-xl bg-gradient-to-r from-violet-700 to-fuchsia-700 disabled:opacity-50 text-[12px] font-bold flex items-center justify-center gap-2 mb-3"
+              className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2 px-6 py-3.5 text-[12.5px] font-bold tracking-wide text-white disabled:opacity-50"
+              style={{ '--paint': AI_PAINT } as React.CSSProperties}
             >
               {aiBusy ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
               {aiBusy ? 'Appraising…' : 'Appraise artwork'}
             </button>
+
             {critiqueResult &&
               (critiqueResult.error ? (
-                <p className="text-[11px] text-amber-300">{critiqueResult.error}</p>
+                <ResultNote>{critiqueResult.error}</ResultNote>
               ) : (
-                <div className="rounded-xl bg-white/[0.06] border border-white/12 p-4">
-                  <div className="flex items-center justify-between gap-3 mb-2">
-                    <span className="text-[12px] font-semibold text-fuchsia-300 truncate">
-                      {critiqueResult.exhibitionTitle}
-                    </span>
-                    <span className="text-[11px] font-mono font-bold text-emerald-300 shrink-0">
+                <div className="mt-3.5 rounded-2xl border border-white/12 bg-white/[0.05] p-4">
+                  <div className="label-caps text-white/35">
+                    {critiqueResult.auctionHouse || 'Curator'}
+                  </div>
+                  <h3 className="mt-0.5 text-[16px] font-black leading-tight tracking-tight">
+                    {critiqueResult.exhibitionTitle}
+                  </h3>
+                  <p className="mt-2.5 text-[11.5px] leading-relaxed text-white/65">
+                    “{critiqueResult.curatorCritique}”
+                  </p>
+                  <div className="mt-3.5 flex items-center justify-between border-t border-white/10 pt-3">
+                    <span className="label-caps text-white/35">Estimate</span>
+                    <span className="font-mono text-[14px] font-bold text-emerald-300">
                       {critiqueResult.estimatedValue}
                     </span>
                   </div>
-                  <p className="text-[10px] text-white/60 leading-relaxed">"{critiqueResult.curatorCritique}"</p>
+                  {Array.isArray(critiqueResult.vibeTags) && critiqueResult.vibeTags.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {critiqueResult.vibeTags.map((tag: string) => (
+                        <span
+                          key={tag}
+                          className="glass rounded-full px-2.5 py-1 text-[9.5px] font-semibold text-white/60"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
           </div>

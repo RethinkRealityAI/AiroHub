@@ -1077,6 +1077,7 @@ export default function ControllerView() {
         <Segmented
           layoutId="controller-mode"
           size="lg"
+          paint
           className="w-full"
           value={mode}
           onChange={(next) => {
@@ -1192,6 +1193,7 @@ export default function ControllerView() {
                 <Segmented<Interaction>
                   layoutId="controller-interaction"
                   size="sm"
+                  paint
                   value={interaction}
                   onChange={(next) => {
                     setInteraction(next);
@@ -1340,6 +1342,7 @@ export default function ControllerView() {
               <GlassPanel className="p-2.5 flex flex-col gap-2.5 mb-2">
           <Segmented
             layoutId="controller-tool"
+            paint
             className="w-full"
             value={tool}
             onChange={(next) => {

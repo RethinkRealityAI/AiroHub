@@ -51,7 +51,8 @@ export function ensureCustomModels(): Promise<number> {
           id,
           label: row.name,
           short: row.name.length > 10 ? `${row.name.slice(0, 9)}…` : row.name,
-          icon: '📦',
+          // No render exists for an uploaded model, so the picker draws its
+          // glyph chip instead of a thumbnail.
           category: 'Uploads',
           blurb: 'Uploaded through the admin portal.',
           targetSize: Number(row.target_size) || 7,

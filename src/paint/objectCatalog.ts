@@ -14,7 +14,11 @@ export interface PaintableObject {
   label: string;
   /** Short label for the phone controller, where space is tight. */
   short: string;
-  icon: string;
+  /**
+   * Rendered thumbnail of the actual model (`/ui/objects/<id>.webp`, a cutout
+   * on transparency). Absent for uploads, which fall back to a glyph chip.
+   */
+  thumb?: string;
   category: ObjectCategory;
   blurb: string;
   /** Longest dimension in world units after normalisation. */
@@ -28,7 +32,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'easel',
     label: 'Studio Easel',
     short: 'Easel',
-    icon: '🎨',
+    thumb: '/ui/objects/easel.webp',
     category: 'Canvas',
     blurb: 'Blank stretched canvas on an oak easel.',
     targetSize: 12,
@@ -37,7 +41,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'wall',
     label: 'Alley Wall',
     short: 'Wall',
-    icon: '🧱',
+    thumb: '/ui/objects/wall.webp',
     category: 'Canvas',
     blurb: 'Weathered brick with a concrete ledge.',
     targetSize: 14,
@@ -46,7 +50,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'skateboard',
     label: 'Skate Deck',
     short: 'Deck',
-    icon: '🛹',
+    thumb: '/ui/objects/skateboard.webp',
     category: 'Street',
     blurb: 'Full complete with trucks and wheels.',
     targetSize: 12,
@@ -55,7 +59,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'subway',
     label: 'Subway Car',
     short: 'Subway',
-    icon: '🚇',
+    thumb: '/ui/objects/subway.webp',
     category: 'Street',
     blurb: 'Stainless steel panel, straight from the yard.',
     targetSize: 15,
@@ -64,7 +68,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'hydrant',
     label: 'Fire Hydrant',
     short: 'Hydrant',
-    icon: '🚒',
+    thumb: '/ui/objects/hydrant.webp',
     category: 'Street',
     blurb: 'Cast iron, primed and waiting.',
     targetSize: 9,
@@ -73,7 +77,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'van',
     label: 'Delivery Van',
     short: 'Van',
-    icon: '🚐',
+    thumb: '/ui/objects/van.webp',
     category: 'Street',
     blurb: 'Big blank cargo panel to run a piece across.',
     targetSize: 14,
@@ -82,7 +86,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'boombox',
     label: 'Boombox',
     short: 'Boombox',
-    icon: '📻',
+    thumb: '/ui/objects/boombox.webp',
     category: 'Street',
     blurb: 'Eighties twin-deck ghetto blaster.',
     targetSize: 12,
@@ -91,7 +95,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'helmet',
     label: 'Moto Helmet',
     short: 'Helmet',
-    icon: '🪖',
+    thumb: '/ui/objects/helmet.webp',
     category: 'Objects',
     blurb: 'Full-face shell, custom paint ready.',
     targetSize: 9,
@@ -100,7 +104,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'sneaker',
     label: 'High-Top',
     short: 'Sneaker',
-    icon: '👟',
+    thumb: '/ui/objects/sneaker.webp',
     category: 'Objects',
     blurb: 'Blank canvas upper, cream sole.',
     targetSize: 11,
@@ -109,7 +113,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'vinyltoy',
     label: 'Vinyl Toy',
     short: 'Toy',
-    icon: '🧸',
+    thumb: '/ui/objects/vinyltoy.webp',
     category: 'Objects',
     blurb: 'Blank designer art toy.',
     targetSize: 10,
@@ -118,7 +122,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'sculpture',
     label: 'Marble Bust',
     short: 'Bust',
-    icon: '🗿',
+    thumb: '/ui/objects/sculpture.webp',
     category: 'Objects',
     blurb: 'Classical portrait bust on a plinth.',
     targetSize: 11,
@@ -127,7 +131,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'hoodie',
     label: 'Hoodie',
     short: 'Hoodie',
-    icon: '🧥',
+    thumb: '/ui/objects/hoodie.webp',
     category: 'Objects',
     blurb: 'Heavyweight fleece, blank front.',
     targetSize: 11,
@@ -136,7 +140,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'guitar',
     label: 'Electric Guitar',
     short: 'Guitar',
-    icon: '🎸',
+    thumb: '/ui/objects/guitar.webp',
     category: 'Objects',
     blurb: 'Solid body begging for a finish.',
     targetSize: 13,
@@ -145,7 +149,7 @@ export const PAINTABLE_OBJECTS: PaintableObject[] = [
     id: 'cap',
     label: 'Snapback',
     short: 'Cap',
-    icon: '🧢',
+    thumb: '/ui/objects/cap.webp',
     category: 'Objects',
     blurb: 'Flat brim, six blank panels.',
     targetSize: 8,

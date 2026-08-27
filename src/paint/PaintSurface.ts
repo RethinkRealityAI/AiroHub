@@ -135,10 +135,9 @@ function composeStampBitmap(image: StampImageSource, tint: string | null): HTMLC
   return c;
 }
 
-/** One undoable unit: a stroke's stamps, a symbol stamp, or an image stamp. */
+/** One undoable unit: a stroke's stamps, or an image stamp. */
 type LogEntry =
   | { kind: 'stamps'; strokeId: string; tool: 'spray' | 'brush'; color: string; stamps: PaintStamp[] }
-  | { kind: 'symbol'; strokeId: string; symbol: string; x: number; y: number; color: string; text?: string }
   | {
       kind: 'image';
       strokeId: string;
@@ -423,10 +422,8 @@ export class PaintSurface {
   private replayEntry(entry: LogEntry) {
     if (entry.kind === 'stamps') {
       for (const stamp of entry.stamps) this.drawStamp(stamp, entry.tool, entry.color);
-    } else if (entry.kind === 'image') {
-      this.drawImageStamp(entry);
     } else {
-      this.drawSymbol(entry.symbol, entry.x, entry.y, entry.color, entry.text);
+      this.drawImageStamp(entry);
     }
   }
 
@@ -471,8 +468,8 @@ export class PaintSurface {
         while (drawnUnits < target && entryIndex < snapshot.length) {
           const entry = snapshot[entryIndex];
           if (entry.kind !== 'stamps') {
-            // Symbols and image stamps land in one go — they have no internal
-            // ordering to reveal — and are worth 40 units of the timeline.
+            // Image stamps land in one go — they have no internal ordering to
+            // reveal — and are worth 40 units of the timeline.
             this.replayEntry(entry);
             drawnUnits += 40;
             entryIndex++;
@@ -502,39 +499,6 @@ export class PaintSurface {
     this.replaying = false;
   }
 
-  /** One-shot decorative stamp used by the AI stencil feature. */
-  stampSymbol(symbol: string, x: number, y: number, color: string, text?: string) {
-    this.log.push({
-      kind: 'symbol',
-      strokeId: `symbol#${Math.random().toString(36).slice(2, 9)}`,
-      symbol,
-      x,
-      y,
-      color,
-      text,
-    });
-    this.trimLog();
-    this.drawSymbol(symbol, x, y, color, text);
-  }
-
-  private drawSymbol(symbol: string, x: number, y: number, color: string, text?: string) {
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.fillStyle = color;
-    ctx.font = 'bold 260px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 35;
-    ctx.fillText(symbol, x, y - (text ? 80 : 0));
-    if (text) {
-      ctx.font = '900 110px sans-serif';
-      ctx.fillText(text.toUpperCase(), x, y + 120);
-    }
-    ctx.restore();
-    this.dirty = true;
-  }
-
   /**
    * Flattens the paint layer over a solid backdrop for export — the live layer
    * is transparent, so a straight `toDataURL` would be mostly empty.
@@ -561,6 +525,68 @@ export class PaintSurface {
   }
 
   /* ---------------- Stylistic transforms (AI copilot) ---------------- */
+
+  /*
+   * The flourishes these transforms paint used to be typed characters — star,
+   * heart and sparkle dingbats set in the system font, which put whatever
+   * glyph the host machine happened to ship straight onto the artwork. They
+   * are drawn as filled paths now: same motifs, painted rather than typeset,
+   * and identical on every device.
+   */
+
+  /** A pointed star, painted as one path. `inner` is the waist ratio. */
+  private paintStar(cx: number, cy: number, radius: number, points = 5, inner = 0.42, rotation = -Math.PI / 2) {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const r = i % 2 === 0 ? radius : radius * inner;
+      const angle = rotation + (i * Math.PI) / points;
+      const x = cx + Math.cos(angle) * r;
+      const y = cy + Math.sin(angle) * r;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** A four-point sparkle with concave sides — the cosmic accent. */
+  private paintSparkle(cx: number, cy: number, radius: number) {
+    const ctx = this.ctx;
+    const waist = radius * 0.16;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - radius);
+    ctx.quadraticCurveTo(cx + waist, cy - waist, cx + radius, cy);
+    ctx.quadraticCurveTo(cx + waist, cy + waist, cx, cy + radius);
+    ctx.quadraticCurveTo(cx - waist, cy + waist, cx - radius, cy);
+    ctx.quadraticCurveTo(cx - waist, cy - waist, cx, cy - radius);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /** A stencilled heart with a gravity drip hanging off its point. */
+  private paintHeart(cx: number, cy: number, size: number, drip = size * 0.9) {
+    const ctx = this.ctx;
+    const w = size;
+    const h = size * 0.92;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy + h * 0.62);
+    ctx.bezierCurveTo(cx - w * 1.08, cy - h * 0.12, cx - w * 0.5, cy - h * 0.95, cx, cy - h * 0.3);
+    ctx.bezierCurveTo(cx + w * 0.5, cy - h * 0.95, cx + w * 1.08, cy - h * 0.12, cx, cy + h * 0.62);
+    ctx.closePath();
+    ctx.fill();
+
+    if (drip > 0) {
+      const width = size * 0.09;
+      ctx.beginPath();
+      ctx.moveTo(cx - width, cy + h * 0.58);
+      ctx.lineTo(cx + width, cy + h * 0.58);
+      ctx.lineTo(cx + width * 0.7, cy + h * 0.58 + drip);
+      ctx.arc(cx, cy + h * 0.58 + drip, width * 0.95, 0, Math.PI);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
 
   applyCyberpunkStyle(accentColor = '#22D3EE', secondaryColor = '#EC4899', tagText = 'CYBERPUNK') {
     const ctx = this.ctx;
@@ -611,7 +637,12 @@ export class PaintSurface {
     ctx.fillStyle = '#FFB020';
     ctx.font = '900 140px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(`★ ${tagText} ★`, 1024, 1720);
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(tagText, 1024, 1720);
+    // Painted stars flanking the tag, set off its measured width.
+    const half = ctx.measureText(tagText).width / 2;
+    this.paintStar(1024 - half - 120, 1672, 62);
+    this.paintStar(1024 + half + 120, 1672, 62);
     ctx.restore();
     this.dirty = true;
   }
@@ -620,11 +651,11 @@ export class PaintSurface {
     const ctx = this.ctx;
     ctx.save();
     ctx.fillStyle = accentColor;
-    ctx.font = 'bold 220px sans-serif';
     ctx.textAlign = 'center';
     ctx.shadowColor = accentColor;
     ctx.shadowBlur = 20;
-    ctx.fillText('♥', 1024, 750);
+    // The one red accent of the stencil style: a painted heart, dripping.
+    this.paintHeart(1024, 690, 150);
     ctx.fillStyle = '#FFFFFF';
     ctx.font = '900 95px monospace';
     ctx.fillText(`"${tagText.toUpperCase()}"`, 1024, 1680);
@@ -676,7 +707,12 @@ export class PaintSurface {
     ctx.fillStyle = secondaryColor;
     ctx.font = '900 130px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(`✦ ${tagText} ✦`, 1024, 1720);
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(tagText, 1024, 1720);
+    // Painted sparkles instead of typeset ones, sized off the tag.
+    const half = ctx.measureText(tagText).width / 2;
+    this.paintSparkle(1024 - half - 110, 1678, 58);
+    this.paintSparkle(1024 + half + 110, 1678, 58);
     ctx.restore();
     this.dirty = true;
   }
