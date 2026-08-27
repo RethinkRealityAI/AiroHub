@@ -8,11 +8,15 @@
  * out of the nozzle plus soft paint splats stamped into a CanvasTexture on the
  * backdrop. Paint accumulates, so visitors literally tag the page.
  *
- * The can does not sit *on* the pointer: the pointer is remapped into a
- * "stage zone" (right-hand third on wide screens, upper-middle when stacked)
- * so a can this large can never bulldoze the headline. It still tracks every
- * move, just inside its own box. Everything it paints is derived from where
- * the can actually is, so mist, splats and drips always agree with each other.
+ * The can sits *on* the pointer, the way aiming works in the studio: the
+ * pointer's canvas position is converted to world space on the can's own
+ * plane, so the spray leaves the nozzle exactly where the mouse or the finger
+ * is. An earlier version remapped the pointer into a small "stage zone" to
+ * keep a can this large off the headline; accuracy beats composition, and a
+ * can that ignores half a drag reads as broken. Only an untouched page
+ * composes itself: after the idle window the can eases back to its stage
+ * anchor and resumes the drift. Everything it paints is still derived from
+ * where the can actually is, so mist, splats and drips always agree.
  *
  * Layers, back to front:
  *   backdrop      CanvasTexture wall — procedural concrete, faded old tags,
@@ -56,6 +60,13 @@ const TEX_SIZE = 1024; // splat texture resolution
 const IDLE_AFTER_MS = 2500; // pointer silence before the lissajous drift kicks in
 const MAX_STAMPS_PER_FRAME = 6;
 const PARALLAX = 0.34; // world units the camera drifts with the pointer
+const EDGE_MARGIN = 0.06; // viewport fraction the can's centre keeps off each edge
+const AIM_LIMIT = 1 - 2 * EDGE_MARGIN; // pointer NDC the follow clamps to
+const FOLLOW_STIFFNESS = 900; // steering: lands inside a fingertip in ~0.13s
+const IDLE_STIFFNESS = 42; // drift: eases home over about a second
+const SPRING_STEP = 1 / 240; // fixed spring substep — see the frame loop
+const AIM_LEAD = 0.05; // seconds of can velocity the aim point runs ahead by
+const BASE_INTENSITY = 0.34; // spray floor whenever the can is not being swept
 
 /**
  * Interpolated palette sample; t in "palette indices" (wraps). Writes into a
@@ -447,6 +458,11 @@ function HeroScene() {
   /**
    * Input — the hero is a miniature of the phone controller:
    *
+   *  · pointer and touch are ABSOLUTE — the canvas-relative position is the
+   *    aim, so the spray always comes out of wherever the finger actually is.
+   *    Gyro is RELATIVE (a phone has no pointer): it integrates the tracker's
+   *    deltas onto whatever the last input left behind, which also re-bases it
+   *    on every touch instead of yanking the can back to its own origin;
    *  · mouse hover paints automatically as it moves (as before), and holding
    *    the button is a full trigger pull;
    *  · a finger on the stage IS the trigger — the can follows it, sprays the
@@ -462,12 +478,26 @@ function HeroScene() {
    */
   const pointerRef = useRef({ x: 0, y: 0, active: false, pressed: false, lastMoveMs: 0 });
   /** Test hook (only with ?debug in the URL): lets the input-regression
-   *  harness read the can's live state without depending on pixels. */
-  const probeState = useRef({ x: 0, y: 0, intensity: 0, pressed: false, idle: true });
+   *  harness read the can's live state without depending on pixels.
+   *  `aimScreenX/Y` are the live spray aim projected back to canvas-relative
+   *  0..1 (x right, y down) — the only field pointer accuracy can be asserted
+   *  on, since world units mean nothing without the layout. */
+  const probeOn = useRef(false);
+  const probeState = useRef({
+    x: 0,
+    y: 0,
+    intensity: 0,
+    pressed: false,
+    idle: true,
+    aimScreenX: 0.5,
+    aimScreenY: 0.5,
+  });
   useEffect(() => {
     if (!new URLSearchParams(window.location.search).has('debug')) return;
+    probeOn.current = true;
     (window as any).__airoHeroProbe = () => ({ ...probeState.current });
     return () => {
+      probeOn.current = false;
       delete (window as any).__airoHeroProbe;
     };
   }, []);
@@ -479,10 +509,17 @@ function HeroScene() {
     permissionAsked: false,
   });
   useEffect(() => {
+    // Trigger pulls. Mouse presses arrive as pointerdown on the canvas; touch
+    // is handled through raw touch events so the gesture can be claimed.
+    const canvas = gl.domElement;
+    // Measured against the canvas rect rather than the window, exactly as
+    // `pointerToNdc` does in the studio: the aim has to be right in the
+    // element the paint is rendered into, not in the page around it.
     const setFrom = (clientX: number, clientY: number) => {
+      const rect = canvas.getBoundingClientRect();
       const p = pointerRef.current;
-      p.x = (clientX / window.innerWidth) * 2 - 1;
-      p.y = -(clientY / window.innerHeight) * 2 + 1;
+      p.x = ((clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1;
+      p.y = -((clientY - rect.top) / Math.max(rect.height, 1)) * 2 + 1;
       p.active = true;
       p.lastMoveMs = performance.now();
     };
@@ -499,9 +536,6 @@ function HeroScene() {
       }
     };
 
-    // Trigger pulls. Mouse presses arrive as pointerdown on the canvas; touch
-    // is handled through raw touch events so the gesture can be claimed.
-    const canvas = gl.domElement;
     const press = (e: PointerEvent) => {
       if (e.pointerType === 'touch') return; // the touch handlers own this
       setFrom(e.clientX, e.clientY);
@@ -528,7 +562,11 @@ function HeroScene() {
 
     // Gyro aim, sharing the controller's tracker. Only meaningful deltas
     // count as movement, so a phone at rest still settles into the idle
-    // drift instead of pinning the can wherever it last aimed.
+    // drift instead of pinning the can wherever it last aimed. The deltas are
+    // integrated onto the current aim rather than replacing it: the tracker's
+    // normalised origin has nothing to do with where the finger last was, so
+    // an absolute mapping would teleport the can on the first sample after
+    // every touch. Its full 0..1 range now spans the whole clamped viewport.
     const onOrientation = (e: DeviceOrientationEvent) => {
       if (e.alpha === null || e.beta === null || e.gamma === null) return;
       const g = gyro.current;
@@ -536,17 +574,18 @@ function HeroScene() {
       const sample = g.tracker.update(e.alpha, e.beta, e.gamma, performance.now());
       const nx = sample.x * 2 - 1;
       const ny = 1 - sample.y * 2;
-      const moved = Math.hypot(nx - g.x, ny - g.y);
+      const dx = nx - g.x;
+      const dy = ny - g.y;
       g.x = nx;
       g.y = ny;
       if (!g.seeded) {
         g.seeded = true;
         return;
       }
-      if (moved > 0.004) {
+      if (Math.hypot(dx, dy) > 0.004) {
         const p = pointerRef.current;
-        p.x = nx;
-        p.y = ny;
+        p.x = THREE.MathUtils.clamp(p.x + dx, -1, 1);
+        p.y = THREE.MathUtils.clamp(p.y + dy, -1, 1);
         p.active = true;
         p.lastMoveMs = performance.now();
       }
@@ -591,6 +630,10 @@ function HeroScene() {
    * where height is plentiful) or a barrel a third of the viewport wide
    * (phones, where it is not). Either way it clears the copy above it and
    * only feathers into the top of the glass card below.
+   *
+   * `cx/cy/rx/ry` are the idle stage only — the anchor the can returns to and
+   * the lissajous it wanders on. Steering is not confined to them; it spans
+   * `hx/hy`, the half-extents of the whole viewport at the can's depth.
    */
   const wide = canVp.width >= canVp.height * 1.2;
   const canHeight = wide
@@ -603,6 +646,8 @@ function HeroScene() {
     cy: 0,
     rx: 1,
     ry: 1,
+    hx: 1,
+    hy: 1,
     stroke: CAN_LENGTH * canScale * CAN_ASPECT,
   });
   const planeDims = useRef({ w: 0, h: 0 });
@@ -612,17 +657,12 @@ function HeroScene() {
     canDims.current = { w: canVp.width, h: canVp.height };
     layout.current = {
       scale: canScale,
-      // Travel is clamped tight enough that the can can never reach the
-      // headline (wide) or the copy above it (stacked), while still leaving
-      // it obviously alive under the pointer.
-      // The stacked radii were originally 0.13/0.05 — tight enough that a
-      // finger drag on a phone read as "nothing happened" and the aim-speed
-      // spray gate never opened. The can may now brush the copy at the
-      // extremes; feeling alive under the finger matters more.
       cx: wide ? canVp.width * 0.18 : 0,
       cy: canVp.height * (wide ? 0 : -0.04),
       rx: canVp.width * (wide ? 0.2 : 0.32),
       ry: canVp.height * (wide ? 0.16 : 0.17),
+      hx: canVp.width * 0.5,
+      hy: canVp.height * 0.5,
       stroke: CAN_LENGTH * canScale * CAN_ASPECT,
     };
   });
@@ -648,6 +688,7 @@ function HeroScene() {
       targetPos: new THREE.Vector3(),
       accel: new THREE.Vector3(),
       aim: new THREE.Vector3(),
+      screen: new THREE.Vector3(),
       nozzle: new THREE.Vector3(),
       dir: new THREE.Vector3(),
       right: new THREE.Vector3(),
@@ -749,9 +790,14 @@ function HeroScene() {
     camera.position.y += (py - camera.position.y) * (1 - Math.exp(-2.4 * delta));
     camera.updateMatrixWorld();
 
-    // ----- where the can wants to be. The pointer is remapped into the stage
-    // zone rather than followed literally: at this size a 1:1 follow would
-    // park the can on top of the headline.
+    // ----- where the can wants to be. Steering is absolute: the pointer's
+    // position on the canvas, taken out to the can's own plane, so the ray
+    // camera → can → wall runs through the finger and the paint lands under
+    // it. Camera-relative because the parallax above moves the very frame the
+    // pointer was measured in. The clamp is all that survives of the old
+    // stage box: it keeps the can's centre EDGE_MARGIN inside the viewport so
+    // it can never be steered out of frame. Overlapping the headline is the
+    // accepted cost of aiming where the user is actually pointing.
     if (idle) {
       scratch.targetPos.set(
         L.cx + Math.sin(t * 0.5) * L.rx * 0.85,
@@ -759,23 +805,39 @@ function HeroScene() {
         CAN_Z
       );
     } else {
-      scratch.targetPos.set(L.cx + p.x * L.rx, L.cy + p.y * L.ry, CAN_Z);
+      scratch.targetPos.set(
+        camera.position.x + THREE.MathUtils.clamp(p.x, -AIM_LIMIT, AIM_LIMIT) * L.hx,
+        camera.position.y + THREE.MathUtils.clamp(p.y, -AIM_LIMIT, AIM_LIMIT) * L.hy,
+        CAN_Z
+      );
     }
 
     // Critically damped spring — position feels alive, velocity drives tilt.
-    const stiffness = 42;
+    // Stiff while steering, so the can reads as attached to the finger rather
+    // than rubber-banded to it, and soft while idle, which is what turns
+    // "silence for IDLE_AFTER_MS" into a glide back to the anchor. At the
+    // steering stiffness an explicit step is only stable while damping*dt < 2,
+    // which a loaded frame is not, so the integration substeps at a fixed rate
+    // instead of trusting the frame it was handed.
+    const stiffness = idle ? IDLE_STIFFNESS : FOLLOW_STIFFNESS;
     const damping = 2 * Math.sqrt(stiffness);
-    scratch.accel.copy(scratch.targetPos).sub(canPos.current).multiplyScalar(stiffness);
-    scratch.accel.addScaledVector(canVel.current, -damping);
-    canVel.current.addScaledVector(scratch.accel, delta);
-    canPos.current.addScaledVector(canVel.current, delta);
+    for (let remaining = delta; remaining > 0; remaining -= SPRING_STEP) {
+      const step = Math.min(remaining, SPRING_STEP);
+      scratch.accel.copy(scratch.targetPos).sub(canPos.current).multiplyScalar(stiffness);
+      scratch.accel.addScaledVector(canVel.current, -damping);
+      canVel.current.addScaledVector(scratch.accel, step);
+      canPos.current.addScaledVector(canVel.current, step);
+    }
 
     // ----- aim point: straight behind the can on the wall, led slightly by its
     // own velocity so the stroke trails out of the sweep instead of sitting
-    // dead centre. Everything painted this frame derives from here.
+    // dead centre. Everything painted this frame derives from here. The lead
+    // is capped at half a barrel: the follow now crosses the whole stage, and
+    // an uncapped lead at those speeds throws the paint clear off the wall.
     throughPointToPlane(camera, canPos.current, BACK_Z, scratch.aim);
-    scratch.aim.x += canVel.current.x * 0.12;
-    scratch.aim.y += canVel.current.y * 0.12;
+    const lead = L.stroke * 0.5;
+    scratch.aim.x += THREE.MathUtils.clamp(canVel.current.x * AIM_LEAD, -lead, lead);
+    scratch.aim.y += THREE.MathUtils.clamp(canVel.current.y * AIM_LEAD, -lead, lead);
 
     // ----- spray intensity from aim-point speed (attack fast, decay slow).
     // A pressed trigger (finger down, mouse button held) is a full pull:
@@ -785,21 +847,37 @@ function HeroScene() {
       : 0;
     prevAim.current.copy(scratch.aim);
     hasPrevAim.current = true;
+    // A steered can that has stopped moving keeps the drift's own floor: it
+    // has to go on misting, or "the spray comes from where you point" is
+    // invisible until you move again. Only the movement loop below stamps
+    // paint, so a parked pointer mists without ever pooling. The drift keeps
+    // its flat floor rather than the same max(): its target is driven by
+    // elapsed time while the spring integrates a clamped delta, so on a
+    // starved frame the lissajous outruns the can and the speed term would
+    // read the mismatch as a full-power sweep.
     const pressed = p.pressed;
     const targetIntensity = pressed
       ? Math.max(0.85, Math.min(1, speed / 5.5))
       : idle
-        ? 0.34
-        : Math.min(1, speed / 5.5);
+        ? BASE_INTENSITY
+        : Math.max(BASE_INTENSITY, Math.min(1, speed / 5.5));
     const k = targetIntensity > intensityRef.current ? 10 : 3.2;
     intensityRef.current += (targetIntensity - intensityRef.current) * (1 - Math.exp(-k * delta));
     const intensity = intensityRef.current;
 
-    probeState.current.x = canPos.current.x;
-    probeState.current.y = canPos.current.y;
-    probeState.current.intensity = intensity;
-    probeState.current.pressed = pressed;
-    probeState.current.idle = idle;
+    if (probeOn.current) {
+      const readout = probeState.current;
+      readout.x = canPos.current.x;
+      readout.y = canPos.current.y;
+      readout.intensity = intensity;
+      readout.pressed = pressed;
+      readout.idle = idle;
+      // camera.updateMatrixWorld() above refreshed matrixWorldInverse, so this
+      // projection is of the same frame the paint was stamped in.
+      scratch.screen.copy(scratch.aim).project(camera);
+      readout.aimScreenX = (scratch.screen.x + 1) / 2;
+      readout.aimScreenY = (1 - scratch.screen.y) / 2;
+    }
 
     // ----- colour cycle
     cycleT.current += delta * (0.14 + intensity * 0.1);
