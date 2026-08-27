@@ -1440,10 +1440,10 @@ export default function ControllerView() {
                   setFinish((f) => (f === 'original' ? 'primer' : 'original'));
                   sounds.playClick(1.15);
                 }}
-                className="tap paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-white"
+                className="tap paint-btn flex-1 py-2.5 flex items-center justify-center gap-1.5 text-[10px] font-bold text-[#0B0B12]"
                 style={{ '--paint': finish === 'primer'
-                    ? 'linear-gradient(135deg,rgba(245,245,244,0.85),rgba(148,163,184,0.8))'
-                    : 'linear-gradient(135deg,rgba(148,163,184,0.5),rgba(255,255,255,0.35))' } as React.CSSProperties}
+                    ? 'linear-gradient(135deg,rgba(245,245,244,0.95),rgba(148,163,184,0.9))'
+                    : 'linear-gradient(135deg,rgba(178,190,205,0.88),rgba(236,240,244,0.82))' } as React.CSSProperties}
                 title="Toggle between the model's texture and a blank primer coat"
               >
                 <Hand size={13} />

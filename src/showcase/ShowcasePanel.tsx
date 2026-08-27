@@ -291,17 +291,31 @@ export const ShowcasePanel: React.FC<ShowcasePanelProps> = ({ open, onClose, han
                             disabled={recording}
                             onClick={() => setSeconds(option.value)}
                             className={`tap relative z-10 flex-1 rounded-full px-3 py-1.5 text-[11px] font-semibold tracking-wide whitespace-nowrap disabled:opacity-50 ${
-                              selected ? 'text-white' : 'text-white/55 hover:text-white/85'
+                              selected
+                                ? option.accent === '#22D3EE'
+                                  ? 'text-[#0B0B12]' // ink on the light aqua stroke
+                                  : 'text-white'
+                                : 'text-white/55 hover:text-white/85'
                             }`}
                           >
                             {selected && (
                               <motion.span
                                 layoutId="showcase-duration-pill"
                                 transition={{ type: 'spring', stiffness: 480, damping: 38, mass: 0.7 }}
-                                className="absolute inset-0 rounded-full -z-10"
+                                className="absolute -z-10 pointer-events-none"
                                 style={{
-                                  background: `linear-gradient(140deg, ${option.accent}, ${option.accent}cc)`,
-                                  boxShadow: `0 6px 18px -4px ${option.accent}90, inset 0 1px 0 rgba(255,255,255,0.35)`,
+                                  // Match the app-wide paint-stroke toggle language
+                                  // (Segmented's StrokeIndicator): a sprayed streak
+                                  // stencil instead of a plain pill.
+                                  inset: '-46% -6%',
+                                  background: `linear-gradient(105deg, ${option.accent} 0%, ${option.accent} 58%, ${option.accent}d9 100%)`,
+                                  WebkitMaskImage: 'url(/ui/mask-stroke-2.webp)',
+                                  maskImage: 'url(/ui/mask-stroke-2.webp)',
+                                  WebkitMaskSize: '100% 100%',
+                                  maskSize: '100% 100%',
+                                  WebkitMaskRepeat: 'no-repeat',
+                                  maskRepeat: 'no-repeat',
+                                  filter: `saturate(1.1) drop-shadow(0 5px 14px ${option.accent}80)`,
                                 }}
                               />
                             )}
