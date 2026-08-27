@@ -35,6 +35,7 @@ import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { loadToolRig } from './toolRig';
+import { AimTracker } from '../utils/motion';
 import { StudioEnvironment } from './StudioEnvironment';
 
 /** Splat colours, cycled slowly. Matches the app's controller palette. */
@@ -330,7 +331,7 @@ interface Drip {
 }
 
 function HeroScene() {
-  const { camera, viewport } = useThree();
+  const { camera, viewport, gl } = useThree();
 
   const canGroupRef = useRef<THREE.Group>(null);
   const nozzleRef = useRef<THREE.Group>(null);
@@ -443,8 +444,40 @@ function HeroScene() {
     [haloMat, flashMat]
   );
 
-  // ---- pointer, tracked on window so the overlay UI never blocks the hero
-  const pointerRef = useRef({ x: 0, y: 0, active: false, lastMoveMs: 0 });
+  /**
+   * Input — the hero is a miniature of the phone controller:
+   *
+   *  · mouse hover paints automatically as it moves (as before), and holding
+   *    the button is a full trigger pull;
+   *  · a finger on the stage IS the trigger — the can follows it, sprays the
+   *    whole time it is down (pooling paint when held still), and the gesture
+   *    is claimed with preventDefault so painting never scrolls the page.
+   *    Touches that start on the copy or the glass card never reach the
+   *    canvas element, so the page scrolls normally there;
+   *  · device rotation drives the can through the same AimTracker the real
+   *    controller uses — move the phone and it sprays automatically as it
+   *    sweeps. iOS gates orientation events behind a permission that must be
+   *    requested from a user gesture, so the first touch on the stage doubles
+   *    as the opt-in; Android needs no permission and simply starts working.
+   */
+  const pointerRef = useRef({ x: 0, y: 0, active: false, pressed: false, lastMoveMs: 0 });
+  /** Test hook (only with ?debug in the URL): lets the input-regression
+   *  harness read the can's live state without depending on pixels. */
+  const probeState = useRef({ x: 0, y: 0, intensity: 0, pressed: false, idle: true });
+  useEffect(() => {
+    if (!new URLSearchParams(window.location.search).has('debug')) return;
+    (window as any).__airoHeroProbe = () => ({ ...probeState.current });
+    return () => {
+      delete (window as any).__airoHeroProbe;
+    };
+  }, []);
+  const gyro = useRef({
+    tracker: null as AimTracker | null,
+    x: 0,
+    y: 0,
+    seeded: false,
+    permissionAsked: false,
+  });
   useEffect(() => {
     const setFrom = (clientX: number, clientY: number) => {
       const p = pointerRef.current;
@@ -454,20 +487,92 @@ function HeroScene() {
       p.lastMoveMs = performance.now();
     };
     const onPointer = (e: PointerEvent) => setFrom(e.clientX, e.clientY);
-    const onTouch = (e: TouchEvent) => {
-      if (e.touches.length > 0) setFrom(e.touches[0].clientX, e.touches[0].clientY);
+    const requestMotionPermission = () => {
+      const g = gyro.current;
+      if (g.permissionAsked) return;
+      g.permissionAsked = true;
+      const api = (DeviceOrientationEvent as any)?.requestPermission;
+      if (typeof api === 'function') {
+        api.call(DeviceOrientationEvent).catch(() => {
+          /* denied — touch keeps working */
+        });
+      }
     };
+
+    // Trigger pulls. Mouse presses arrive as pointerdown on the canvas; touch
+    // is handled through raw touch events so the gesture can be claimed.
+    const canvas = gl.domElement;
+    const press = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') return; // the touch handlers own this
+      setFrom(e.clientX, e.clientY);
+      pointerRef.current.pressed = true;
+    };
+    const release = () => {
+      pointerRef.current.pressed = false;
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 0) return;
+      requestMotionPermission();
+      setFrom(e.touches[0].clientX, e.touches[0].clientY);
+      pointerRef.current.pressed = true;
+      e.preventDefault();
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 0) return;
+      setFrom(e.touches[0].clientX, e.touches[0].clientY);
+      if (pointerRef.current.pressed) e.preventDefault();
+    };
+    const onTouchEnd = () => {
+      pointerRef.current.pressed = false;
+    };
+
+    // Gyro aim, sharing the controller's tracker. Only meaningful deltas
+    // count as movement, so a phone at rest still settles into the idle
+    // drift instead of pinning the can wherever it last aimed.
+    const onOrientation = (e: DeviceOrientationEvent) => {
+      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      const g = gyro.current;
+      if (!g.tracker) g.tracker = new AimTracker();
+      const sample = g.tracker.update(e.alpha, e.beta, e.gamma, performance.now());
+      const nx = sample.x * 2 - 1;
+      const ny = 1 - sample.y * 2;
+      const moved = Math.hypot(nx - g.x, ny - g.y);
+      g.x = nx;
+      g.y = ny;
+      if (!g.seeded) {
+        g.seeded = true;
+        return;
+      }
+      if (moved > 0.004) {
+        const p = pointerRef.current;
+        p.x = nx;
+        p.y = ny;
+        p.active = true;
+        p.lastMoveMs = performance.now();
+      }
+    };
+
     window.addEventListener('pointermove', onPointer, { passive: true });
-    window.addEventListener('pointerdown', onPointer, { passive: true });
-    window.addEventListener('touchmove', onTouch, { passive: true });
-    window.addEventListener('touchstart', onTouch, { passive: true });
+    canvas.addEventListener('pointerdown', press);
+    window.addEventListener('pointerup', release, { passive: true });
+    window.addEventListener('pointercancel', release, { passive: true });
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('touchend', onTouchEnd, { passive: true });
+    window.addEventListener('touchcancel', onTouchEnd, { passive: true });
+    window.addEventListener('deviceorientation', onOrientation);
     return () => {
       window.removeEventListener('pointermove', onPointer);
-      window.removeEventListener('pointerdown', onPointer);
-      window.removeEventListener('touchmove', onTouch);
-      window.removeEventListener('touchstart', onTouch);
+      canvas.removeEventListener('pointerdown', press);
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onTouchEnd);
+      window.removeEventListener('touchcancel', onTouchEnd);
+      window.removeEventListener('deviceorientation', onOrientation);
     };
-  }, []);
+  }, [gl]);
 
   // ---- world-space extents at the two working depths
   const backAnchor = useMemo(() => new THREE.Vector3(0, 0, BACK_Z), []);
@@ -510,10 +615,14 @@ function HeroScene() {
       // Travel is clamped tight enough that the can can never reach the
       // headline (wide) or the copy above it (stacked), while still leaving
       // it obviously alive under the pointer.
+      // The stacked radii were originally 0.13/0.05 — tight enough that a
+      // finger drag on a phone read as "nothing happened" and the aim-speed
+      // spray gate never opened. The can may now brush the copy at the
+      // extremes; feeling alive under the finger matters more.
       cx: wide ? canVp.width * 0.18 : 0,
       cy: canVp.height * (wide ? 0 : -0.04),
-      rx: canVp.width * (wide ? 0.15 : 0.13),
-      ry: canVp.height * (wide ? 0.13 : 0.05),
+      rx: canVp.width * (wide ? 0.2 : 0.32),
+      ry: canVp.height * (wide ? 0.16 : 0.17),
       stroke: CAN_LENGTH * canScale * CAN_ASPECT,
     };
   });
@@ -625,7 +734,9 @@ function HeroScene() {
     const t = state.clock.elapsedTime;
     const now = performance.now();
     const p = pointerRef.current;
-    const idle = !p.active || now - p.lastMoveMs > IDLE_AFTER_MS;
+    // A pressed trigger never idles — holding a finger still must keep the
+    // can pinned and pooling paint, not hand it back to the drift.
+    const idle = !p.active || (!p.pressed && now - p.lastMoveMs > IDLE_AFTER_MS);
     const cd = canDims.current;
     const L = layout.current;
 
@@ -666,16 +777,29 @@ function HeroScene() {
     scratch.aim.x += canVel.current.x * 0.12;
     scratch.aim.y += canVel.current.y * 0.12;
 
-    // ----- spray intensity from aim-point speed (attack fast, decay slow)
+    // ----- spray intensity from aim-point speed (attack fast, decay slow).
+    // A pressed trigger (finger down, mouse button held) is a full pull:
+    // the can sprays hard even when held perfectly still.
     const speed = hasPrevAim.current
       ? scratch.aim.distanceTo(prevAim.current) / Math.max(delta, 1e-4)
       : 0;
     prevAim.current.copy(scratch.aim);
     hasPrevAim.current = true;
-    const targetIntensity = idle ? 0.34 : Math.min(1, speed / 5.5);
+    const pressed = p.pressed;
+    const targetIntensity = pressed
+      ? Math.max(0.85, Math.min(1, speed / 5.5))
+      : idle
+        ? 0.34
+        : Math.min(1, speed / 5.5);
     const k = targetIntensity > intensityRef.current ? 10 : 3.2;
     intensityRef.current += (targetIntensity - intensityRef.current) * (1 - Math.exp(-k * delta));
     const intensity = intensityRef.current;
+
+    probeState.current.x = canPos.current.x;
+    probeState.current.y = canPos.current.y;
+    probeState.current.intensity = intensity;
+    probeState.current.pressed = pressed;
+    probeState.current.idle = idle;
 
     // ----- colour cycle
     cycleT.current += delta * (0.14 + intensity * 0.1);
@@ -757,6 +881,33 @@ function HeroScene() {
       const step = L.stroke * (idle ? 0.26 : 0.19);
 
       if (intensity > 0.06) {
+        // A pulled trigger held (nearly) still pools paint: one soft dab per
+        // frame at the aim point, like a real can hovering over one spot.
+        // The movement loop below only fires once the aim clears a full
+        // step, so without this a stationary press painted nothing at all.
+        if (pressed) {
+          const dwell = Math.hypot(
+            scratch.aim.x - lastStamp.current.x,
+            scratch.aim.y - lastStamp.current.y
+          );
+          if (dwell < step) {
+            const sx = ((scratch.aim.x + pd.w / 2) / pd.w) * TEX_SIZE;
+            const sy = ((pd.h / 2 - scratch.aim.y) / pd.h) * TEX_SIZE;
+            const rWorld = L.stroke * (0.15 + intensity * 0.2) * (0.8 + Math.random() * 0.35);
+            stampSplat(
+              ctx,
+              sx + (Math.random() - 0.5) * 5,
+              sy + (Math.random() - 0.5) * 5,
+              (rWorld * TEX_SIZE) / pd.w,
+              (rWorld * TEX_SIZE) / pd.h,
+              cr,
+              cg,
+              cb,
+              0.16 + intensity * 0.14
+            );
+            dirty = true;
+          }
+        }
         for (let n = 0; n < MAX_STAMPS_PER_FRAME; n++) {
           const dx = scratch.aim.x - lastStamp.current.x;
           const dy = scratch.aim.y - lastStamp.current.y;
