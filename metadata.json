@@ -1,6 +1,6 @@
 {
-  "name": "Aero Canvas 3D",
-  "description": "A real-time 3D React Three Fiber art studio with a canvas on an easel, realistic aerosol spray and brush physics, dynamic 3D tools, Web Audio sound effects, and mobile phone motion controller.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "name": "AiroHub",
+  "description": "A collaborative 3D spray-paint studio. Real Meshy-generated 3D objects painted from any angle, with up to four phones as motion-tracked spray cans.",
+  "requestFramePermissions": ["accelerometer", "gyroscope"],
+  "majorCapabilities": []
 }

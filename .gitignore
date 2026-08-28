@@ -1,8 +1,15 @@
 node_modules/
 build/
 dist/
+dist-landing/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+.meshy.env
+scripts/.meshy-state.json
+.model-cache/
+scripts/preview/out/
+dist-guide/
+dist-hiw/

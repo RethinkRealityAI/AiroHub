@@ -1,8 +1,9 @@
-import express from "express";
-import path from "path";
-import { createServer as createViteServer } from "vite";
-import { createServer } from "http";
-import { Server } from "socket.io";
+/**
+ * Gemini-backed AI helpers shared by the Netlify functions and the local dev
+ * server. Every entry point falls back to a curated response when the API key
+ * is absent or the call fails, so the studio's AI panel always returns
+ * something usable rather than erroring.
+ */
 import { GoogleGenAI, Type } from "@google/genai";
 
 let genAIClient: GoogleGenAI | null = null;
@@ -10,11 +11,7 @@ function getGenAI(): GoogleGenAI | null {
   if (!genAIClient && process.env.GEMINI_API_KEY) {
     genAIClient = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
+      httpOptions: { headers: { "User-Agent": "airohub" } },
     });
   }
   return genAIClient;
@@ -355,208 +352,11 @@ Generate artistic transformation parameters and stylized elements in JSON format
   };
 }
 
-async function startServer() {
-  const app = express();
-  const httpServer = createServer(app);
-  const PORT = 3000;
 
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-
-  // Socket.IO Setup with Multiplayer Relay
-  const io = new Server(httpServer, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"],
-    },
-    maxHttpBufferSize: 1e8,
-  });
-
-  io.on("connection", (socket) => {
-    let currentRoomId: string | null = null;
-    let currentRole: string | null = null;
-
-    socket.on("join-room", ({ roomId, role, playerName }) => {
-      currentRoomId = roomId;
-      currentRole = role;
-      socket.join(roomId);
-
-      const room = getOrCreateRoom(roomId);
-
-      if (role === "controller") {
-        const player = assignNextPlayerSlot(room, socket.id, playerName);
-        socket.emit("player-assigned", player);
-        io.to(roomId).emit("player-list-update", Array.from(room.players.values()));
-      } else if (role === "canvas") {
-        socket.emit("player-list-update", Array.from(room.players.values()));
-      }
-
-      socket.to(roomId).emit("user-joined", { id: socket.id, role, playerName });
-    });
-
-    // Multiplayer Motion Relay (with Player ID & Slot)
-    socket.on("motion", (data) => {
-      const room = activeRooms.get(data.roomId);
-      const player = room?.players.get(socket.id);
-      socket.to(data.roomId).emit("motion", {
-        ...data,
-        playerId: socket.id,
-        playerSlot: player?.slot || 1,
-        playerName: player?.name || "Tagger",
-        color: player?.color || data.color,
-      });
-    });
-
-    // Multiplayer Action (Spray / Brush)
-    socket.on("action", (data) => {
-      const room = activeRooms.get(data.roomId);
-      const player = room?.players.get(socket.id);
-      if (player && data.color) player.color = data.color;
-      if (player && data.action) player.tool = data.action;
-
-      socket.to(data.roomId).emit("action", {
-        ...data,
-        playerId: socket.id,
-        playerSlot: player?.slot || 1,
-        playerName: player?.name || "Tagger",
-      });
-    });
-
-    // Multiplayer Direct Projection Drawing
-    socket.on("projection-draw", (data) => {
-      const room = activeRooms.get(data.roomId);
-      const player = room?.players.get(socket.id);
-      socket.to(data.roomId).emit("projection-draw", {
-        ...data,
-        playerId: socket.id,
-        playerSlot: player?.slot || 1,
-        playerName: player?.name || "Tagger",
-      });
-    });
-
-    // Relay 3D Target Object Change
-    socket.on("change-object", (data) => {
-      const room = activeRooms.get(data.roomId);
-      if (room && data.objectType) {
-        room.activeObject = data.objectType;
-      }
-      socket.to(data.roomId).emit("change-object", data);
-    });
-
-    // Relay Custom 3D Model Uploaded
-    socket.on("custom-3d-uploaded", (data) => {
-      socket.to(data.roomId).emit("custom-3d-uploaded", data);
-    });
-
-    // Relay calibration
-    socket.on("calibrate", (data) => {
-      socket.to(data.roomId).emit("calibrate", { ...data, playerId: socket.id });
-    });
-
-    // Relay settings
-    socket.on("settings", (data) => {
-      const room = activeRooms.get(data.roomId);
-      const player = room?.players.get(socket.id);
-      if (player) {
-        if (data.color) player.color = data.color;
-        if (data.tool) player.tool = data.tool;
-        if (data.playerName) player.name = data.playerName;
-        io.to(data.roomId).emit("player-list-update", Array.from(room.players.values()));
-      }
-      socket.to(data.roomId).emit("settings", { ...data, playerId: socket.id });
-    });
-
-    // Relay clear canvas
-    socket.on("clear-canvas", (data) => {
-      socket.to(data.roomId).emit("clear-canvas", data);
-    });
-
-    // Relay spray can shake / ball bearing rattle
-    socket.on("shake", (data) => {
-      socket.to(data.roomId).emit("shake", { ...data, playerId: socket.id });
-    });
-
-    // Relay AI graffiti stamp
-    socket.on("ai-stamp", (data) => {
-      socket.to(data.roomId).emit("ai-stamp", data);
-    });
-
-    // Handle Disconnect
-    socket.on("disconnect", () => {
-      if (currentRoomId && activeRooms.has(currentRoomId)) {
-        const room = activeRooms.get(currentRoomId)!;
-        room.players.delete(socket.id);
-        io.to(currentRoomId).emit("player-list-update", Array.from(room.players.values()));
-        socket.to(currentRoomId).emit("player-left", { id: socket.id });
-      }
-    });
-  });
-
-  // Health check
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
-  });
-
-  // AI Endpoint: Generate Graffiti Tag & Stencil Concepts
-  app.post("/api/ai/graffiti-tag", async (req, res) => {
-    try {
-      const { prompt, style = "wildstyle" } = req.body;
-      const result = await generateGraffitiWithFallback(prompt, style);
-      res.json(result);
-    } catch (err: any) {
-      console.error("Gemini graffiti-tag error:", err);
-      res.json(CURATED_GRAFFITI_PRESETS[0]);
-    }
-  });
-
-  // AI Endpoint: Art Critique & Gallery Appraisal
-  app.post("/api/ai/critique", async (req, res) => {
-    try {
-      const { objectType = "easel", dominantColor = "#FF3D00" } = req.body;
-      const result = await generateCritiqueWithFallback(objectType, dominantColor);
-      res.json(result);
-    } catch (err: any) {
-      console.error("Gemini critique error:", err);
-      res.json({
-        exhibitionTitle: "VIBRATIONS IN LOWER EAST SIDE",
-        curatorCritique: "A bold, kinetic exploration of aerosol velocity and physical gesture.",
-        estimatedValue: "$22,000 USD",
-        auctionHouse: "SOTHEBY'S CONTEMPORARY STREET",
-        vibeTags: ["#AerosolExpressionism", "#NeoGraffiti", "#RawEnergy"],
-      });
-    }
-  });
-
-  // AI Endpoint: Transform & Stylize Current Painting
-  app.post("/api/ai/transform-style", async (req, res) => {
-    try {
-      const { preset = "cyberpunk", objectType = "easel", customPrompt } = req.body;
-      const result = await generateStyleTransformation(preset, objectType, customPrompt);
-      res.json(result);
-    } catch (err: any) {
-      console.error("Gemini transform-style error:", err);
-      res.json(CURATED_TRANSFORMATIONS.cyberpunk);
-    }
-  });
-
-  // Vite Middleware for Dev / Static serving for Prod
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
-  httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
-  });
-}
-
-startServer();
+export {
+  generateGraffitiWithFallback,
+  generateCritiqueWithFallback,
+  generateStyleTransformation,
+  CURATED_GRAFFITI_PRESETS,
+  CURATED_TRANSFORMATIONS,
+};

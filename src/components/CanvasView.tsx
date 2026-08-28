@@ -1,1972 +1,2083 @@
-import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { useParams } from 'react-router-dom';
-import { io, Socket } from 'socket.io-client';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, PerspectiveCamera, ContactShadows } from '@react-three/drei';
+/**
+ * The studio screen.
+ *
+ * Full-bleed 3D stage with floating glass control islands over it. The old
+ * layout put a solid navigation bar above the canvas and scattered controls
+ * into four corners; everything now sits in three deliberate zones — a top
+ * command bar, a left view island, and a bottom dock — so the object itself
+ * stays the focus.
+ */
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useParams } from 'react-router-dom';
+import { Canvas, useThree } from '@react-three/fiber';
 import { QRCodeSVG } from 'qrcode.react';
+import { motion, AnimatePresence } from 'motion/react';
 import * as THREE from 'three';
-import { DecorateObjects3D, OBJECT_SURFACE_DIMS } from './DecorateObjects3D';
-import { Tools3D } from './Tools3D';
-import { sounds } from '../utils/audio';
-import { parseUploaded3DModel, Parsed3DModelResult } from '../utils/model3dLoader';
 import {
-  TargetObjectType,
-  ProjectionDrawData,
-  PlayerState,
-  Uploaded3DModelInfo,
-} from '../types';
-import {
-  Volume2,
-  VolumeX,
-  Download,
-  Trash2,
-  Sparkles,
-  Maximize,
-  Minimize,
-  Sparkle,
-  X,
-  Zap,
-  Rotate3d,
-  RefreshCw,
-  Wand2,
-  Palette,
-  Eye,
-  Check,
-  Upload,
-  Users,
-  QrCode,
-  Box,
-  Layers,
-  Info,
-  Copy,
-  ExternalLink,
-  MousePointer,
-  Hand,
-  SprayCan,
-  PenTool,
+  Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, AlertTriangle,
+  RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, Layers,
+  Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2,
+  Wifi, WifiOff, Undo2, Redo2, History, Video, HelpCircle,
+  Stamp as StampIcon, Clapperboard,
 } from 'lucide-react';
-import { RadialColorPicker } from './RadialColorPicker';
 
-const CANVAS_PIXEL_RES = 2048;
+import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
+import { StampBatcher, StampPacket, PaintStamp, packStamps, unpackStamps } from '../paint/stamps';
+import {
+  BUILTIN_STAMPS,
+  StampAsset,
+  StampLibrary,
+  addUpload,
+  createStampApplier,
+  decodeStampImage,
+  loadStampLibrary,
+  markRecent,
+  removeUpload,
+  stampForSymbol,
+  stampFromFile,
+  stampPayload,
+  stampRadiusPx,
+} from '../paint/stampAssets';
+import { StampTray } from '../ui/StampSheet';
+import { pickSurfaceUV, pointerToNdc } from '../scene/stampPlacement';
+import { StudioScene } from '../scene/StudioScene';
+import { ShowcasePanel } from '../showcase/ShowcasePanel';
+import type { ShowcaseHandles } from '../showcase/recorder';
+import { Finish } from '../scene/PaintTarget';
+import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
+import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
+import { WelcomeGuide } from './WelcomeGuide';
+import { ColorWell } from '../ui/ColorWell';
+import { OBJECT_BY_ID } from '../paint/objectCatalog';
+import { ensureCustomModels } from '../paint/customModels';
+import { prefetchModels } from '../paint/modelRegistry';
+import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
+import { sounds } from '../utils/audio';
+import { parseUploaded3DModel } from '../utils/model3dLoader';
+import { TargetObjectType, PlayerState, Uploaded3DModelInfo, ImageStampData } from '../types';
 
-// 2D Canvas Surface Manager with Stylistic Transformers
-export class PaintSurface {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-  texture: THREE.CanvasTexture;
-
-  constructor(size: number = CANVAS_PIXEL_RES) {
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = size;
-    this.canvas.height = size;
-    this.ctx = this.canvas.getContext('2d')!;
-    this.clear();
-
-    this.texture = new THREE.CanvasTexture(this.canvas);
-    this.texture.minFilter = THREE.LinearFilter;
-    this.texture.generateMipmaps = false;
-  }
-
-  clear() {
-    this.ctx.fillStyle = '#f6f3eb';
-    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
-    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.015)';
-    for (let x = 0; x < this.canvas.width; x += 4) {
-      this.ctx.fillRect(x, 0, 1.5, this.canvas.height);
-    }
-    for (let y = 0; y < this.canvas.height; y += 4) {
-      this.ctx.fillRect(0, y, this.canvas.width, 1.5);
-    }
-
-    if (this.texture) this.texture.needsUpdate = true;
-  }
-
-  spray(x: number, y: number, color: string, sizeMultiplier = 1.0) {
-    const baseRadius = 55 * sizeMultiplier;
-    const density = Math.floor(75 * sizeMultiplier);
-    this.ctx.fillStyle = color;
-
-    for (let i = 0; i < density; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.pow(Math.random(), 1.7) * baseRadius;
-      const px = x + Math.cos(angle) * r;
-      const py = y + Math.sin(angle) * r;
-
-      const dotRadius = Math.random() * 3.2 * sizeMultiplier + 0.6;
-      this.ctx.globalAlpha = Math.random() * 0.55 + 0.2;
-
-      this.ctx.beginPath();
-      this.ctx.arc(px, py, dotRadius, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-    this.ctx.globalAlpha = 1.0;
-    this.texture.needsUpdate = true;
-  }
-
-  brush(x0: number, y0: number, x1: number, y1: number, color: string, sizeMultiplier = 1.0) {
-    this.ctx.strokeStyle = color;
-    this.ctx.lineWidth = 36 * sizeMultiplier;
-    this.ctx.lineCap = 'round';
-    this.ctx.lineJoin = 'round';
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(x0, y0);
-    this.ctx.lineTo(x1, y1);
-    this.ctx.stroke();
-
-    this.texture.needsUpdate = true;
-  }
-
-  stampSymbol(symbol: string, x: number, y: number, color: string, text?: string) {
-    this.ctx.save();
-    this.ctx.fillStyle = color;
-    this.ctx.font = 'bold 260px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.textBaseline = 'middle';
-    this.ctx.shadowColor = color;
-    this.ctx.shadowBlur = 35;
-    this.ctx.fillText(symbol, x, y - (text ? 80 : 0));
-
-    if (text) {
-      this.ctx.font = '900 110px sans-serif';
-      this.ctx.fillText(text.toUpperCase(), x, y + 120);
-    }
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-
-  applyCyberpunkStyle(accentColor = '#06B6D4', secondaryColor = '#EC4899', tagText = 'CYBERPUNK') {
-    this.ctx.save();
-    const gradient = this.ctx.createRadialGradient(1024, 1024, 400, 1024, 1024, 1400);
-    gradient.addColorStop(0, 'rgba(10, 10, 20, 0)');
-    gradient.addColorStop(1, 'rgba(2, 6, 23, 0.65)');
-    this.ctx.fillStyle = gradient;
-    this.ctx.fillRect(0, 0, 2048, 2048);
-
-    this.ctx.strokeStyle = 'rgba(6, 182, 212, 0.08)';
-    this.ctx.lineWidth = 2;
-    for (let x = 0; x <= 2048; x += 128) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(x, 0);
-      this.ctx.lineTo(x, 2048);
-      this.ctx.stroke();
-    }
-    for (let y = 0; y <= 2048; y += 128) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(0, y);
-      this.ctx.lineTo(2048, y);
-      this.ctx.stroke();
-    }
-
-    this.ctx.shadowColor = accentColor;
-    this.ctx.shadowBlur = 40;
-    this.ctx.fillStyle = secondaryColor;
-    this.ctx.font = '900 130px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.fillText(`// ${tagText} //`, 1024, 1750);
-
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-
-  applyWildstyleDrips(accentColor = '#FF3D00', tagText = 'WILDSTYLE') {
-    this.ctx.save();
-    this.ctx.fillStyle = accentColor;
-    for (let i = 0; i < 28; i++) {
-      const startX = Math.random() * 1800 + 124;
-      const startY = Math.random() * 800 + 400;
-      const dripLength = Math.random() * 320 + 80;
-      const dripWidth = Math.random() * 8 + 3;
-
-      this.ctx.beginPath();
-      this.ctx.moveTo(startX - dripWidth / 2, startY);
-      this.ctx.lineTo(startX + dripWidth / 2, startY);
-      this.ctx.lineTo(startX + dripWidth / 3, startY + dripLength);
-      this.ctx.arc(startX, startY + dripLength, dripWidth * 0.9, 0, Math.PI);
-      this.ctx.closePath();
-      this.ctx.fill();
-    }
-
-    this.ctx.shadowColor = '#000000';
-    this.ctx.shadowBlur = 25;
-    this.ctx.fillStyle = '#F59E0B';
-    this.ctx.font = '900 140px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.fillText(`★ ${tagText} ★`, 1024, 1720);
-
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-
-  applyBanksyFilter(accentColor = '#FF3D00', tagText = 'HOPE') {
-    this.ctx.save();
-    this.ctx.fillStyle = 'rgba(24, 24, 27, 0.45)';
-    this.ctx.fillRect(0, 0, 2048, 2048);
-
-    this.ctx.fillStyle = accentColor;
-    this.ctx.font = 'bold 220px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.shadowColor = accentColor;
-    this.ctx.shadowBlur = 20;
-    this.ctx.fillText('♥', 1024, 750);
-
-    this.ctx.fillStyle = '#FFFFFF';
-    this.ctx.font = '900 95px monospace';
-    this.ctx.fillText(`"${tagText.toUpperCase()}"`, 1024, 1680);
-
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-
-  applyPopArtDots(accentColor = '#F59E0B', tagText = 'POW!') {
-    this.ctx.save();
-    this.ctx.fillStyle = 'rgba(6, 182, 212, 0.12)';
-    const spacing = 32;
-    for (let x = 0; x < 2048; x += spacing) {
-      for (let y = 0; y < 2048; y += spacing) {
-        this.ctx.beginPath();
-        this.ctx.arc(x, y, 4, 0, Math.PI * 2);
-        this.ctx.fill();
-      }
-    }
-
-    this.ctx.fillStyle = accentColor;
-    this.ctx.strokeStyle = '#18181B';
-    this.ctx.lineWidth = 14;
-    this.ctx.font = '900 180px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.strokeText(tagText, 1024, 1700);
-    this.ctx.fillText(tagText, 1024, 1700);
-
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-
-  applyCosmicNebula(accentColor = '#8B5CF6', secondaryColor = '#06B6D4', tagText = 'COSMOS') {
-    this.ctx.save();
-    const nebGrad = this.ctx.createRadialGradient(1024, 1024, 100, 1024, 1024, 1200);
-    nebGrad.addColorStop(0, 'rgba(139, 92, 246, 0.25)');
-    nebGrad.addColorStop(0.6, 'rgba(6, 182, 212, 0.15)');
-    nebGrad.addColorStop(1, 'rgba(10, 5, 25, 0.55)');
-    this.ctx.fillStyle = nebGrad;
-    this.ctx.fillRect(0, 0, 2048, 2048);
-
-    this.ctx.fillStyle = '#FFFFFF';
-    for (let i = 0; i < 350; i++) {
-      const sx = Math.random() * 2048;
-      const sy = Math.random() * 2048;
-      const sr = Math.random() * 3.5 + 0.8;
-      this.ctx.globalAlpha = Math.random() * 0.8 + 0.2;
-      this.ctx.beginPath();
-      this.ctx.arc(sx, sy, sr, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-    this.ctx.globalAlpha = 1.0;
-
-    this.ctx.shadowColor = accentColor;
-    this.ctx.shadowBlur = 45;
-    this.ctx.fillStyle = secondaryColor;
-    this.ctx.font = '900 130px sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.fillText(`✦ ${tagText} ✦`, 1024, 1720);
-
-    this.ctx.restore();
-    this.texture.needsUpdate = true;
-  }
-}
-
-// Particle System for Aerosol Mist
-const MAX_PARTICLES_PER_PLAYER = 600;
-
-function MultiPlayerSprayParticles({
-  players,
+/**
+ * Turns a tap on the stage into a surface UV.
+ *
+ * It lives inside the R3F canvas purely to reach the default camera and the
+ * scene graph; the ray maths and the "which meshes are paintable" question are
+ * both answered by `scene/stampPlacement`. A drag is never a placement — the
+ * same left button still orbits the camera in stamp mode, so only a press that
+ * neither travels nor lingers counts as a tap.
+ */
+function StampPlacer({
+  armedRef,
+  onPlace,
+  pickCentreRef,
 }: {
-  players: PlayerState[];
+  armedRef: React.MutableRefObject<boolean>;
+  onPlace: (u: number, v: number) => void;
+  /**
+   * Filled in with a "where is the model right now" probe, so code outside the
+   * canvas — the AI copilot — can place a stamp somewhere the viewer can
+   * actually see rather than at a fixed UV.
+   */
+  pickCentreRef: React.MutableRefObject<(() => { u: number; v: number } | null) | null>;
 }) {
-  const activeSprayingPlayers = players.filter((p) => p.isPainting && p.tool === 'spray');
-  const meshRef = useRef<THREE.InstancedMesh>(null);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  const colorObj = useMemo(() => new THREE.Color(), []);
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
 
-  const totalParticles = 4 * MAX_PARTICLES_PER_PLAYER;
-  const particleData = useRef(
-    Array.from({ length: totalParticles }, () => ({
-      life: 0,
-      playerIndex: 0,
-      position: new THREE.Vector3(),
-      velocity: new THREE.Vector3(),
-      scale: 1,
-    }))
-  );
+  const onPlaceRef = useRef(onPlace);
+  onPlaceRef.current = onPlace;
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
 
-  useFrame((_, delta) => {
-    if (!meshRef.current) return;
-
-    activeSprayingPlayers.forEach((player, pIdx) => {
-      const startIdx = pIdx * MAX_PARTICLES_PER_PLAYER;
-      const spawnCount = 24;
-      let spawned = 0;
-
-      const surfPt = player.surfacePoint
-        ? new THREE.Vector3(player.surfacePoint[0], player.surfacePoint[1], player.surfacePoint[2])
-        : new THREE.Vector3(0, 0, 0);
-
-      const toolPos = new THREE.Vector3(player.worldPos[0], player.worldPos[1], player.worldPos[2]);
-      const dir = surfPt.clone().sub(toolPos).normalize();
-      if (dir.lengthSq() < 0.001) dir.set(0, 0, -1);
-
-      // Create orthogonal basis for cone spread
-      const right = new THREE.Vector3(0, 1, 0).cross(dir).normalize();
-      if (right.lengthSq() < 0.001) right.set(1, 0, 0);
-      const up = dir.clone().cross(right).normalize();
-
-      for (let i = startIdx; i < startIdx + MAX_PARTICLES_PER_PLAYER; i++) {
-        if (spawned >= spawnCount) break;
-        if (particleData.current[i].life <= 0) {
-          particleData.current[i].life = 0.5 + Math.random() * 0.35;
-          particleData.current[i].playerIndex = pIdx;
-
-          particleData.current[i].position.set(
-            toolPos.x + dir.x * 0.06 + (Math.random() - 0.5) * 0.06,
-            toolPos.y + dir.y * 0.06 + (Math.random() - 0.5) * 0.06,
-            toolPos.z + dir.z * 0.06 + (Math.random() - 0.5) * 0.06
-          );
-
-          const angle = Math.random() * Math.PI * 2;
-          const spreadRadius = Math.random() * 1.1;
-          const spreadVec = right
-            .clone()
-            .multiplyScalar(Math.cos(angle) * spreadRadius)
-            .add(up.clone().multiplyScalar(Math.sin(angle) * spreadRadius));
-
-          const speed = 4.6;
-          particleData.current[i].velocity.copy(dir).multiplyScalar(speed).add(spreadVec);
-          particleData.current[i].scale = Math.random() * 0.14 + 0.06;
-          spawned++;
-        }
-      }
-    });
-
-    for (let i = 0; i < totalParticles; i++) {
-      const p = particleData.current[i];
-      if (p.life > 0) {
-        p.life -= delta * 2.2;
-        p.position.addScaledVector(p.velocity, delta);
-
-        const activePlayer = activeSprayingPlayers[p.playerIndex];
-        const color = activePlayer?.color || '#FF3D00';
-        colorObj.set(color);
-
-        dummy.position.copy(p.position);
-        dummy.scale.setScalar(p.scale * Math.max(0, p.life));
-        dummy.updateMatrix();
-
-        meshRef.current.setMatrixAt(i, dummy.matrix);
-        meshRef.current.setColorAt(i, colorObj);
-      } else {
-        dummy.position.set(0, 0, -1000);
-        dummy.updateMatrix();
-        meshRef.current.setMatrixAt(i, dummy.matrix);
-      }
-    }
-
-    meshRef.current.instanceMatrix.needsUpdate = true;
-    if (meshRef.current.instanceColor) meshRef.current.instanceColor.needsUpdate = true;
-  });
-
-  return (
-    <instancedMesh ref={meshRef} args={[undefined, undefined, totalParticles]}>
-      <circleGeometry args={[1, 8]} />
-      <meshBasicMaterial transparent opacity={0.55} depthWrite={false} color="#ffffff" />
-    </instancedMesh>
-  );
-}
-
-// 3D Scene Controller
-interface SceneProps {
-  roomId: string;
-  targetObject: TargetObjectType;
-  setTargetObject: (obj: TargetObjectType) => void;
-  paintSurface: PaintSurface;
-  players: PlayerState[];
-  setPlayers: React.Dispatch<React.SetStateAction<PlayerState[]>>;
-  orbitControlsRef: React.RefObject<any>;
-  autoRotate: boolean;
-  custom3DGroup: THREE.Group | null;
-  desktopPointerActive: boolean;
-  hostTool: 'spray' | 'brush';
-  hostColor: string;
-}
-
-function Scene({
-  roomId,
-  targetObject,
-  setTargetObject,
-  paintSurface,
-  players,
-  setPlayers,
-  orbitControlsRef,
-  autoRotate,
-  custom3DGroup,
-  desktopPointerActive,
-  hostTool,
-  hostColor,
-}: SceneProps) {
-  const currentDims = OBJECT_SURFACE_DIMS[targetObject] || { width: 15.2, height: 11.2, zOffset: 0.05 };
-  const { camera, raycaster } = useThree();
-  const objectGroupRef = useRef<THREE.Group>(null);
-
-  const originsRef = useRef<Map<string, { alpha: number | null; beta: number | null }>>(new Map());
-  const lastPlayerPxRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const lastProjPxRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-
-  // Desktop Pointer Direct Spray / Paint Logic
-  const isDesktopPainting = useRef<boolean>(false);
-  const lastDesktopPxRef = useRef<{ x: number; y: number } | null>(null);
-
-  const handlePointerDown = (e: any) => {
-    if (!desktopPointerActive || e.button !== 0) return;
-    isDesktopPainting.current = true;
-    const meshes: THREE.Object3D[] = [];
-    if (objectGroupRef.current) {
-      objectGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) meshes.push(child);
-      });
-    }
-    const intersects = raycaster.intersectObjects(meshes, true);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      let hitNormal = new THREE.Vector3(0, 0, 1);
-      if (hit.face) {
-        hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-      }
-      if (hit.uv) {
-        const uvPx = hit.uv.x * CANVAS_PIXEL_RES;
-        const uvPy = (1 - hit.uv.y) * CANVAS_PIXEL_RES;
-        lastDesktopPxRef.current = { x: uvPx, y: uvPy };
-        if (hostTool === 'spray') {
-          sounds.startSpray(1.0);
-          paintSurface.spray(uvPx, uvPy, hostColor, 1.0);
-        } else {
-          sounds.startBrush();
-          paintSurface.brush(uvPx, uvPy, uvPx + 0.1, uvPy + 0.1, hostColor, 1.0);
-        }
-      }
-      setPlayers((prev) =>
-        prev.map((p) => {
-          if (p.id === 'p1_local' || p.slot === 1) {
-            const hoverDist = hostTool === 'spray' ? 0.45 : 0.2;
-            const toolPos = hit.point.clone().addScaledVector(hitNormal, hoverDist);
-            return {
-              ...p,
-              isPainting: true,
-              tool: hostTool,
-              color: hostColor,
-              worldPos: [toolPos.x, toolPos.y, toolPos.z],
-              surfacePoint: [hit.point.x, hit.point.y, hit.point.z],
-              surfaceNormal: [hitNormal.x, hitNormal.y, hitNormal.z],
-            };
-          }
-          return p;
-        })
-      );
-    }
-  };
-
-  const handlePointerMove = (e: any) => {
-    if (!desktopPointerActive) return;
-    const meshes: THREE.Object3D[] = [];
-    if (objectGroupRef.current) {
-      objectGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) meshes.push(child);
-      });
-    }
-    const intersects = raycaster.intersectObjects(meshes, true);
-    if (intersects.length > 0) {
-      const hit = intersects[0];
-      let hitNormal = new THREE.Vector3(0, 0, 1);
-      if (hit.face) {
-        hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-      }
-      if (isDesktopPainting.current && hit.uv) {
-        const uvPx = hit.uv.x * CANVAS_PIXEL_RES;
-        const uvPy = (1 - hit.uv.y) * CANVAS_PIXEL_RES;
-        if (hostTool === 'spray') {
-          paintSurface.spray(uvPx, uvPy, hostColor, 1.0);
-        } else {
-          const prev = lastDesktopPxRef.current || { x: uvPx, y: uvPy };
-          paintSurface.brush(prev.x, prev.y, uvPx, uvPy, hostColor, 1.0);
-        }
-        lastDesktopPxRef.current = { x: uvPx, y: uvPy };
-      }
-      setPlayers((prev) =>
-        prev.map((p) => {
-          if (p.id === 'p1_local' || p.slot === 1) {
-            const hoverDist = isDesktopPainting.current
-              ? hostTool === 'spray'
-                ? 0.45
-                : 0.2
-              : 0.8;
-            const toolPos = hit.point.clone().addScaledVector(hitNormal, hoverDist);
-            return {
-              ...p,
-              isPainting: isDesktopPainting.current,
-              tool: hostTool,
-              color: hostColor,
-              worldPos: [toolPos.x, toolPos.y, toolPos.z],
-              surfacePoint: [hit.point.x, hit.point.y, hit.point.z],
-              surfaceNormal: [hitNormal.x, hitNormal.y, hitNormal.z],
-            };
-          }
-          return p;
-        })
-      );
-    }
-  };
-
-  const handlePointerUp = (e: any) => {
-    if (!desktopPointerActive) return;
-    if (isDesktopPainting.current) {
-      isDesktopPainting.current = false;
-      lastDesktopPxRef.current = null;
-      sounds.stopSpray();
-      sounds.stopBrush();
-      setPlayers((prev) =>
-        prev.map((p) =>
-          p.id === 'p1_local' || p.slot === 1 ? { ...p, isPainting: false } : p
-        )
-      );
-    }
-  };
-
-  // WebSockets Multiplayer Synchronization
+  // The UV under the middle of the frame. A generated model's atlas scatters
+  // its charts, so a hard-coded UV lands wherever that chart happens to be —
+  // often on a face nobody is looking at. Rays from the centre outwards find a
+  // spot that is genuinely on screen.
   useEffect(() => {
-    const socket = io();
-
-    socket.on('connect', () => {
-      socket.emit('join-room', { roomId, role: 'canvas' });
-    });
-
-    // Receive updated player list
-    socket.on('player-list-update', (playerList: any[]) => {
-      setPlayers((prev) => {
-        const next = playerList.map((p, idx) => {
-          const existing = prev.find((x) => x.id === p.id);
-          return (
-            existing || {
-              id: p.id,
-              slot: p.slot || idx + 1,
-              name: p.name || `Tagger ${idx + 1}`,
-              color: p.color || '#FF3D00',
-              tool: p.tool || 'spray',
-              isPainting: false,
-              cursorPx: { x: 1024, y: 1024 },
-              worldPos: [0, 0, currentDims.zOffset] as [number, number, number],
-              surfacePoint: [0, 0, 0] as [number, number, number],
-              surfaceNormal: [0, 0, 1] as [number, number, number],
-              pressure: 1.0,
-              lastActive: Date.now(),
-              mode: p.mode || 'motion',
-            }
-          );
-        });
-        return next;
-      });
-    });
-
-    // 1. Gyro Motion Data per Player
-    socket.on('motion', (data) => {
-      const { playerId, alpha, beta } = data;
-      if (!playerId || alpha === null || beta === null) return;
-
-      if (!originsRef.current.has(playerId)) {
-        originsRef.current.set(playerId, { alpha, beta });
+    pickCentreRef.current = () => {
+      const offsets: [number, number][] = [
+        [0, 0],
+        [0, 0.18],
+        [0, -0.18],
+        [0.22, 0],
+        [-0.22, 0],
+        [0.26, 0.2],
+        [-0.26, -0.2],
+      ];
+      for (const [x, y] of offsets) {
+        const hit = pickSurfaceUV(scene, cameraRef.current, x, y);
+        if (hit) return { u: hit.u, v: hit.v };
       }
-
-      const orig = originsRef.current.get(playerId)!;
-      if (orig.alpha === null || orig.beta === null) {
-        orig.alpha = alpha;
-        orig.beta = beta;
-      }
-
-      let dAlpha = alpha - orig.alpha;
-      let dBeta = beta - orig.beta;
-
-      if (dAlpha > 180) dAlpha -= 360;
-      if (dAlpha < -180) dAlpha += 360;
-
-      const SENSITIVITY = 36;
-      let rawPx = 1024 - dAlpha * SENSITIVITY;
-      let rawPy = 1024 - dBeta * SENSITIVITY;
-
-      // Soft clamp
-      const PADDING = 40;
-      if (rawPx < PADDING) {
-        orig.alpha += 0.35;
-        rawPx = PADDING;
-      } else if (rawPx > CANVAS_PIXEL_RES - PADDING) {
-        orig.alpha -= 0.35;
-        rawPx = CANVAS_PIXEL_RES - PADDING;
-      }
-
-      if (rawPy < PADDING) {
-        orig.beta += 0.35;
-        rawPy = PADDING;
-      } else if (rawPy > CANVAS_PIXEL_RES - PADDING) {
-        orig.beta -= 0.35;
-        rawPy = CANVAS_PIXEL_RES - PADDING;
-      }
-
-      const px = Math.max(0, Math.min(CANVAS_PIXEL_RES, rawPx));
-      const py = Math.max(0, Math.min(CANVAS_PIXEL_RES, rawPy));
-
-      setPlayers((prev) =>
-        prev.map((p) => {
-          if (p.id === playerId) {
-            return {
-              ...p,
-              cursorPx: { x: px, y: py },
-              lastActive: Date.now(),
-            };
-          }
-          return p;
-        })
-      );
-    });
-
-    // 2. Action (Spray / Brush hold from Motion mode)
-    socket.on('action', (data) => {
-      const { playerId, action, state, color } = data;
-      if (!playerId) return;
-
-      setPlayers((prev) =>
-        prev.map((p) => {
-          if (p.id === playerId) {
-            const isPainting = state === 'start';
-            if (isPainting) {
-              lastPlayerPxRef.current.set(playerId, { ...p.cursorPx });
-              if (action === 'spray') sounds.startSpray(data.pressure || 1.0);
-              else sounds.startBrush();
-            } else {
-              sounds.stopSpray();
-              sounds.stopBrush();
-            }
-
-            return {
-              ...p,
-              tool: action || p.tool,
-              color: color || p.color,
-              isPainting,
-              lastActive: Date.now(),
-            };
-          }
-          return p;
-        })
-      );
-    });
-
-    // 3. Direct Mobile Projection Drawing per Player
-    socket.on('projection-draw', (data: ProjectionDrawData) => {
-      const { playerId, x, y, type, tool, color, size } = data;
-      const pId = playerId || 'default';
-      const px = x * CANVAS_PIXEL_RES;
-      const py = y * CANVAS_PIXEL_RES;
-
-      setPlayers((prev) =>
-        prev.map((p) => {
-          if (p.id === pId) {
-            return {
-              ...p,
-              cursorPx: { x: px, y: py },
-              tool: tool || p.tool,
-              color: color || p.color,
-              isPainting: type !== 'end',
-              lastActive: Date.now(),
-            };
-          }
-          return p;
-        })
-      );
-
-      if (type === 'start') {
-        lastProjPxRef.current.set(pId, { x: px, y: py });
-        if (tool === 'spray') {
-          sounds.startSpray(1.0);
-          paintSurface.spray(px, py, color, size || 1.0);
-        } else {
-          sounds.startBrush();
-          paintSurface.brush(px, py, px + 0.1, py + 0.1, color, size || 1.0);
-        }
-      } else if (type === 'move') {
-        if (tool === 'spray') {
-          paintSurface.spray(px, py, color, size || 1.0);
-        } else {
-          const prev = lastProjPxRef.current.get(pId) || { x: px, y: py };
-          paintSurface.brush(prev.x, prev.y, px, py, color, size || 1.0);
-        }
-        lastProjPxRef.current.set(pId, { x: px, y: py });
-      } else if (type === 'end') {
-        lastProjPxRef.current.delete(pId);
-        sounds.stopSpray();
-        sounds.stopBrush();
-      }
-    });
-
-    // 4. Object Change
-    socket.on('change-object', (data) => {
-      if (data.objectType) {
-        setTargetObject(data.objectType);
-        originsRef.current.clear();
-        sounds.playClick(1.5);
-      }
-    });
-
-    // 5. Settings, clear, calibrate
-    socket.on('settings', (data) => {
-      const { playerId, color, tool } = data;
-      if (playerId) {
-        setPlayers((prev) =>
-          prev.map((p) =>
-            p.id === playerId ? { ...p, color: color || p.color, tool: tool || p.tool } : p
-          )
-        );
-      }
-    });
-
-    socket.on('clear-canvas', () => {
-      paintSurface.clear();
-      sounds.playWhoosh();
-    });
-
-    socket.on('shake', () => {
-      sounds.playCanRattle();
-    });
-
-    socket.on('calibrate', (data) => {
-      if (data.playerId) {
-        originsRef.current.delete(data.playerId);
-      } else {
-        originsRef.current.clear();
-      }
-      sounds.playClick(1.5);
-    });
-
-    socket.on('ai-stamp', (data) => {
-      if (data.stencilSymbol) {
-        paintSurface.stampSymbol(data.stencilSymbol, 1024, 1024, data.color || '#FF3D00', data.text);
-        sounds.playWhoosh();
-      }
-    });
-
-    return () => {
-      socket.disconnect();
-      sounds.stopSpray();
-      sounds.stopBrush();
+      return null;
     };
-  }, [roomId, currentDims, paintSurface, setPlayers, setTargetObject]);
+    return () => {
+      pickCentreRef.current = null;
+    };
+  }, [scene, pickCentreRef]);
 
-  // Frame loop: High-precision camera raycasting, 3D tool positioning & surface UV painting
-  useFrame(() => {
-    const meshes: THREE.Object3D[] = [];
-    if (objectGroupRef.current) {
-      objectGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          meshes.push(child);
-        }
-      });
-    }
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const press = { x: 0, y: 0, at: 0, id: -1, live: false };
 
-    const ndc = new THREE.Vector2();
-    const toCam = new THREE.Vector3();
-    const planeHit = new THREE.Vector3();
+    const onDown = (event: PointerEvent) => {
+      press.live = armedRef.current && event.button === 0;
+      if (!press.live) return;
+      press.x = event.clientX;
+      press.y = event.clientY;
+      press.at = performance.now();
+      press.id = event.pointerId;
+    };
 
-    players.forEach((p) => {
-      ndc.x = (p.cursorPx.x / CANVAS_PIXEL_RES - 0.5) * 2;
-      ndc.y = -(p.cursorPx.y / CANVAS_PIXEL_RES - 0.5) * 2;
+    const onUp = (event: PointerEvent) => {
+      if (!press.live || event.pointerId !== press.id) return;
+      press.live = false;
+      if (!armedRef.current) return;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 8) return;
+      if (performance.now() - press.at > 700) return;
+      const ndc = pointerToNdc(canvas, event.clientX, event.clientY);
+      const hit = pickSurfaceUV(scene, cameraRef.current, ndc.x, ndc.y);
+      if (hit) onPlaceRef.current(hit.u, hit.v);
+    };
 
-      raycaster.setFromCamera(ndc, camera);
+    const onCancel = () => {
+      press.live = false;
+    };
 
-      const intersects = meshes.length > 0 ? raycaster.intersectObjects(meshes, true) : [];
+    canvas.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, [gl, scene, armedRef]);
 
-      if (intersects.length > 0) {
-        const hit = intersects[0];
-        const hitPoint = hit.point;
-        let hitNormal = new THREE.Vector3(0, 0, 1);
-        if (hit.face) {
-          hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize();
-        }
-        toCam.subVectors(camera.position, hitPoint).normalize();
-        if (hitNormal.dot(toCam) < 0) hitNormal.negate();
-
-        const hoverDist = p.isPainting ? (p.tool === 'spray' ? 0.45 : 0.2) : 0.8;
-        const toolPos = hitPoint.clone().addScaledVector(hitNormal, hoverDist);
-
-        p.worldPos = [toolPos.x, toolPos.y, toolPos.z];
-        p.surfacePoint = [hitPoint.x, hitPoint.y, hitPoint.z];
-        p.surfaceNormal = [hitNormal.x, hitNormal.y, hitNormal.z];
-
-        if (p.isPainting && p.mode === 'motion') {
-          if (hit.uv) {
-            const uvPx = hit.uv.x * CANVAS_PIXEL_RES;
-            const uvPy = (1 - hit.uv.y) * CANVAS_PIXEL_RES;
-            if (p.tool === 'spray') {
-              paintSurface.spray(uvPx, uvPy, p.color, 1.0);
-            } else if (p.tool === 'brush') {
-              const last = lastPlayerPxRef.current.get(p.id) || { x: uvPx, y: uvPy };
-              paintSurface.brush(last.x, last.y, uvPx, uvPy, p.color, 1.0);
-              lastPlayerPxRef.current.set(p.id, { x: uvPx, y: uvPy });
-            }
-          } else {
-            if (p.tool === 'spray') {
-              paintSurface.spray(p.cursorPx.x, p.cursorPx.y, p.color, 1.0);
-            } else if (p.tool === 'brush') {
-              const last = lastPlayerPxRef.current.get(p.id) || p.cursorPx;
-              paintSurface.brush(last.x, last.y, p.cursorPx.x, p.cursorPx.y, p.color, 1.0);
-              lastPlayerPxRef.current.set(p.id, { ...p.cursorPx });
-            }
-          }
-        }
-      } else {
-        // Off-mesh raycast: keep tool in front of the model facing the center
-        const camDir = camera.position.clone().normalize();
-        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camDir, new THREE.Vector3(0, 0, 0));
-        raycaster.ray.intersectPlane(plane, planeHit);
-        const toolPos = planeHit.clone().addScaledVector(camDir, 0.85);
-
-        p.worldPos = [toolPos.x, toolPos.y, toolPos.z];
-        p.surfacePoint = [planeHit.x, planeHit.y, planeHit.z];
-        p.surfaceNormal = [camDir.x, camDir.y, camDir.z];
-
-        if (p.isPainting && p.mode === 'motion') {
-          const last = lastPlayerPxRef.current.get(p.id) || p.cursorPx;
-          if (p.tool === 'spray') {
-            paintSurface.spray(p.cursorPx.x, p.cursorPx.y, p.color, 1.0);
-          } else if (p.tool === 'brush') {
-            paintSurface.brush(last.x, last.y, p.cursorPx.x, p.cursorPx.y, p.color, 1.0);
-            lastPlayerPxRef.current.set(p.id, { ...p.cursorPx });
-          }
-        }
-      }
-    });
-  });
-
-  return (
-    <>
-      <PerspectiveCamera makeDefault position={[0, 0, 7.6]} fov={55} />
-
-      <OrbitControls
-        ref={orbitControlsRef}
-        enableDamping
-        dampingFactor={0.06}
-        minDistance={3.5}
-        maxDistance={25}
-        autoRotate={autoRotate}
-        autoRotateSpeed={1.5}
-        maxPolarAngle={Math.PI / 2 + 0.15}
-        mouseButtons={
-          desktopPointerActive
-            ? { LEFT: undefined, RIGHT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY }
-            : { LEFT: THREE.MOUSE.ROTATE, RIGHT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY }
-        }
-      />
-
-      {/* Studio Lighting */}
-      <ambientLight intensity={0.65} />
-      <directionalLight position={[10, 15, 12]} intensity={1.8} castShadow />
-      <directionalLight position={[-12, 8, 10]} intensity={0.8} color="#38bdf8" />
-      <spotLight
-        position={[0, 8, 14]}
-        angle={0.7}
-        penumbra={0.8}
-        intensity={1.6}
-        color="#fff9f2"
-        target-position={[0, 0, 0]}
-      />
-
-      {/* 3D Target Object or Custom Uploaded 3D Model with Ref for Precision Raycasting & Desktop Painting */}
-      <group
-        ref={objectGroupRef}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
-        onPointerCancel={handlePointerUp}
-      >
-        <DecorateObjects3D
-          objectType={targetObject}
-          canvasTexture={paintSurface.texture}
-          custom3DGroup={custom3DGroup}
-        />
-      </group>
-
-      {/* Multiple Floating 3D Tools (One for each connected Player) */}
-      {players.map((player) => (
-        <Tools3D
-          key={player.id}
-          targetPosition={player.worldPos}
-          surfacePoint={player.surfacePoint}
-          surfaceNormal={player.surfaceNormal}
-          activeTool={player.tool}
-          isTriggerActive={player.isPainting}
-          color={player.color}
-          playerName={player.name}
-          playerSlot={player.slot}
-        />
-      ))}
-
-      {/* Multiplayer Aerosol Mist Particle System */}
-      <MultiPlayerSprayParticles players={players} />
-
-      {/* Floor Shadows */}
-      <ContactShadows position={[0, -6.0, 0]} opacity={0.75} scale={35} blur={2.4} far={15} />
-    </>
-  );
+  return null;
 }
 
-const TARGET_OBJECTS: { id: TargetObjectType; label: string; icon: string; category: string }[] = [
-  { id: 'easel', label: 'Studio Easel', icon: '🎨', category: 'Standard' },
-  { id: 'skateboard', label: 'Skate Deck', icon: '🛹', category: 'Standard' },
-  { id: 'subway', label: 'Subway Train', icon: '🚇', category: 'Standard' },
-  { id: 'boombox', label: 'Boombox 80s', icon: '📻', category: 'Standard' },
-  { id: 'wall', label: 'Brick Alley', icon: '🧱', category: 'Standard' },
-  { id: 'helmet', label: 'Cyber Helmet', icon: '🪖', category: '3D Objects' },
-  { id: 'sneaker', label: 'Street Sneaker', icon: '👟', category: '3D Objects' },
-  { id: 'vinyltoy', label: 'Vinyl Bear Toy', icon: '🧸', category: '3D Objects' },
-  { id: 'sculpture', label: 'Roman Bust', icon: '🗿', category: '3D Objects' },
-];
-
-const STYLE_TRANSFORM_PRESETS = [
+/**
+ * The style presets, as art.
+ *
+ * Each one ships a reference plate (`/ui/presets/*.webp`) showing what the
+ * transform actually lays down, so the picker is a row of small paintings
+ * rather than a row of labels. `id` is the wire value the AI endpoint expects
+ * and never changes; the plate filename is deliberately decoupled from it.
+ */
+const STYLE_PRESETS = [
   {
     id: 'cyberpunk',
-    name: 'Cyberpunk 2099',
-    icon: '⚡',
-    desc: 'Neon cyan/magenta glow, cybernetic vector grids, and chromatic edge flares.',
-    accent: '#06B6D4',
+    name: 'Cyberpunk',
+    art: '/ui/presets/preset-cyberpunk.webp',
+    desc: 'Neon grids and chromatic flare.',
+    accent: '#22D3EE',
   },
   {
     id: 'wildstyle80s',
-    name: 'Vintage 80s Subway',
-    icon: '👑',
-    desc: 'Heavy gravity paint drips, fat-cap highlights, and hot yellow-to-orange flares.',
-    accent: '#FF3D00',
+    name: 'Wildstyle 84',
+    art: '/ui/presets/preset-wildstyle.webp',
+    desc: 'Fat caps and gravity drips.',
+    accent: '#FF4D1C',
   },
   {
     id: 'banksy',
-    name: 'Banksy Stencil Dystopia',
-    icon: '👁',
-    desc: 'Gritty monochrome street wash with a single dripping red heart accent.',
-    accent: '#18181B',
+    name: 'Stencil',
+    art: '/ui/presets/preset-stencil.webp',
+    desc: 'Monochrome wash, one red accent.',
+    accent: '#E4E4E7',
   },
   {
     id: 'popart',
-    name: 'Pop-Art Ben-Day',
-    icon: '✦',
-    desc: 'Comic book halftone dot screens with saturated primary bursts.',
-    accent: '#F59E0B',
+    name: 'Pop Art',
+    art: '/ui/presets/preset-popart.webp',
+    desc: 'Ben-Day dots, primary bursts.',
+    accent: '#FFB020',
   },
   {
     id: 'cosmic',
-    name: 'Cosmic Nebula Aurora',
-    icon: '🚀',
-    desc: 'Deep ultraviolet nebulas, stardust galaxy scatter, and celestial flares.',
-    accent: '#8B5CF6',
+    name: 'Cosmic',
+    art: '/ui/presets/preset-cosmic.webp',
+    desc: 'Nebula haze and stardust.',
+    accent: '#A78BFA',
   },
 ];
+
+/** Where an AI-suggested stencil lands: centred, a little above the equator. */
+const AI_STAMP_UV = { u: 0.5, v: 0.35 };
+
+/** House ink for the copilot's paint-stroke buttons. */
+const AI_PAINT = 'linear-gradient(120deg, #7C3AED 0%, #A855F7 55%, #E879F9 100%)';
+
+/** Hex colours an AI answer offered, cleaned up for use as swatches. */
+function paletteOf(...values: unknown[]): string[] {
+  const flat = values.flatMap((value) => (Array.isArray(value) ? value : [value]));
+  const seen = new Set<string>();
+  return flat.filter(
+    (value): value is string =>
+      typeof value === 'string' &&
+      /^#[0-9a-f]{6}$/i.test(value.trim()) &&
+      !seen.has(value.toUpperCase()) &&
+      Boolean(seen.add(value.toUpperCase()))
+  );
+}
+
+/* ------------------------------------------------------------------
+   AI copilot presentation
+   ------------------------------------------------------------------ */
+
+/** One style preset, presented as a small painting with its own accent edge. */
+const PresetCard: React.FC<{
+  preset: (typeof STYLE_PRESETS)[number];
+  selected: boolean;
+  onSelect: () => void;
+}> = ({ preset, selected, onSelect }) => (
+  <button
+    type="button"
+    onClick={onSelect}
+    aria-pressed={selected}
+    className={`tap group relative flex flex-col overflow-hidden rounded-2xl border text-left transition-colors ${
+      selected ? 'border-white/40 bg-white/[0.12]' : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.08]'
+    }`}
+  >
+    <div className="relative h-[86px] shrink-0 overflow-hidden">
+      <img
+        src={preset.art}
+        alt=""
+        draggable={false}
+        className={`h-full w-full scale-[1.08] object-cover transition-transform duration-300 group-hover:scale-[1.14] ${
+          selected ? '' : 'opacity-80 saturate-[0.85]'
+        }`}
+      />
+      <span
+        aria-hidden
+        className="absolute inset-0"
+        style={{ background: 'linear-gradient(180deg, rgba(6,6,12,0) 38%, rgba(6,6,12,0.82) 100%)' }}
+      />
+      {selected && (
+        <span
+          className="absolute right-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-full"
+          style={{ background: preset.accent, boxShadow: `0 4px 14px -2px ${preset.accent}` }}
+        >
+          <Check size={11} className="text-black/80" />
+        </span>
+      )}
+    </div>
+    {/* The accent edge: a painted rule the width of the card. */}
+    <span
+      aria-hidden
+      className="block h-[2.5px] w-full transition-opacity"
+      style={{ background: preset.accent, opacity: selected ? 1 : 0.42 }}
+    />
+    <div className="px-2.5 pb-2.5 pt-2">
+      <div className="truncate text-[11.5px] font-bold tracking-tight text-white">{preset.name}</div>
+      <p className="mt-0.5 text-[9.5px] leading-snug text-white/45">{preset.desc}</p>
+    </div>
+  </button>
+);
+
+/** Colours an answer proposed, as a row of paint swatches. */
+const PaletteRow: React.FC<{
+  colors: string[];
+  active?: string;
+  onPick?: (hex: string) => void;
+}> = ({ colors, active, onPick }) =>
+  colors.length === 0 ? null : (
+    <div className="flex items-center gap-1.5">
+      {colors.map((hex) => {
+        const selected = active?.toUpperCase() === hex.toUpperCase();
+        return onPick ? (
+          <button
+            key={hex}
+            type="button"
+            onClick={() => onPick(hex)}
+            title={hex}
+            aria-label={`Use ${hex}`}
+            aria-pressed={selected}
+            className={`tap h-6 w-6 rounded-full border transition-transform ${
+              selected ? 'border-white/80 scale-110' : 'border-white/20 hover:border-white/50'
+            }`}
+            style={{ background: hex, boxShadow: selected ? `0 4px 14px -3px ${hex}` : undefined }}
+          />
+        ) : (
+          <span
+            key={hex}
+            title={hex}
+            className="h-5 w-5 rounded-full border border-white/20"
+            style={{ background: hex }}
+          />
+        );
+      })}
+    </div>
+  );
+
+/** The copilot's failure state — one quiet line, never a red wall. */
+const ResultNote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="mt-3.5 flex items-start gap-2 rounded-2xl border border-amber-400/25 bg-amber-400/[0.07] px-3.5 py-3 text-[11px] text-amber-200/90">
+    <AlertTriangle size={13} className="mt-px shrink-0" />
+    <span>{children}</span>
+  </div>
+);
+
+/** The stencil an answer suggested, drawn as the stamp it will actually place. */
+const StencilPreview: React.FC<{ asset: StampAsset; tint: string; size?: number }> = ({
+  asset,
+  tint,
+  size = 60,
+}) => (
+  <span
+    className="glass relative grid shrink-0 place-items-center rounded-2xl"
+    style={{ width: size, height: size }}
+  >
+    <span
+      aria-hidden
+      className="block h-[64%] w-[64%]"
+      style={{
+        background: tint,
+        WebkitMaskImage: `url(${asset.src})`,
+        maskImage: `url(${asset.src})`,
+        WebkitMaskSize: 'contain',
+        maskSize: 'contain',
+        WebkitMaskRepeat: 'no-repeat',
+        maskRepeat: 'no-repeat',
+        WebkitMaskPosition: 'center',
+        maskPosition: 'center',
+        filter: `drop-shadow(0 3px 10px ${tint}80)`,
+      }}
+    />
+  </span>
+);
+
+const HOST_ID = 'host-local';
+
+/**
+ * Ceiling on players minted from traffic alone. Presence caps the real room at
+ * MAX_PLAYERS; this only stops a peer that spams fresh ids from growing the
+ * roster without bound, so it sits above the roster size rather than at it.
+ */
+const MAX_REMOTE_PLAYERS = 8;
+/**
+ * How long a player minted from traffic outlives a roster that has not caught
+ * up with them. Long enough to cover a presence re-track after a drop, short
+ * enough that someone who genuinely left gives their slot colour back.
+ */
+const PROVISIONAL_GRACE_MS = 15000;
+
+function makeHost(color: string): PlayerState {
+  return {
+    id: HOST_ID,
+    slot: 0,
+    name: 'Studio',
+    color,
+    tool: 'spray',
+    isPainting: false,
+    cursorPx: { x: CANVAS_RES / 2, y: CANVAS_RES / 2 },
+    worldPos: [0, 0, 6],
+    pressure: 1,
+    sizeMultiplier: 1,
+    lastActive: Date.now(),
+    mode: 'motion',
+    isHost: true,
+  };
+}
 
 export default function CanvasView() {
   const { roomId } = useParams<{ roomId: string }>();
 
-  const paintSurface = useMemo(() => new PaintSurface(CANVAS_PIXEL_RES), []);
-  const [targetObject, setTargetObject] = useState<TargetObjectType>('easel');
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [autoRotate, setAutoRotate] = useState<boolean>(false);
+  const paintSurface = useMemo(() => new PaintSurface(CANVAS_RES), []);
+  const orbitRef = useRef<any>(null);
 
-  // Multiplayer State (Up to 4+ players)
-  const [players, setPlayers] = useState<PlayerState[]>([
-    {
-      id: 'p1_local',
-      slot: 1,
-      name: 'Host Tagger',
-      color: '#FF3D00',
-      tool: 'spray',
-      isPainting: false,
-      cursorPx: { x: 1024, y: 1024 },
-      worldPos: [0, 0, 0.05],
-      pressure: 1.0,
-      lastActive: Date.now(),
-      mode: 'motion',
-    },
-  ]);
+  const [objectId, setObjectId] = useState<TargetObjectType>('skateboard');
+  const objectIdRef = useRef(objectId);
+  useEffect(() => {
+    objectIdRef.current = objectId;
+  }, [objectId]);
+  /**
+   * Guards state responses: a peer that just (re)connected and still sits on
+   * defaults must not answer a state request and downgrade the room. It earns
+   * the right to answer by learning the room (applied state, changed object,
+   * painted) — or by incumbency, 8s connected with nobody contradicting it.
+   */
+  const roomStateKnown = useRef(false);
+  const connectedAt = useRef(Date.now());
+  const canAnswerState = () =>
+    roomStateKnown.current || Date.now() - connectedAt.current > 8000;
+  const [finish, setFinish] = useState<Finish>('original');
+  const [objectLoading, setObjectLoading] = useState(true);
 
-  // Uploaded 3D Model State
-  const [custom3DGroup, setCustom3DGroup] = useState<THREE.Group | null>(null);
-  const [uploadedModelInfo, setUploadedModelInfo] = useState<Uploaded3DModelInfo | null>(null);
-  const [uploadModalOpen, setUploadModalOpen] = useState<boolean>(false);
-  const [isUploadingModel, setIsUploadingModel] = useState<boolean>(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-
-  // Desktop Pointer / Mouse Spray Mode
-  const [desktopPointerActive, setDesktopPointerActive] = useState<boolean>(true);
   const [hostTool, setHostTool] = useState<'spray' | 'brush'>('spray');
-  const [hostColor, setHostColor] = useState<string>('#FF3D00');
+  const [hostColor, setHostColor] = useState('#FF4D1C');
+  const [hostSize, setHostSize] = useState(1);
+  const [stageMode, setStageMode] = useState<'paint' | 'stamp' | 'orbit'>('paint');
 
-  const handleHostColorChange = (hex: string) => {
-    setHostColor(hex);
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === 'p1_local' || p.slot === 1 ? { ...p, color: hex } : p))
-    );
-  };
+  /* ------------------------------ stamps ------------------------------ */
 
-  // Invite / QR Modal State
-  const [inviteModalOpen, setInviteModalOpen] = useState<boolean>(false);
-  const [copiedLink, setCopiedLink] = useState<boolean>(false);
+  const [stampLibrary, setStampLibrary] = useState<StampLibrary>(() => loadStampLibrary());
+  // Mirrored so the mutating helpers (which also write localStorage) run once
+  // per action rather than once per React updater invocation.
+  const libraryRef = useRef(stampLibrary);
+  const updateLibrary = useCallback((next: (library: StampLibrary) => StampLibrary) => {
+    libraryRef.current = next(libraryRef.current);
+    setStampLibrary(libraryRef.current);
+  }, []);
 
-  const orbitControlsRef = useRef<any>(null);
+  const [selectedStamp, setSelectedStamp] = useState<StampAsset | null>(BUILTIN_STAMPS[0]);
+  const [stampRotationDeg, setStampRotationDeg] = useState(0);
+  const [stampRandomise, setStampRandomise] = useState(true);
+  const [stampBusy, setStampBusy] = useState(false);
+  const [stampError, setStampError] = useState<string | null>(null);
+  const stampSeq = useRef(0);
+  /** Set by `StampPlacer`: the UV under the middle of the live frame. */
+  const pickCentreRef = useRef<(() => { u: number; v: number } | null) | null>(null);
+  /** Read by the in-canvas tap listener, which is bound once. */
+  const stampArmed = useRef(false);
+  stampArmed.current = stageMode === 'stamp' && Boolean(selectedStamp);
 
-  // AI Modal states & tabs
-  const [aiModalOpen, setAiModalOpen] = useState<boolean>(false);
-  const [aiTab, setAiTab] = useState<'transform' | 'generate' | 'critique'>('transform');
-  const [selectedStylePreset, setSelectedStylePreset] = useState<string>('cyberpunk');
-  const [aiPrompt, setAiPrompt] = useState<string>('NEON OVERDRIVE');
-  const [aiLoading, setAiLoading] = useState<boolean>(false);
-  const [transformResult, setTransformResult] = useState<any>(null);
-  const [aiResult, setAiResult] = useState<any>(null);
-  const [critiqueResult, setCritiqueResult] = useState<any>(null);
+  const [muted, setMuted] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [autoRotate, setAutoRotate] = useState(false);
+  const [connection, setConnection] = useState<
+    'connecting' | 'connected' | 'reconnecting' | 'offline'
+  >('connecting');
 
-  const controllerUrl = `${window.location.origin}/controller/${roomId}`;
-
-  const setCameraAngle = (azimuth: number, polar: number) => {
-    if (!orbitControlsRef.current) return;
-    sounds.playClick(1.2);
-    orbitControlsRef.current.setAzimuthalAngle(azimuth);
-    orbitControlsRef.current.setPolarAngle(polar);
-    orbitControlsRef.current.minDistance = 3.5;
-    orbitControlsRef.current.maxDistance = 25;
-    orbitControlsRef.current.update();
-  };
-
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen().catch(() => {});
-      setIsFullscreen(false);
+  const [objectSheet, setObjectSheet] = useState(false);
+  /** Players whose gestures are allowed to rotate the studio camera. */
+  const [cameraSyncIds, setCameraSyncIds] = useState<Set<string>>(new Set());
+  const cameraSyncRef = useRef(cameraSyncIds);
+  useEffect(() => {
+    cameraSyncRef.current = cameraSyncIds;
+  }, [cameraSyncIds]);
+  const [inviteSheet, setInviteSheet] = useState(false);
+  // Fresh studio from the landing page: put the invite QR front and centre so
+  // the creator can hand phones in immediately. If the first-run guide is up,
+  // the invite follows it once the guide closes.
+  const location = useLocation();
+  const pendingInvite = useRef<boolean>((location.state as any)?.justCreated === true);
+  // First-run guide: shown once per browser, reopenable from the help button.
+  const [guideOpen, setGuideOpen] = useState(() => {
+    try {
+      return localStorage.getItem('airo:guide:studio') !== '1';
+    } catch {
+      return true;
+    }
+  });
+  const closeGuide = () => {
+    setGuideOpen(false);
+    try {
+      localStorage.setItem('airo:guide:studio', '1');
+    } catch {
+      /* private mode */
     }
   };
+  useEffect(() => {
+    if (pendingInvite.current && !guideOpen) {
+      pendingInvite.current = false;
+      setInviteSheet(true);
+      // Consume the navigation state so a refresh doesn't re-open the modal.
+      window.history.replaceState({}, '');
+    }
+  }, [guideOpen]);
+  const [aiSheet, setAiSheet] = useState(false);
+  const [uploadSheet, setUploadSheet] = useState(false);
+  const [copied, setCopied] = useState(false);
+  // Showcase: cinematic turntable video export of the painted piece.
+  const [showcaseOpen, setShowcaseOpen] = useState(false);
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Player roster. A ref mirrors it because the render loop mutates player
+  // transforms every frame and must not trigger React re-renders.
+  const [players, setPlayers] = useState<PlayerState[]>([makeHost('#FF4D1C')]);
+  const playersRef = useRef<PlayerState[]>(players);
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+
+  /**
+   * Resolves the sender of a packet, minting them if presence has not placed
+   * them on the roster yet.
+   *
+   * Presence and broadcast are separate guarantees: a controller whose
+   * `track` is still retrying — or whose sync simply has not landed here yet —
+   * broadcasts motion, stamps and actions perfectly well. Dropping that
+   * traffic is what produced "I can see them spraying but their remote never
+   * shows up on my screen". The entry is provisional: the presence roster
+   * overwrites the guessed name, colour and slot the moment it arrives.
+   */
+  const ensurePlayer = useCallback(
+    (
+      playerId: unknown,
+      hints?: {
+        name?: unknown;
+        tool?: 'spray' | 'brush';
+        color?: unknown;
+        mode?: 'motion' | 'projection';
+      }
+    ): PlayerState | null => {
+      if (typeof playerId !== 'string' || !playerId || playerId === HOST_ID) return null;
+      const known = playersRef.current.find((p) => p.id === playerId);
+      if (known) return known;
+      const remotes = playersRef.current.filter((p) => !p.isHost);
+      if (remotes.length >= MAX_REMOTE_PLAYERS) return null;
+      const taken = new Set(remotes.map((p) => p.color));
+      const player: PlayerState = {
+        id: playerId,
+        slot: remotes.length + 1,
+        name: typeof hints?.name === 'string' && hints.name ? hints.name : `Player ${remotes.length + 1}`,
+        color:
+          (typeof hints?.color === 'string' && hints.color) ||
+          SLOT_COLORS.find((c) => !taken.has(c)) ||
+          SLOT_COLORS[remotes.length % SLOT_COLORS.length],
+        tool: hints?.tool ?? 'spray',
+        isPainting: false,
+        cursorPx: { x: CANVAS_RES / 2, y: CANVAS_RES / 2 },
+        worldPos: [0, 0, 6],
+        pressure: 1,
+        sizeMultiplier: 1,
+        lastActive: Date.now(),
+        mode: hints?.mode ?? 'motion',
+      };
+      // Written into the ref synchronously, not just queued through setState:
+      // the packet that revealed this player is applied to the returned object
+      // in this same tick, and a motion sample dropped here is a lost frame.
+      playersRef.current = [...playersRef.current, player];
+      setPlayers(playersRef.current);
+      return player;
+    },
+    []
+  );
+
+  const [customGroup, setCustomGroup] = useState<THREE.Group | null>(null);
+  const [customInfo, setCustomInfo] = useState<Uploaded3DModelInfo | null>(null);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const [aiTab, setAiTab] = useState<'style' | 'concept' | 'critique'>('style');
+  const [stylePreset, setStylePreset] = useState('cyberpunk');
+  const [aiPrompt, setAiPrompt] = useState('NEON OVERDRIVE');
+  const [aiBusy, setAiBusy] = useState(false);
+  /**
+   * Colour an AI stencil is stamped in. Seeded from whatever palette the last
+   * answer proposed and overridable by tapping a swatch; null means "whatever
+   * the painter is holding".
+   */
+  const [aiTint, setAiTint] = useState<string | null>(null);
+  const [styleResult, setStyleResult] = useState<any>(null);
+  const [conceptResult, setConceptResult] = useState<any>(null);
+  const [critiqueResult, setCritiqueResult] = useState<any>(null);
+
+  const connectionRef = useRef<AiroConnection | null>(null);
+  const controllerUrl = `${window.location.origin}/controller/${roomId}`;
+
+  // Fold admin-uploaded models into the picker once the registry answers.
+  const [, setCatalogTick] = useState(0);
+  useEffect(() => {
+    ensureCustomModels().then((count) => count > 0 && setCatalogTick((t) => t + 1));
+  }, []);
+
+  /**
+   * Rebroadcasts stamps the studio painted (host pointer strokes and the paint
+   * it derives for motion-aiming phones) so controllers' local textures track
+   * the studio's. One batcher per painter identity, keyed with the tool+colour
+   * the batch was painted with.
+   */
+  const stampBatchers = useRef(
+    new Map<string, { batcher: StampBatcher; tool: 'spray' | 'brush'; color: string; strokeId: string }>()
+  );
+  const broadcastStamps = useCallback(
+    (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[], strokeId: string) => {
+      roomStateKnown.current = true;
+      let entry = stampBatchers.current.get(playerId);
+      if (!entry || entry.tool !== tool || entry.color !== color || entry.strokeId !== strokeId) {
+        entry?.batcher.dispose();
+        const batcher = new StampBatcher((batch, state) => {
+          connectionRef.current?.emit('paint-stamps', {
+            playerId,
+            tool,
+            color,
+            state,
+            strokeId,
+            stamps: packStamps(batch),
+          } satisfies StampPacket as unknown as Record<string, unknown>);
+        });
+        entry = { batcher, tool, color, strokeId };
+        stampBatchers.current.set(playerId, entry);
+        entry.batcher.begin();
+      }
+      entry.batcher.push(stamps);
+    },
+    []
+  );
+  useEffect(
+    () => () => {
+      for (const { batcher } of stampBatchers.current.values()) batcher.dispose();
+    },
+    []
+  );
+
+  /** Applies `image-stamp` broadcasts, decode-serialised so order holds. */
+  const applyImageStamp = useMemo(() => createStampApplier(paintSurface), [paintSurface]);
+
+  /* --------------------------- networking --------------------------- */
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    if (!roomId) return;
+    if (!isRealtimeConfigured()) {
+      setConnection('offline');
+      return;
+    }
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'f') {
-        toggleFullscreen();
+    const conn = new AiroConnection(roomId, {
+      id: HOST_ID,
+      role: 'canvas',
+      name: 'Studio',
+      tool: 'spray',
+      mode: 'motion',
+    }).connect();
+    connectionRef.current = conn;
+
+    conn.on('connection', ({ status }) => {
+      setConnection(
+        status === 'connected'
+          ? 'connected'
+          : status === 'reconnecting'
+            ? 'reconnecting'
+            : status === 'error'
+              ? 'offline'
+              : 'connecting'
+      );
+      if (status === 'connected') {
+        connectedAt.current = Date.now();
+        conn.emit('request-state', { playerId: HOST_ID });
       }
-    };
-    window.addEventListener('keydown', handleKeyDown);
+    });
+
+    // A peer answered our state request: adopt the room's object and bake
+    // their artwork in as our baseline.
+    conn.on('canvas-state', ({ target, dataUrl, objectType }) => {
+      if (target !== HOST_ID) return;
+      roomStateKnown.current = true;
+      if (objectType && objectType !== objectIdRef.current) {
+        ensureCustomModels().finally(() => setObjectId(objectType));
+      }
+      if (typeof dataUrl === 'string' && dataUrl.length > 100) {
+        const image = new Image();
+        image.onload = () => {
+          paintSurface.setBaseline(image);
+          paintSurface.commit();
+        };
+        image.src = dataUrl;
+      }
+    });
+
+    conn.on('player-list-update', (roster: any[]) => {
+      setPlayers((prev) => {
+        const host = prev.find((p) => p.isHost) ?? makeHost(hostColor);
+        const next: PlayerState[] = [host];
+        for (const entry of roster) {
+          const existing = prev.find((p) => p.id === entry.id);
+          next.push(
+            existing
+              ? {
+                  ...existing,
+                  slot: entry.slot,
+                  name: entry.name,
+                  color: entry.color,
+                  mode: entry.mode,
+                  tool: entry.tool ?? existing.tool,
+                }
+              : {
+                  id: entry.id,
+                  slot: entry.slot,
+                  name: entry.name,
+                  color: entry.color,
+                  tool: entry.tool ?? 'spray',
+                  isPainting: false,
+                  cursorPx: { x: CANVAS_RES / 2, y: CANVAS_RES / 2 },
+                  worldPos: [0, 0, 6],
+                  pressure: 1,
+                  sizeMultiplier: 1,
+                  lastActive: Date.now(),
+                  mode: entry.mode ?? 'motion',
+                }
+          );
+        }
+        // Players minted from traffic survive a roster that has not listed
+        // them yet — evicting someone mid-stroke because their presence record
+        // is a beat behind is the ghost bug all over again. They keep their own
+        // slot number so a badge cannot be claimed twice, and age out through
+        // the roster once they go quiet.
+        const now = Date.now();
+        for (const p of prev) {
+          if (p.isHost || next.some((n) => n.id === p.id)) continue;
+          if (now - p.lastActive < PROVISIONAL_GRACE_MS) next.push({ ...p, slot: next.length });
+        }
+        return next;
+      });
+    });
+
+    // Motion arrives at ~30 Hz. Mutating the ref (rather than setState) keeps
+    // it off the React render path; the scene reads it every frame anyway.
+    conn.on('motion', ({ playerId, x, y }) => {
+      if (typeof x !== 'number') return;
+      const player = playersRef.current.find((p) => p.id === playerId) ?? ensurePlayer(playerId);
+      if (!player) return;
+      player.cursorPx.x = x * CANVAS_RES;
+      player.cursorPx.y = y * CANVAS_RES;
+      // Arrival-stamped for the scene's jitter-buffer interpolation — the
+      // stamp must be taken here, at delivery, not when the frame loop reads.
+      (player.cursorSamples ??= []).push({ x, y, at: performance.now() });
+      if (player.cursorSamples.length > 60) {
+        player.cursorSamples.splice(0, player.cursorSamples.length - 60);
+      }
+      player.lastActive = Date.now();
+    });
+
+    conn.on('action', ({ playerId, action, state, color, size }) => {
+      const player =
+        playersRef.current.find((p) => p.id === playerId) ??
+        ensurePlayer(playerId, { tool: action, color });
+      if (!player) return;
+      const painting = state === 'start';
+      player.tool = action || player.tool;
+      if (color) player.color = color;
+      if (typeof size === 'number') player.sizeMultiplier = size;
+      player.isPainting = painting;
+      player.mode = 'motion';
+      if (painting) {
+        if (player.tool === 'spray') sounds.startSpray(1);
+        else sounds.startBrush();
+      } else {
+        sounds.stopSpray();
+        sounds.stopBrush();
+      }
+      // Mirror into state so the roster badges reflect who is painting.
+      setPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, isPainting: painting } : p)));
+    });
+
+    // Phones painting by touch resolve their own surface raycasts and send the
+    // resulting stamps; the studio applies them verbatim so every peer's
+    // texture is identical.
+    conn.on('paint-stamps', (packet: StampPacket) => {
+      const { playerId, tool, color, state, stamps, cursor, point, normal } = packet;
+      const player =
+        playersRef.current.find((p) => p.id === playerId) ??
+        ensurePlayer(playerId, { name: packet.playerName, tool, color, mode: 'projection' });
+      if (player) {
+        player.tool = tool || player.tool;
+        if (color) player.color = color;
+        player.mode = 'projection';
+        player.isPainting = state !== 'end';
+        if (cursor) {
+          player.cursorPx.x = cursor[0] * CANVAS_RES;
+          player.cursorPx.y = cursor[1] * CANVAS_RES;
+        }
+        // Touch-painting phones know their true surface contact; use it to
+        // place their floating tool instead of guessing from a screen ray.
+        if (point) {
+          player.worldPos = point;
+          player.surfacePoint = point;
+          player.surfaceNormal = normal ?? [0, 0, 1];
+        }
+        player.lastActive = Date.now();
+      }
+      if (state === 'start') {
+        if (tool === 'spray') sounds.startSpray(1);
+        else sounds.startBrush();
+      } else if (state === 'end') {
+        sounds.stopSpray();
+        sounds.stopBrush();
+      }
+      if (stamps?.length) {
+        paintSurface.applyStamps(unpackStamps(stamps), tool, color, packet.strokeId);
+        paintSurface.commit();
+      }
+    });
+
+    // A stamp placed anywhere in the room. UV-anchored, so it lands on the
+    // same spot of the model here as it did on the peer that placed it.
+    conn.on('image-stamp', (payload: ImageStampData) => {
+      applyImageStamp(payload);
+      sounds.playClick(1.35);
+    });
+
+    conn.on('redo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.redoStroke(strokeId)) paintSurface.commit();
+    });
+    conn.on('undo-stroke', ({ strokeId }) => {
+      if (strokeId && paintSurface.undoStroke(strokeId)) {
+        paintSurface.commit();
+        sounds.playWhoosh();
+      }
+    });
+
+    // A phone's orbit gesture steers the studio camera — but only for players
+    // the host has toggled on, so ten people can't fight over the view.
+    conn.on('camera-sync', ({ playerId, azimuth, polar, distanceRatio }) => {
+      if (!playerId || !cameraSyncRef.current.has(playerId)) return;
+      const controls = orbitRef.current;
+      if (!controls) return;
+      controls.setAzimuthalAngle(azimuth);
+      controls.setPolarAngle(polar);
+      if (typeof distanceRatio === 'number') {
+        const min = controls.minDistance || 1;
+        const max = controls.maxDistance || min + 1;
+        const dist = min + (max - min) * Math.min(Math.max(distanceRatio, 0), 1);
+        const cam = controls.object as THREE.PerspectiveCamera;
+        const dir = cam.position.clone().sub(controls.target).normalize().multiplyScalar(dist);
+        cam.position.copy(controls.target).add(dir);
+      }
+      controls.update();
+    });
+
+    // Late joiners ask for the artwork as it stands; answer with a downscaled
+    // snapshot they bake in as a baseline. Throttled per requester.
+    const lastStateSend = new Map<string, number>();
+    conn.on('request-state', ({ playerId }) => {
+      if (!playerId) return;
+      const now = Date.now();
+      if (now - (lastStateSend.get(playerId) ?? 0) < 4000) return;
+      lastStateSend.set(playerId, now);
+      if (!canAnswerState()) return;
+      const dataUrl = paintSurface.toSyncDataURL(1024);
+      // The object choice always syncs; the artwork rides along when it is
+      // non-trivial and within the broadcast size budget.
+      const withArt = dataUrl.length >= 2000 && dataUrl.length <= 900000;
+      conn.emit('canvas-state', {
+        target: playerId,
+        objectType: objectIdRef.current,
+        ...(withArt ? { dataUrl } : {}),
+      });
+    });
+
+    conn.on('change-object', ({ objectType }) => {
+      roomStateKnown.current = true;
+      if (objectType) ensureCustomModels().finally(() => setObjectId(objectType));
+    });
+
+    conn.on('settings', ({ playerId, color, tool, size, playerName }) => {
+      ensurePlayer(playerId, { name: playerName, tool, color });
+      setPlayers((prev) =>
+        prev.map((p) =>
+          p.id === playerId
+            ? {
+                ...p,
+                color: color ?? p.color,
+                tool: tool ?? p.tool,
+                sizeMultiplier: size ?? p.sizeMultiplier,
+                name: playerName ?? p.name,
+              }
+            : p
+        )
+      );
+    });
+
+    conn.on('clear-canvas', () => {
+      paintSurface.clear();
+      sounds.playWhoosh();
+    });
+    conn.on('shake', () => sounds.playCanRattle());
+    // Legacy AI stencil broadcast. Peers on an older build still send a symbol
+    // character; it is resolved to a real stencil and applied through the
+    // image-stamp pipeline, so it lands as a proper undoable stamp rather than
+    // as typeset text in the middle of the texture.
+    conn.on('ai-stamp', ({ stencilSymbol, color, stampId }) => {
+      const asset = stampForSymbol(stencilSymbol);
+      stampPayload(asset)
+        .then((img) =>
+          applyImageStamp({
+            img,
+            u: AI_STAMP_UV.u,
+            v: AI_STAMP_UV.v,
+            radiusPx: stampRadiusPx(1.5),
+            rotation: 0,
+            tint: typeof color === 'string' ? color : '#FF4D1C',
+            stampId: stampId || `ai#${Math.random().toString(36).slice(2, 9)}`,
+          })
+        )
+        .catch((err) => console.error('[ai-stamp] could not prepare stencil', err));
+      sounds.playWhoosh();
+    });
+
+    // Test hook (only with ?debug in the URL): lets automated verification
+    // drive the remote-player path without a live network.
+    if (new URLSearchParams(window.location.search).has('debug')) {
+      (window as any).__airoSim = (event: string, payload: unknown) =>
+        conn.simulateIncoming(event as any, payload);
+      (window as any).__airoProbe = () =>
+        playersRef.current.map((p) => ({
+          id: p.id,
+          cursor: { ...p.cursorPx },
+          painting: p.isPainting,
+          mode: p.mode,
+          world: [...p.worldPos],
+        }));
+      // The roster as the render loop sees it, so verification can assert that
+      // a peer who is sending traffic actually has a cursor here.
+      (window as any).__airoPlayers = () =>
+        playersRef.current.map((p) => ({
+          id: p.id,
+          isHost: !!p.isHost,
+          isPainting: p.isPainting,
+          x: p.cursorPx.x,
+          y: p.cursorPx.y,
+        }));
+      // Samples the paint layer itself — no camera, no model, no shader — so
+      // stamp/undo assertions can be made on what actually landed.
+      (window as any).__airoPaintProbe = (u: number, v: number) =>
+        paintSurface.samplePaint(u, v);
+    }
 
     return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      window.removeEventListener('keydown', handleKeyDown);
+      conn.disconnect();
+      connectionRef.current = null;
+      delete (window as any).__airoSim;
+      delete (window as any).__airoPlayers;
+      delete (window as any).__airoPaintProbe;
+      sounds.stopSpray();
+      sounds.stopBrush();
+    };
+    // hostColor is only read for the initial host record; re-subscribing on
+    // every colour change would tear down the channel mid-session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, paintSurface]);
+
+  /* ------------------------------ effects ------------------------------ */
+
+  useEffect(() => {
+    // Warm the two most likely next objects so switching feels instant.
+    prefetchModels(['tool-spraycan', 'tool-brush'], null);
+  }, []);
+
+  const undoRef = useRef<() => void>(() => {});
+  const redoRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const onFsChange = () => setFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFsChange);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const key = e.key.toLowerCase();
+      if (key === 'f') toggleFullscreen();
+      if (key === 'b') setHostTool((t) => (t === 'spray' ? 'brush' : 'spray'));
+      if (key === 'o') setStageMode((m) => (m === 'orbit' ? 'paint' : 'orbit'));
+      if (key === 's') setStageMode((m) => (m === 'stamp' ? 'paint' : 'stamp'));
+      if (key === 'z' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        if (e.shiftKey) redoRef.current();
+        else undoRef.current();
+      }
+      if (key === 'y' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        redoRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      window.removeEventListener('keydown', onKey);
     };
   }, []);
 
-  const toggleMute = () => {
-    const muted = sounds.toggleMute();
-    setIsMuted(muted);
-    if (!muted) sounds.playClick(1.3);
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    else document.exitFullscreen().catch(() => {});
   };
 
-  const handleClearCanvas = () => {
+  const setCameraAngle = (azimuth: number, polar: number) => {
+    const controls = orbitRef.current;
+    if (!controls) return;
+    sounds.playClick(1.2);
+    controls.setAzimuthalAngle(azimuth);
+    controls.setPolarAngle(polar);
+    controls.update();
+  };
+
+  const changeObject = useCallback(
+    (next: TargetObjectType) => {
+      setObjectId(next);
+      sounds.playClick(1.3);
+      roomStateKnown.current = true;
+      connectionRef.current?.emit('change-object', { objectType: next });
+    },
+    []
+  );
+
+  const handleHostColor = (hex: string) => {
+    setHostColor(hex);
+    setPlayers((prev) => prev.map((p) => (p.isHost ? { ...p, color: hex } : p)));
+  };
+
+  const clearCanvas = () => {
     paintSurface.clear();
+    paintSurface.commit();
     sounds.playWhoosh();
+    connectionRef.current?.emit('clear-canvas', {});
   };
 
-  const handleDownloadSnapshot = () => {
+  const undoLast = useCallback(() => {
+    const strokeId = paintSurface.lastStrokeId();
+    if (!strokeId) return;
+    paintSurface.undoStroke(strokeId);
+    paintSurface.commit();
+    sounds.playClick(1.1);
+    connectionRef.current?.emit('undo-stroke', { strokeId });
+  }, [paintSurface]);
+  undoRef.current = undoLast;
+
+  const redoLast = useCallback(() => {
+    const strokeId = paintSurface.redoStroke();
+    if (!strokeId) return;
+    paintSurface.commit();
+    sounds.playClick(1.25);
+    connectionRef.current?.emit('redo-stroke', { strokeId });
+  }, [paintSurface]);
+  redoRef.current = redoLast;
+
+  /* ---------------------------- stamp actions ---------------------------- */
+
+  /**
+   * Places any stamp at a surface UV: applied here first so the studio never
+   * waits on the network, then broadcast for every peer. The stamp id doubles
+   * as its stroke id, which is what makes one placement one undoable unit
+   * everywhere in the room.
+   *
+   * Everything that puts a stamp on the model goes through here — the tray, a
+   * tap on the stage, and the AI copilot's suggestions — so all three converge
+   * identically and undo the same way.
+   */
+  const placeStampAsset = async (
+    asset: StampAsset,
+    u: number,
+    v: number,
+    options: { tint?: string; sizeMultiplier?: number; rotation?: number } = {}
+  ): Promise<boolean> => {
+    const rotation =
+      options.rotation ??
+      (stampRandomise ? (Math.random() - 0.5) * 0.36 : (stampRotationDeg * Math.PI) / 180);
+    const tint = asset.tintable ? options.tint || hostColor : null;
+    const radiusPx = stampRadiusPx(options.sizeMultiplier ?? hostSize);
+    const stampId = `${HOST_ID}#stamp${++stampSeq.current}`;
+
+    try {
+      const img = await stampPayload(asset);
+      const image = await decodeStampImage(img);
+      paintSurface.stampImage(image, u, v, radiusPx, rotation, tint, stampId);
+      paintSurface.commit();
+      sounds.playWhoosh();
+      roomStateKnown.current = true;
+      updateLibrary((library) => markRecent(library, asset.id));
+      connectionRef.current?.emit('image-stamp', {
+        playerId: HOST_ID,
+        stampId,
+        img,
+        u,
+        v,
+        radiusPx,
+        rotation,
+        ...(tint ? { tint } : {}),
+      });
+      return true;
+    } catch (err) {
+      console.error('[stamp] placement failed', err);
+      setStampError('That stamp could not be prepared. Try another one.');
+      return false;
+    }
+  };
+
+  /** A tap on the stage places whatever the tray has selected. */
+  const placeStamp = (u: number, v: number) => {
+    if (selectedStamp) void placeStampAsset(selectedStamp, u, v);
+  };
+
+  const handleStampUpload = async (file: File) => {
+    setStampBusy(true);
+    setStampError(null);
+    try {
+      const asset = await stampFromFile(file);
+      updateLibrary((library) => addUpload(library, asset));
+      setSelectedStamp(asset);
+      sounds.playClick(1.4);
+    } catch (err: any) {
+      setStampError(err?.message || 'Could not use that image as a stamp.');
+    } finally {
+      setStampBusy(false);
+    }
+  };
+
+  const [replaying, setReplaying] = useState(false);
+  const replayArtwork = async () => {
+    if (paintSurface.isReplaying) return;
+    setReplaying(true);
+    sounds.playWhoosh();
+    await paintSurface.replayTimelapse(4200);
+    setReplaying(false);
+  };
+
+  const saveSnapshot = () => {
     sounds.playClick(1.6);
     const link = document.createElement('a');
-    link.download = `AeroCanvas-${targetObject}-${roomId || 'art'}-${Date.now()}.png`;
-    link.href = paintSurface.canvas.toDataURL('image/png');
+    const label = OBJECT_BY_ID.get(objectId)?.label.replace(/\s+/g, '-') ?? objectId;
+    link.download = `AiroHub-${label}-${roomId || 'art'}.png`;
+    link.href = paintSurface.toExportDataURL();
     link.click();
   };
 
-  // 3D Model File Upload Handler
-  const handleFileUpload = async (file: File) => {
-    setIsUploadingModel(true);
+  const handleUpload = async (file: File) => {
+    setUploadBusy(true);
     setUploadError(null);
-    sounds.playClick(1.4);
-
     try {
-      const result: Parsed3DModelResult = await parseUploaded3DModel(file, paintSurface.texture);
-      setCustom3DGroup(result.group);
-      setUploadedModelInfo(result.info);
-      setTargetObject('custom3d');
+      const result = await parseUploaded3DModel(file, paintSurface.texture);
+      setCustomGroup(result.group);
+      setCustomInfo(result.info);
+      setObjectId('custom3d');
       sounds.playWhoosh();
-      setUploadModalOpen(false);
+      setUploadSheet(false);
     } catch (err: any) {
-      console.error('3D model load error:', err);
-      setUploadError(err?.message || 'Failed to parse 3D model. Please try another GLB/GLTF/OBJ/STL file.');
+      setUploadError(err?.message || 'Could not read that model. Try a GLB, GLTF, OBJ or STL file.');
     } finally {
-      setIsUploadingModel(false);
+      setUploadBusy(false);
     }
   };
 
-  // AI Style Transformation
-  const handleTransformArtwork = async () => {
-    setAiLoading(true);
-    sounds.playClick(1.4);
-    try {
-      const res = await fetch('/api/ai/transform-style', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          preset: selectedStylePreset,
-          objectType: targetObject,
-          customPrompt: aiPrompt,
-        }),
-      });
-      const data = await res.json();
-      setTransformResult(data);
-
-      if (selectedStylePreset === 'cyberpunk') {
-        paintSurface.applyCyberpunkStyle(data.accentColor, data.secondaryColor, data.tagText);
-      } else if (selectedStylePreset === 'wildstyle80s') {
-        paintSurface.applyWildstyleDrips(data.accentColor, data.tagText);
-      } else if (selectedStylePreset === 'banksy') {
-        paintSurface.applyBanksyFilter(data.accentColor, data.tagText);
-      } else if (selectedStylePreset === 'popart') {
-        paintSurface.applyPopArtDots(data.accentColor, data.tagText);
-      } else if (selectedStylePreset === 'cosmic') {
-        paintSurface.applyCosmicNebula(data.accentColor, data.secondaryColor, data.tagText);
-      }
-
-      sounds.playWhoosh();
-    } catch (e) {
-      console.error('Style transform error:', e);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleGenerateAiTag = async () => {
-    setAiLoading(true);
-    sounds.playClick(1.4);
-    try {
-      const res = await fetch('/api/ai/graffiti-tag', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: aiPrompt, style: 'wildstyle' }),
-      });
-      const data = await res.json();
-      setAiResult(data);
-    } catch (e) {
-      console.error('AI tag generation error:', e);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleGenerateAiCritique = async () => {
-    setAiLoading(true);
-    sounds.playClick(1.4);
-    try {
-      const res = await fetch('/api/ai/critique', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ objectType: targetObject, dominantColor: '#FF3D00' }),
-      });
-      const data = await res.json();
-      setCritiqueResult(data);
-    } catch (e) {
-      console.error('AI critique error:', e);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const handleStampAiConcept = () => {
-    if (!aiResult) return;
-    const symbol = aiResult.stencilSymbol || '⚡';
-    const text = aiResult.graffitiText || aiPrompt;
-    paintSurface.stampSymbol(symbol, 1024, 1024, '#FF3D00', text);
-    sounds.playWhoosh();
-    setAiModalOpen(false);
-  };
-
-  const copyControllerLink = () => {
+  const copyLink = () => {
     navigator.clipboard.writeText(controllerUrl);
-    setCopiedLink(true);
+    setCopied(true);
     sounds.playClick(1.5);
-    setTimeout(() => setCopiedLink(false), 2000);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  /* -------------------------------- AI -------------------------------- */
+
+  const callAi = async (path: string, body: unknown) => {
+    const res = await fetch(`/api/ai/${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`AI request failed (${res.status})`);
+    return res.json();
+  };
+
+  const applyStyle = async () => {
+    setAiBusy(true);
+    sounds.playClick(1.4);
+    try {
+      const data = await callAi('transform-style', {
+        preset: stylePreset,
+        objectType: objectId,
+        customPrompt: aiPrompt,
+      });
+      setStyleResult(data);
+      setAiTint(paletteOf(data.accentColor, data.secondaryColor)[0] ?? null);
+      const apply: Record<string, () => void> = {
+        cyberpunk: () => paintSurface.applyCyberpunkStyle(data.accentColor, data.secondaryColor, data.tagText),
+        wildstyle80s: () => paintSurface.applyWildstyleDrips(data.accentColor, data.tagText),
+        banksy: () => paintSurface.applyBanksyFilter(data.accentColor, data.tagText),
+        popart: () => paintSurface.applyPopArtDots(data.accentColor, data.tagText),
+        cosmic: () => paintSurface.applyCosmicNebula(data.accentColor, data.secondaryColor, data.tagText),
+      };
+      apply[stylePreset]?.();
+      paintSurface.commit();
+      sounds.playWhoosh();
+    } catch (err) {
+      console.error(err);
+      setStyleResult({ error: 'The style engine is unavailable right now.' });
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const generateConcept = async () => {
+    setAiBusy(true);
+    sounds.playClick(1.3);
+    try {
+      const data = await callAi('graffiti-tag', { prompt: aiPrompt, style: 'wildstyle' });
+      setConceptResult(data);
+      setAiTint(paletteOf(data.recommendedPalette)[0] ?? null);
+    } catch {
+      setConceptResult({ error: 'The concept generator is unavailable right now.' });
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const generateCritique = async () => {
+    setAiBusy(true);
+    try {
+      setCritiqueResult(await callAi('critique', { objectType: objectId, dominantColor: hostColor }));
+    } catch {
+      setCritiqueResult({ error: 'The appraisal service is unavailable right now.' });
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  /**
+   * Puts an AI suggestion on the model.
+   *
+   * The old version typed the suggested character into the middle of the
+   * texture at 260px and called it a stencil. It now resolves to one of the
+   * shipped stencils and goes out as a normal `image-stamp`, so the studio,
+   * every phone and the undo stack all agree about what just happened — and it
+   * lands on the face of the model you are currently looking at.
+   */
+  const stampSuggestion = async (symbol: string | undefined, tint: string) => {
+    const spot = pickCentreRef.current?.() ?? AI_STAMP_UV;
+    const placed = await placeStampAsset(stampForSymbol(symbol), spot.u, spot.v, {
+      tint,
+      // Same size a hand-placed stamp gets: the tray's radius is already tuned
+      // to sit inside a single UV chart on these atlased models.
+      sizeMultiplier: hostSize,
+      // A hand-placed stencil is never perfectly square to the object.
+      rotation: (Math.random() - 0.5) * 0.28,
+    });
+    if (placed) setAiSheet(false);
   };
 
   if (!roomId) {
-    return <div className="min-h-screen bg-[#080808] text-white flex items-center justify-center">Invalid Room</div>;
+    return (
+      <div className="min-h-screen grid place-items-center stage-vignette text-white">
+        <GlassPanel className="p-8 text-center">
+          <p className="text-sm">That studio link is missing a room code.</p>
+        </GlassPanel>
+      </div>
+    );
   }
 
+  const remotePlayers = players.filter((p) => !p.isHost);
+  const activeObject = OBJECT_BY_ID.get(objectId);
+  /** What an AI stencil would be stamped in right now. */
+  const activeAiTint = aiTint || hostColor;
+
+  const showcaseHandles: ShowcaseHandles = useMemo(
+    () => ({
+      getCanvas: () => glCanvasRef.current,
+      getOrbit: () => orbitRef.current,
+      roomId: roomId ?? 'studio',
+    }),
+    [roomId]
+  );
+
   return (
-    <div className="h-screen w-screen bg-[#080808] text-[#D1D1D1] flex flex-col font-sans overflow-hidden select-none relative">
-      {/* ========================================================
-          TOP NAVIGATION HEADER
-          ======================================================== */}
-      {!isFullscreen && (
-        <nav className="h-16 px-4 md:px-8 flex items-center justify-between border-b border-[#1A1A1A] bg-[#0A0A0A] relative z-20 transition-all">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 bg-gradient-to-tr from-[#FF3D00] to-[#FFD600] rounded-lg shadow-[0_0_12px_rgba(255,61,0,0.3)]"></div>
-            <div>
-              <span className="text-lg font-bold tracking-tighter text-white">
-                AERO•CANVAS <span className="text-[10px] font-mono text-[#555] ml-1.5 px-1.5 py-0.5 border border-[#222] rounded">3D MULTIPLAYER</span>
+    <div className="h-screen w-screen overflow-hidden stage-vignette text-white relative select-none">
+      {/* ---------------------------- 3D stage ---------------------------- */}
+      <Canvas
+        dpr={[1, 2]}
+        // No consumer reads this framebuffer back: Save exports the 2D paint
+        // canvas and the showcase records via captureStream(), so neither
+        // preserveDrawingBuffer nor shadow-map machinery earns its cost here.
+        gl={{ antialias: true, powerPreference: 'high-performance' }}
+        onCreated={({ gl }) => {
+          glCanvasRef.current = gl.domElement;
+        }}
+        className={`absolute inset-0 ${
+          stageMode === 'paint'
+            ? 'cursor-crosshair'
+            : stageMode === 'stamp'
+              ? 'cursor-copy'
+              : 'cursor-grab active:cursor-grabbing'
+        }`}
+      >
+        <StampPlacer armedRef={stampArmed} onPlace={placeStamp} pickCentreRef={pickCentreRef} />
+        <Suspense fallback={null}>
+        <StudioScene
+          objectId={objectId}
+          finish={finish}
+          paintSurface={paintSurface}
+          players={players}
+          playersRef={playersRef}
+          orbitRef={orbitRef}
+          autoRotate={autoRotate}
+          customGroup={customGroup}
+          hostPainting={stageMode === 'paint'}
+          hostTool={hostTool}
+          hostColor={hostColor}
+          hostSize={hostSize}
+          onObjectLoadingChange={setObjectLoading}
+          onStampsPainted={broadcastStamps}
+        />
+        </Suspense>
+      </Canvas>
+
+      {/* --------------------------- top command bar --------------------------- */}
+      <AnimatePresence>
+        {!fullscreen && (
+          <motion.header
+            initial={{ y: -70, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -70, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+            className="absolute top-0 inset-x-0 z-30 p-3 md:p-4 flex items-center gap-2 md:gap-3 safe-top"
+          >
+            <div className="flex items-center gap-2.5 shrink-0">
+              <div className="w-9 h-9 rounded-[13px] bg-gradient-to-tr from-[#FF4D1C] to-[#FFB020] shadow-[0_0_22px_rgba(255,77,28,0.45)] grid place-items-center">
+                <SprayCan size={17} className="text-white drop-shadow" />
+              </div>
+              <div className="hidden sm:block leading-none">
+                <div className="text-[15px] font-bold tracking-tight">AiroHub</div>
+                <div className="text-[9px] font-mono text-white/40 mt-0.5">ROOM {roomId}</div>
+              </div>
+            </div>
+
+            <div className="flex-1 flex justify-center min-w-0 overflow-hidden px-1">
+              <ObjectTrigger
+                objectId={objectId}
+                customName={customInfo?.name}
+                onClick={() => {
+                  setObjectSheet(true);
+                  sounds.playClick(1.2);
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setInviteSheet(true)}
+                className="tap glass glass-sheen splat-btn-2 rounded-full pl-2 pr-3 py-1.5 flex items-center gap-2"
+                style={{ '--paint': 'rgba(34,211,238,0.34)' } as React.CSSProperties}
+                title="Invite players"
+              >
+                <Users size={14} className="text-[var(--color-airo-aqua)]" />
+                <div className="flex -space-x-1.5">
+                  {[1, 2, 3, 4].map((slot) => {
+                    const player = remotePlayers.find((p) => p.slot === slot);
+                    const syncOn = player ? cameraSyncIds.has(player.id) : false;
+                    return (
+                      <span
+                        key={slot}
+                        className={`w-4 h-4 rounded-full border-2 ${
+                          syncOn ? 'border-[var(--color-airo-aqua)]' : 'border-black/50'
+                        } ${player?.isPainting ? 'airo-breathe' : ''}`}
+                        style={{ background: player ? player.color : 'rgba(255,255,255,0.14)' }}
+                      />
+                    );
+                  })}
+                </div>
+              </button>
+
+              <GlassIconButton onClick={() => setGuideOpen(true)} title="How it works" size={38}>
+                <HelpCircle size={15} className="text-[var(--color-airo-aqua)]" />
+              </GlassIconButton>
+              <span className="hidden md:contents">
+              <GlassIconButton onClick={() => setAiSheet(true)} title="AI copilot" size={38}>
+                <Wand2 size={15} className="text-[var(--color-airo-violet)]" />
+              </GlassIconButton>
+              <GlassIconButton
+                onClick={() => {
+                  const next = sounds.toggleMute();
+                  setMuted(next);
+                }}
+                title={muted ? 'Unmute' : 'Mute'}
+                size={38}
+              >
+                {muted ? <VolumeX size={15} /> : <Volume2 size={15} className="text-[var(--color-airo-flame)]" />}
+              </GlassIconButton>
+              </span>
+              <span className="hidden sm:contents">
+              <GlassIconButton onClick={toggleFullscreen} title="Fullscreen (F)" size={38}>
+                <Maximize size={15} />
+              </GlassIconButton>
               </span>
             </div>
-          </div>
+          </motion.header>
+        )}
+      </AnimatePresence>
 
-          {/* 3D Object Switcher */}
-          <div className="hidden xl:flex items-center space-x-1 bg-[#111] p-1 rounded-xl border border-[#222]">
-            {TARGET_OBJECTS.map((obj) => (
-              <button
-                key={obj.id}
-                onClick={() => {
-                  setTargetObject(obj.id);
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
-                  targetObject === obj.id
-                    ? 'bg-[#222] text-white shadow-sm border border-[#333]'
-                    : 'text-[#666] hover:text-white'
-                }`}
-              >
-                <span>{obj.icon}</span>
-                <span>{obj.label}</span>
-              </button>
-            ))}
-
-            {/* Custom 3D Model Option */}
-            {uploadedModelInfo && (
-              <button
-                onClick={() => {
-                  setTargetObject('custom3d');
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all ${
-                  targetObject === 'custom3d'
-                    ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/50'
-                    : 'text-[#666] hover:text-white'
-                }`}
-              >
-                <Box size={12} className="text-emerald-400" />
-                <span>{uploadedModelInfo.name.slice(0, 10)}</span>
-              </button>
-            )}
-          </div>
-
-          {/* Header Action Tools */}
-          <div className="flex items-center space-x-2">
-            {/* Upload Custom 3D Model Button */}
-            <button
-              onClick={() => {
-                setUploadModalOpen(true);
-                sounds.playClick(1.2);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-[#141414] hover:bg-[#222] border border-[#2A2A35] text-emerald-400 hover:text-emerald-300 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all"
-            >
-              <Upload size={13} />
-              <span className="hidden sm:inline">Upload 3D Model</span>
-            </button>
-
-            {/* Multiplayer Connect / QR Code Button */}
-            <button
-              onClick={() => {
-                setInviteModalOpen(true);
-                sounds.playClick(1.2);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-cyan-900/40 to-blue-900/40 hover:from-cyan-800/50 hover:to-blue-800/50 border border-cyan-700/50 rounded-xl text-[10px] font-bold uppercase tracking-wider text-cyan-200 transition-all shadow-[0_0_12px_rgba(6,182,212,0.2)]"
-            >
-              <Users size={13} className="text-cyan-400" />
-              <span>
-                Invite Players ({players.length}/4)
-              </span>
-            </button>
-
-            {/* AI Copilot & Style Transformer Button */}
-            <button
-              onClick={() => {
-                setAiModalOpen(true);
-                sounds.playClick(1.2);
-              }}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-violet-900/40 to-fuchsia-900/40 hover:from-violet-800/50 hover:to-fuchsia-800/50 border border-violet-700/50 rounded-xl text-[10px] font-bold uppercase tracking-wider text-violet-200 transition-all shadow-[0_0_15px_rgba(139,92,246,0.2)]"
-            >
-              <Wand2 size={13} className="text-fuchsia-400" />
-              <span className="hidden md:inline">AI Copilot & Stylize</span>
-            </button>
-
-            {/* Fullscreen Immersion Button */}
-            <button
-              onClick={toggleFullscreen}
-              className="p-2 bg-[#141414] hover:bg-[#222] border border-[#222] text-[#AAA] hover:text-white rounded-xl text-[10px] font-bold uppercase tracking-wider transition-colors"
-              title="Toggle Fullscreen Immersion Mode (F)"
-            >
-              <Maximize size={15} />
-            </button>
-
-            <button
-              onClick={toggleMute}
-              className="p-2 bg-[#141414] hover:bg-[#222] rounded-xl border border-[#222] text-[#AAA] transition-colors"
-              title={isMuted ? 'Unmute Audio' : 'Mute Audio'}
-            >
-              {isMuted ? <VolumeX size={15} /> : <Volume2 size={15} className="text-[#FF3D00]" />}
-            </button>
-          </div>
-        </nav>
+      {fullscreen && (
+        <GlassIconButton
+          onClick={toggleFullscreen}
+          className="absolute top-4 right-4 z-30"
+          title="Exit fullscreen"
+        >
+          <Minimize size={15} />
+        </GlassIconButton>
       )}
 
-      {/* ========================================================
-          FULL VIEWPORT 3D CANVAS STAGE
-          ======================================================== */}
-      <main className="flex-grow relative w-full h-full bg-[#080808] overflow-hidden">
-        <div className="absolute inset-0 opacity-15 bg-[radial-gradient(#444_1px,transparent_1px)] [background-size:24px_24px] pointer-events-none"></div>
-
-        {/* 3D Scene */}
-        <Canvas shadows className={`w-full h-full relative z-10 ${desktopPointerActive ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}>
-          <Scene
-            roomId={roomId}
-            targetObject={targetObject}
-            setTargetObject={setTargetObject}
-            paintSurface={paintSurface}
-            players={players}
-            setPlayers={setPlayers}
-            orbitControlsRef={orbitControlsRef}
-            autoRotate={autoRotate}
-            custom3DGroup={custom3DGroup}
-            desktopPointerActive={desktopPointerActive}
-            hostTool={hostTool}
-            hostColor={hostColor}
-          />
-        </Canvas>
-
-        {/* 3D VIEW ANGLE & DESKTOP POINTER CONTROLS */}
-        <div className="absolute top-4 left-4 flex flex-wrap items-center gap-1.5 bg-black/85 backdrop-blur-md p-1.5 rounded-2xl border border-[#222] z-30 pointer-events-auto shadow-2xl">
-          <span className="text-[9px] font-mono font-bold text-[#666] px-2 flex items-center gap-1">
-            <Rotate3d size={12} className="text-[#FF3D00]" />
-            <span className="hidden sm:inline">3D VIEW</span>
-          </span>
-          <button
-            onClick={() => setCameraAngle(0, Math.PI / 2)}
-            className="px-2.5 py-1 rounded-lg bg-[#18181D] hover:bg-[#252530] text-[9px] font-bold uppercase text-[#DDD] transition-all border border-[#2A2A35]"
+      {/* --------------------------- left view island --------------------------- */}
+      <AnimatePresence>
+        {!fullscreen && (
+          <motion.div
+            initial={{ x: -80, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: -80, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.05 }}
+            className="absolute left-3 md:left-4 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-2"
           >
-            Front
-          </button>
-          <button
-            onClick={() => setCameraAngle(0.6, Math.PI / 2.2)}
-            className="px-2.5 py-1 rounded-lg bg-[#18181D] hover:bg-[#252530] text-[9px] font-bold uppercase text-[#DDD] transition-all border border-[#2A2A35]"
-          >
-            35°
-          </button>
-          <button
-            onClick={() => setCameraAngle(1.35, Math.PI / 2)}
-            className="px-2.5 py-1 rounded-lg bg-[#18181D] hover:bg-[#252530] text-[9px] font-bold uppercase text-[#DDD] transition-all border border-[#2A2A35]"
-          >
-            Side
-          </button>
-          <button
-            onClick={() => setCameraAngle(0, 0.2)}
-            className="px-2.5 py-1 rounded-lg bg-[#18181D] hover:bg-[#252530] text-[9px] font-bold uppercase text-[#DDD] transition-all border border-[#2A2A35]"
-          >
-            Top
-          </button>
-          <button
-            onClick={() => setAutoRotate(!autoRotate)}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase transition-all ${
-              autoRotate
-                ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
-                : 'bg-[#18181D] text-[#888] hover:text-white border border-[#2A2A35]'
-            }`}
-          >
-            <RefreshCw size={10} className={autoRotate ? 'animate-spin' : ''} />
-            <span>360°</span>
-          </button>
-
-          <div className="w-[1px] h-4 bg-[#262630] mx-0.5" />
-
-          {/* Desktop Pointer Spray / Orbit Toggle */}
-          <button
-            onClick={() => {
-              setDesktopPointerActive(!desktopPointerActive);
-              sounds.playClick(1.2);
-            }}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase transition-all ${
-              desktopPointerActive
-                ? 'bg-orange-500/20 text-orange-400 border border-orange-500/40 shadow-[0_0_10px_rgba(255,61,0,0.25)]'
-                : 'bg-[#18181D] text-[#888] hover:text-white border border-[#2A2A35]'
-            }`}
-            title={desktopPointerActive ? 'Pointer Spray is active (Left click paints, Right click orbits)' : 'Camera Orbit mode active'}
-          >
-            <MousePointer size={11} className={desktopPointerActive ? 'text-[#FF3D00]' : ''} />
-            <span>{desktopPointerActive ? 'Pointer Spray ON' : 'Orbit Only'}</span>
-          </button>
-
-          {/* Host Tool Switcher (Spray vs Brush) */}
-          {desktopPointerActive && (
-            <div className="flex bg-[#111] p-0.5 rounded-lg border border-[#262630]">
-              <button
-                onClick={() => {
-                  setHostTool('spray');
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all ${
-                  hostTool === 'spray' ? 'bg-[#FF3D00] text-white shadow' : 'text-[#777] hover:text-white'
-                }`}
-              >
-                <SprayCan size={10} />
-                <span>Spray</span>
-              </button>
-              <button
-                onClick={() => {
-                  setHostTool('brush');
-                  sounds.playClick(1.2);
-                }}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded text-[8px] font-bold uppercase transition-all ${
-                  hostTool === 'brush' ? 'bg-[#06B6D4] text-white shadow' : 'text-[#777] hover:text-white'
-                }`}
-              >
-                <PenTool size={10} />
-                <span>Brush</span>
-              </button>
-            </div>
-          )}
-
-          {/* Quick Persistent QR / Invite Button */}
-          <button
-            onClick={() => {
-              setInviteModalOpen(true);
-              sounds.playClick(1.2);
-            }}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-950/50 hover:bg-cyan-900/70 text-[9px] font-bold uppercase text-cyan-300 border border-cyan-700/50 shadow-[0_0_10px_rgba(6,182,212,0.25)] transition-all"
-            title="Invite Players / Show QR Code"
-          >
-            <QrCode size={11} className="text-cyan-400" />
-            <span>Invite (QR)</span>
-          </button>
-        </div>
-
-        {/* MULTIPLAYER ROSTER BADGES (TOP RIGHT) */}
-        <div className="absolute top-4 right-4 flex items-center space-x-2 z-30 pointer-events-auto">
-          <div
-            onClick={() => {
-              setInviteModalOpen(true);
-              sounds.playClick(1.2);
-            }}
-            className="flex items-center space-x-1.5 bg-black/80 backdrop-blur-md p-1.5 rounded-2xl border border-[#222] hover:border-cyan-500/50 cursor-pointer shadow-2xl transition-all group"
-            title="Click to view QR Code or invite players"
-          >
-            <Users size={13} className="text-cyan-400 ml-1 mr-0.5 group-hover:scale-110 transition-transform" />
-            {[1, 2, 3, 4].map((slot) => {
-              const player = players.find((p) => p.slot === slot);
-              return (
-                <div
-                  key={slot}
-                  className={`px-2.5 py-1 rounded-lg text-[9px] font-bold flex items-center gap-1.5 transition-all border ${
-                    player
-                      ? 'bg-[#181822] text-white border-[#333]'
-                      : 'bg-[#101014] text-[#555] border-dashed border-[#222] group-hover:text-cyan-300 group-hover:border-cyan-500/40'
-                  }`}
+            <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
+              {[
+                { label: 'Front', az: 0, pol: Math.PI / 2 },
+                { label: '3/4', az: 0.7, pol: Math.PI / 2.25 },
+                { label: 'Side', az: Math.PI / 2, pol: Math.PI / 2 },
+                { label: 'Top', az: 0, pol: 0.32 },
+              ].map((view) => (
+                <button
+                  key={view.label}
+                  onClick={() => setCameraAngle(view.az, view.pol)}
+                  className="tap w-[52px] py-1.5 rounded-[15px] text-[10px] font-semibold text-white/75 hover:text-white hover:bg-white/12"
                 >
-                  <div
-                    className={`w-2 h-2 rounded-full ${
-                      player
-                        ? player.isPainting
-                          ? 'animate-ping'
-                          : 'animate-pulse'
-                        : 'bg-[#333]'
+                  {view.label}
+                </button>
+              ))}
+              <div className="h-px bg-white/12 mx-2 my-0.5" />
+              <button
+                onClick={() => setAutoRotate((v) => !v)}
+                className={`tap w-[52px] py-1.5 rounded-[15px] grid place-items-center ${
+                  autoRotate ? 'splat-chip text-black' : 'text-white/70 hover:bg-white/12'
+                }`}
+                style={autoRotate ? ({ '--paint': '#22D3EE' } as React.CSSProperties) : undefined}
+                title="Auto-rotate"
+                aria-pressed={autoRotate}
+              >
+                <RefreshCw size={14} className={autoRotate ? 'animate-spin' : ''} />
+              </button>
+            </GlassPanel>
+
+            {/* The stage-mode island. The active mode wears a spray splat
+                rather than a solid chip, so the one piece of state on the left
+                rail matches the dock's paint-stroke toggles. */}
+            <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
+              {(
+                [
+                  {
+                    mode: 'paint',
+                    icon: <MousePointer size={14} />,
+                    title: 'Paint with pointer',
+                    paint: '#FF4D1C',
+                    ink: 'text-white',
+                  },
+                  {
+                    mode: 'stamp',
+                    icon: <StampIcon size={14} />,
+                    title: 'Place stamps (S)',
+                    paint: '#FFB020',
+                    ink: 'text-black',
+                  },
+                  {
+                    mode: 'orbit',
+                    icon: <Hand size={14} />,
+                    title: 'Orbit camera (O)',
+                    paint: '#A78BFA',
+                    ink: 'text-white',
+                  },
+                ] as const
+              ).map((entry) => {
+                const active = stageMode === entry.mode;
+                return (
+                  <button
+                    key={entry.mode}
+                    onClick={() => {
+                      setStageMode(entry.mode);
+                      sounds.playClick(1.2);
+                    }}
+                    className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
+                      active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
                     }`}
-                    style={{ backgroundColor: player ? player.color : '#333' }}
+                    style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
+                    title={entry.title}
+                    aria-pressed={active}
+                  >
+                    {entry.icon}
+                  </button>
+                );
+              })}
+            </GlassPanel>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ------------------------------ bottom dock ------------------------------ */}
+      <AnimatePresence>
+        {!fullscreen && (
+          <motion.div
+            initial={{ y: 90, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 90, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.08 }}
+            className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex flex-col items-center gap-2 safe-bottom pointer-events-none"
+          >
+            {/* The stamp shelf docks directly above the bar so it can never
+                cover it, and stays non-modal so the next tap reaches the
+                model rather than a backdrop. */}
+            <AnimatePresence>
+              {stageMode === 'stamp' && (
+                <StampTray
+                  key="stamp-tray"
+                  library={stampLibrary}
+                  selectedId={selectedStamp?.id ?? null}
+                  color={hostColor}
+                  rotationDeg={stampRotationDeg}
+                  randomise={stampRandomise}
+                  busy={stampBusy}
+                  error={stampError}
+                  onSelect={(asset) => {
+                    setSelectedStamp(asset);
+                    setStampError(null);
+                    sounds.playClick(1.3);
+                  }}
+                  onUpload={handleStampUpload}
+                  onRemoveUpload={(asset) => {
+                    updateLibrary((library) => removeUpload(library, asset.id));
+                    if (selectedStamp?.id === asset.id) setSelectedStamp(BUILTIN_STAMPS[0]);
+                    sounds.playClick(0.9);
+                  }}
+                  onRotate={(deg) => setStampRotationDeg(((deg % 360) + 360) % 360)}
+                  onToggleRandom={() => setStampRandomise((v) => !v)}
+                  onClose={() => setStageMode('paint')}
+                />
+              )}
+            </AnimatePresence>
+
+            {/* Wide enough that the third tool segment does not push the save
+                button onto a second row on a laptop display. */}
+            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,1120px)] pointer-events-auto">
+              {/* Row 1 on phones: tool + colour. */}
+              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                <Segmented<'spray' | 'brush' | 'stamp'>
+                  layoutId="host-tool"
+                  paint
+                  className="flex-1 md:flex-none"
+                  value={stageMode === 'stamp' ? 'stamp' : hostTool}
+                  onChange={(value) => {
+                    sounds.playClick(1.2);
+                    if (value === 'stamp') {
+                      setStageMode('stamp');
+                      return;
+                    }
+                    setHostTool(value);
+                    if (stageMode !== 'paint') setStageMode('paint');
+                  }}
+                  options={[
+                    { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
+                    { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+                    { value: 'stamp', label: 'Stamp', icon: <StampIcon size={13} />, accent: '#FFB020' },
+                  ]}
+                />
+                <ColorWell color={hostColor} onChange={handleHostColor} />
+              </div>
+
+              {/* Row 2 on phones: size + finish. */}
+              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                <div className="flex items-center gap-2 px-1 md:px-2 flex-1 md:flex-none md:min-w-[130px]">
+                  <span className="label-caps text-white/40 shrink-0">Size</span>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={2}
+                    step={0.05}
+                    value={hostSize}
+                    onChange={(e) => setHostSize(Number(e.target.value))}
+                    className="airo-slider flex-1"
+                    aria-label="Tool size"
                   />
-                  <span>
-                    {player ? `P${slot}: ${player.name.slice(0, 8)}` : `+ P${slot}`}
-                  </span>
                 </div>
-              );
-            })}
+
+                <div className="w-px h-7 bg-white/12 hidden md:block" />
+
+                <Segmented
+                  layoutId="host-finish"
+                  size="sm"
+                  paint
+                  value={finish}
+                  onChange={(value) => {
+                    setFinish(value);
+                    sounds.playClick(1.1);
+                  }}
+                  options={[
+                    { value: 'original', label: 'Textured', accent: '#22D3EE' },
+                    { value: 'primer', label: 'Primer', accent: '#A78BFA' },
+                  ]}
+                />
+              </div>
+
+              <div className="w-px h-7 bg-white/12 hidden md:block" />
+
+              <div className="flex items-center justify-center gap-2 w-full md:w-auto md:contents">
+              <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
+                <Undo2 size={15} />
+              </GlassIconButton>
+              <GlassIconButton onClick={redoLast} title="Redo undone stroke (Ctrl+Shift+Z)" size={38}>
+                <Redo2 size={15} />
+              </GlassIconButton>
+              <GlassIconButton
+                onClick={replayArtwork}
+                title="Replay the artwork painting itself"
+                size={38}
+                disabled={replaying}
+              >
+                <History size={15} className={replaying ? 'animate-spin text-[var(--color-airo-aqua)]' : ''} />
+              </GlassIconButton>
+              <GlassIconButton onClick={() => sounds.playCanRattle()} title="Shake can" size={38}>
+                <Sparkles size={15} className="text-[var(--color-airo-ember)]" />
+              </GlassIconButton>
+              <GlassIconButton onClick={clearCanvas} title="Clear paint" size={38}>
+                <Trash2 size={15} />
+              </GlassIconButton>
+              <GlassIconButton
+                onClick={() => setShowcaseOpen(true)}
+                title="Showcase — record a turntable video of your piece"
+                size={38}
+              >
+                <Clapperboard size={15} className="text-[var(--color-airo-aqua)]" />
+              </GlassIconButton>
+              <button
+                onClick={saveSnapshot}
+                className="tap rounded-full px-4 py-2 bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-white text-[11px] font-bold tracking-wide flex items-center gap-1.5 shadow-[0_8px_24px_-6px_rgba(255,77,28,0.75)]"
+              >
+                <Download size={14} />
+                <span>Save</span>
+              </button>
+              </div>
+            </GlassPanel>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* --------------------------- status readouts --------------------------- */}
+      {/* On phones the stamp shelf occupies the space these pills sit in, so
+          they stand down until it closes. */}
+      <div
+        className={`absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex-col items-end gap-2 pointer-events-none ${
+          stageMode === 'stamp' ? 'hidden md:flex' : 'flex'
+        }`}
+      >
+        <AnimatePresence>
+          {objectLoading && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold"
+            >
+              <Loader2 size={12} className="animate-spin" />
+              <span>Loading {activeObject?.label ?? 'model'}…</span>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-medium text-white/70">
+          {connection === 'connected' ? (
+            <>
+              <Wifi size={12} className="text-emerald-400" />
+              <span>{remotePlayers.length} phone{remotePlayers.length === 1 ? '' : 's'} connected</span>
+            </>
+          ) : connection === 'reconnecting' ? (
+            <>
+              <RefreshCw size={12} className="animate-spin text-amber-400" />
+              <span className="text-amber-300">Reconnecting…</span>
+            </>
+          ) : connection === 'connecting' ? (
+            <>
+              <Loader2 size={12} className="animate-spin" />
+              <span>Connecting…</span>
+            </>
+          ) : (
+            <>
+              <WifiOff size={12} className="text-amber-400" />
+              <span>Solo mode</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* -------------------------------- sheets -------------------------------- */}
+
+      <WelcomeGuide open={guideOpen} onClose={closeGuide} role="studio" />
+
+      <ObjectPickerSheet
+        open={objectSheet}
+        onClose={() => setObjectSheet(false)}
+        objectId={objectId}
+        onSelect={changeObject}
+        onUpload={() => setUploadSheet(true)}
+        customName={customInfo?.name}
+      />
+
+      <ShowcasePanel
+        open={showcaseOpen}
+        onClose={() => setShowcaseOpen(false)}
+        handles={showcaseHandles}
+      />
+
+      <Sheet
+        open={inviteSheet}
+        onClose={() => setInviteSheet(false)}
+        centered
+        title="Invite players"
+        subtitle="Up to four phones can join this studio"
+      >
+        <div className="relative mx-auto mb-3 w-fit">
+          <div
+            className="absolute -inset-4 splatter-accent opacity-70 pointer-events-none"
+            style={{ '--paint': '#22D3EE' } as React.CSSProperties}
+          />
+          <div className="relative bg-white rounded-[26px] p-5 grid place-items-center shadow-[0_28px_90px_-28px_rgba(34,211,238,0.5)]">
+            <QRCodeSVG
+              value={controllerUrl}
+              size={Math.min(258, Math.floor(window.innerWidth * 0.56))}
+            />
           </div>
         </div>
 
-        {/* Radial Color Picker Floating in Host Stage */}
-        <RadialColorPicker
-          selectedColor={hostColor}
-          onSelectColor={handleHostColorChange}
-          className="bottom-20 right-6 md:bottom-20 md:right-6"
-        />
+        <p className="text-[11.5px] text-white/60 text-center mb-1.5">
+          Scan with a phone camera to turn it into a spray can.
+        </p>
+        <div className="text-center mb-4">
+          <span className="label-caps text-white/40">Room code</span>
+          <div
+            className="paint-title text-3xl font-black tracking-[0.34em] mt-0.5 pl-[0.34em]"
+            aria-label={`Room code ${roomId}`}
+          >
+            {roomId}
+          </div>
+        </div>
 
-        {/* Bottom Floating Studio Dock */}
-        <div className="absolute bottom-6 left-6 right-6 flex items-end justify-between pointer-events-none z-20">
-          {/* Left: Telemetry & Model Info */}
-          <div className="p-3 bg-black/85 backdrop-blur-md rounded-2xl border border-[#222] pointer-events-auto flex items-center gap-3 shadow-2xl">
-            <div className="flex -space-x-1.5">
-              {players.map((p) => (
-                <div
-                  key={p.id}
-                  className="w-4 h-4 rounded-full border border-black shadow"
-                  style={{ backgroundColor: p.color }}
-                  title={`${p.name} (P${p.slot})`}
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          {[1, 2, 3, 4].map((slot) => {
+            const player = remotePlayers.find((p) => p.slot === slot);
+            const syncOn = player ? cameraSyncIds.has(player.id) : false;
+            return (
+              <div
+                key={slot}
+                className={`rounded-2xl px-3 py-2.5 border flex items-center gap-2 text-[11px] ${
+                  player ? 'bg-white/[0.1] border-white/25' : 'bg-white/[0.03] border-dashed border-white/15 text-white/40'
+                }`}
+              >
+                <span
+                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${player ? 'airo-breathe' : ''}`}
+                  style={{ background: player ? player.color : 'rgba(255,255,255,0.2)' }}
+                />
+                <span className="font-semibold truncate flex-1">
+                  {player ? player.name : `Slot ${slot} open`}
+                </span>
+                {player && (
+                  <button
+                    onClick={() => {
+                      setCameraSyncIds((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(player.id)) next.delete(player.id);
+                        else next.add(player.id);
+                        return next;
+                      });
+                      sounds.playClick(1.1);
+                    }}
+                    title={
+                      syncOn
+                        ? 'This player is steering the studio camera — click to stop'
+                        : "Let this player's gestures rotate the studio camera"
+                    }
+                    className={`tap shrink-0 rounded-lg px-1.5 py-1 border text-[9px] font-bold flex items-center gap-1 ${
+                      syncOn
+                        ? 'bg-[var(--color-airo-aqua)]/25 border-[var(--color-airo-aqua)]/50 text-[var(--color-airo-aqua)]'
+                        : 'bg-white/[0.06] border-white/15 text-white/50'
+                    }`}
+                  >
+                    <Video size={10} />
+                    CAM
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex gap-2">
+          <input
+            readOnly
+            value={controllerUrl}
+            className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-black/40 border border-white/12 text-[11px] font-mono text-white/60 truncate"
+          />
+          <button onClick={copyLink} className="tap px-4 rounded-xl bg-white/15 hover:bg-white/25 text-[11px] font-bold flex items-center gap-1.5">
+            {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+
+        <button
+          onClick={() => window.open(controllerUrl, '_blank')}
+          className="tap w-full mt-2 py-2.5 rounded-xl bg-white/[0.07] hover:bg-white/[0.13] border border-white/12 text-[11px] font-semibold flex items-center justify-center gap-2"
+        >
+          <ExternalLink size={13} />
+          Open controller in a new tab
+        </button>
+      </Sheet>
+
+      <Sheet
+        open={uploadSheet}
+        onClose={() => setUploadSheet(false)}
+        centered
+        title="Upload a 3D model"
+        subtitle="GLB, GLTF, OBJ or STL"
+      >
+        <label className="block rounded-2xl border-2 border-dashed border-white/20 hover:border-[var(--color-airo-aqua)]/60 bg-white/[0.03] p-8 text-center cursor-pointer transition-colors">
+          <input
+            type="file"
+            accept=".glb,.gltf,.obj,.stl"
+            className="hidden"
+            onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+          />
+          <Upload size={26} className="mx-auto mb-2 text-[var(--color-airo-aqua)]" />
+          <p className="text-[13px] font-semibold">Drop a model here or click to browse</p>
+          <p className="text-[10px] text-white/45 mt-1">
+            We normalise the scale, generate UVs when missing, and wire it to the shared paint layer.
+          </p>
+        </label>
+
+        {uploadBusy && (
+          <div className="mt-3 rounded-xl bg-white/[0.07] border border-white/12 px-3 py-2.5 text-[11px] flex items-center gap-2">
+            <Loader2 size={13} className="animate-spin" />
+            Reading geometry and attaching paint shaders…
+          </div>
+        )}
+        {uploadError && (
+          <div className="mt-3 rounded-xl bg-red-950/50 border border-red-500/30 px-3 py-2.5 text-[11px] text-red-200">
+            {uploadError}
+          </div>
+        )}
+        {customInfo && (
+          <div className="mt-3 rounded-xl bg-white/[0.06] border border-white/12 p-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[12px] font-semibold truncate">{customInfo.name}</span>
+              <span className="text-[9px] font-mono text-white/50">
+                {customInfo.meshCount} meshes · {customInfo.vertexCount.toLocaleString()} verts
+              </span>
+            </div>
+            <p className="text-[10px] text-white/45 flex items-center gap-1.5">
+              <Layers size={10} /> {customInfo.materials.length} materials mapped for painting
+            </p>
+          </div>
+        )}
+      </Sheet>
+
+      <Sheet
+        open={aiSheet}
+        onClose={() => setAiSheet(false)}
+        centered
+        wide
+        title="AI copilot"
+        subtitle="Restyle the piece, sketch a concept, or have it appraised"
+      >
+        <div className="mb-4">
+          <Segmented<'style' | 'concept' | 'critique'>
+            layoutId="ai-tabs"
+            paint
+            value={aiTab}
+            onChange={(next) => {
+              setAiTab(next);
+              sounds.playClick(1.15);
+            }}
+            options={[
+              { value: 'style', label: 'Style', icon: <Palette size={12} />, accent: '#A78BFA' },
+              { value: 'concept', label: 'Concept', icon: <Sparkles size={12} />, accent: '#E879F9' },
+              { value: 'critique', label: 'Appraise', icon: <Eye size={12} />, accent: '#22D3EE' },
+            ]}
+          />
+        </div>
+
+        {aiTab === 'style' && (
+          <div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-3.5">
+              {STYLE_PRESETS.map((preset) => (
+                <PresetCard
+                  key={preset.id}
+                  preset={preset}
+                  selected={stylePreset === preset.id}
+                  onSelect={() => {
+                    setStylePreset(preset.id);
+                    sounds.playClick(1.15);
+                  }}
                 />
               ))}
             </div>
-            <div>
-              <p className="text-[10px] uppercase font-bold tracking-[0.2em] text-white">
-                {targetObject === 'custom3d' && uploadedModelInfo
-                  ? `Custom 3D: ${uploadedModelInfo.name}`
-                  : `3D Target: ${targetObject.toUpperCase()}`}
-              </p>
-              <p className="text-[9px] font-mono text-[#666]">
-                {players.length} CONNECTED TAGGER{players.length > 1 ? 'S' : ''} • MULTI-SPRAY PHYSICS ACTIVE
-              </p>
-            </div>
-          </div>
 
-          {/* Right: Studio Action Buttons */}
-          <div className="flex items-center space-x-2 pointer-events-auto">
-            <button
-              onClick={() => sounds.playCanRattle()}
-              className="flex items-center gap-1.5 px-3 py-2 bg-[#111]/85 backdrop-blur border border-[#222] text-[#AAA] hover:text-[#FF3D00] hover:border-[#FF3D00]/50 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all"
-            >
-              <Sparkles size={14} />
-              <span>Shake Can</span>
-            </button>
-
-            <button
-              onClick={handleClearCanvas}
-              className="flex items-center gap-1.5 px-3 py-2 bg-[#111]/85 backdrop-blur border border-[#222] text-[#AAA] hover:text-red-400 hover:border-red-500/50 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all"
-            >
-              <Trash2 size={14} />
-              <span>Clear</span>
-            </button>
-
-            <button
-              onClick={handleDownloadSnapshot}
-              className="flex items-center gap-1.5 px-3.5 py-2 bg-[#FF3D00] hover:bg-orange-600 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-lg shadow-orange-950/40 transition-all active:scale-95"
-            >
-              <Download size={14} />
-              <span>Save PNG</span>
-            </button>
-          </div>
-        </div>
-      </main>
-
-      {/* ========================================================
-          MODAL 1: MULTIPLAYER INVITE & QR CODE GENERATOR
-          ======================================================== */}
-      {inviteModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
-          <div className="w-full max-w-md bg-[#0E0E12] border border-[#262630] rounded-2xl p-6 shadow-2xl relative">
-            <button
-              onClick={() => setInviteModalOpen(false)}
-              className="absolute top-4 right-4 p-2 text-[#777] hover:text-white"
-            >
-              <X size={18} />
-            </button>
-
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white">
-                <Users size={20} />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-white tracking-tight">Multiplayer Studio Join</h2>
-                <p className="text-[10px] text-[#888] font-mono">CONNECT UP TO 4 MOBILE CONTROLLERS</p>
-              </div>
-            </div>
-
-            {/* Live Player Slots */}
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              {[1, 2, 3, 4].map((slot) => {
-                const player = players.find((p) => p.slot === slot);
-                return (
-                  <div
-                    key={slot}
-                    className={`p-2.5 rounded-xl border flex items-center gap-2 text-xs font-mono transition-all ${
-                      player
-                        ? 'bg-[#151520] border-[#333] text-white'
-                        : 'bg-[#101014] border-dashed border-[#222] text-[#555]'
-                    }`}
-                  >
-                    <div
-                      className={`w-2.5 h-2.5 rounded-full ${
-                        player ? 'animate-pulse' : 'bg-[#333]'
-                      }`}
-                      style={{ backgroundColor: player ? player.color : '#333' }}
-                    />
-                    <div className="truncate">
-                      <span className="font-bold">P{slot}: </span>
-                      <span>{player ? player.name : 'Open'}</span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="bg-white p-4 rounded-xl flex items-center justify-center my-3 shadow-inner">
-              <QRCodeSVG value={controllerUrl} size={170} />
-            </div>
-
-            <p className="text-xs text-center text-[#AAA] mb-3">
-              Scan this QR code with your phone or open the controller link in another tab to join as a new tagger.
-            </p>
-
-            <div className="flex gap-2 mb-3">
-              <input
-                type="text"
-                readOnly
-                value={controllerUrl}
-                className="flex-1 px-3 py-2 bg-[#16161D] border border-[#2C2C38] rounded-xl text-xs text-[#AAA] font-mono truncate"
-              />
-              <button
-                onClick={copyControllerLink}
-                className="px-4 py-2 bg-[#222] hover:bg-[#333] text-white rounded-xl text-xs font-bold uppercase tracking-wider flex items-center gap-1.5"
-              >
-                {copiedLink ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                <span>{copiedLink ? 'Copied' : 'Copy'}</span>
-              </button>
-            </div>
-
-            <button
-              onClick={() => window.open(controllerUrl, '_blank')}
-              className="w-full py-2.5 bg-gradient-to-r from-cyan-900/50 to-blue-900/50 hover:from-cyan-800/60 hover:to-blue-800/60 text-cyan-200 border border-cyan-700/50 rounded-xl text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all shadow-md"
-            >
-              <ExternalLink size={14} className="text-cyan-400" />
-              <span>Open Controller in New Window</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================
-          MODAL 2: 3D MODEL UPLOAD & MATERIAL BREAKDOWN
-          ======================================================== */}
-      {uploadModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
-          <div className="w-full max-w-xl bg-[#0E0E12] border border-[#262630] rounded-2xl p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
-            <button
-              onClick={() => setUploadModalOpen(false)}
-              className="absolute top-4 right-4 p-2 text-[#777] hover:text-white"
-            >
-              <X size={18} />
-            </button>
-
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-600 flex items-center justify-center text-white">
-                <Box size={20} />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-white tracking-tight">Upload & Paint 3D Model</h2>
-                <p className="text-[10px] text-[#888] font-mono">SUPPORTS .GLB, .GLTF, .OBJ, .STL</p>
-              </div>
-            </div>
-
-            {/* Drag and Drop / File Input Box */}
-            <label className="border-2 border-dashed border-[#333] hover:border-emerald-500/60 bg-[#121218] rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all mb-4">
-              <input
-                type="file"
-                accept=".glb,.gltf,.obj,.stl"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.[0]) {
-                    handleFileUpload(e.target.files[0]);
-                  }
-                }}
-              />
-              <Upload size={32} className="text-emerald-400 mb-2" />
-              <p className="text-sm font-bold text-white">Click or drag & drop a 3D model file here</p>
-              <p className="text-[10px] text-[#777] mt-1">
-                Upload any 3D asset (.glb, .gltf, .obj, .stl). We will decompose its materials, normalize the geometry, and project the shared paint texture map!
-              </p>
+            <label className="label-caps mb-1.5 block text-white/35" htmlFor="ai-style-theme">
+              Theme words
             </label>
+            <input
+              id="ai-style-theme"
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+              placeholder="e.g. TOKYO OVERDRIVE"
+              className="mb-3.5 w-full rounded-xl border border-white/12 bg-black/40 px-3 py-2.5 text-[12px] placeholder-white/25 focus:border-[var(--color-airo-violet)] focus:outline-none"
+            />
 
-            {isUploadingModel && (
-              <div className="p-3 bg-emerald-950/40 border border-emerald-800/40 rounded-xl text-xs text-emerald-300 flex items-center gap-2 mb-4">
-                <RefreshCw size={14} className="animate-spin" />
-                <span>Deconstructing 3D hierarchy, calculating UV coordinates, and attaching paint shaders...</span>
-              </div>
-            )}
-
-            {uploadError && (
-              <div className="p-3 bg-red-950/40 border border-red-800/40 rounded-xl text-xs text-red-300 mb-4">
-                {uploadError}
-              </div>
-            )}
-
-            {/* Discovered Model Info & Material Breakdown */}
-            {uploadedModelInfo && (
-              <div className="bg-[#14141C] border border-[#262633] rounded-xl p-4 mt-2">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-bold text-white uppercase">{uploadedModelInfo.name}</span>
-                  <span className="text-[9px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40">
-                    {uploadedModelInfo.meshCount} Meshes • {uploadedModelInfo.vertexCount.toLocaleString()} Vertices
-                  </span>
-                </div>
-
-                <div className="text-[10px] font-bold uppercase text-[#888] mb-1.5 flex items-center gap-1">
-                  <Layers size={11} />
-                  <span>Discovered Materials ({uploadedModelInfo.materials.length})</span>
-                </div>
-
-                <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                  {uploadedModelInfo.materials.map((mat, i) => (
-                    <div
-                      key={i}
-                      className="flex items-center justify-between bg-[#191924] p-2 rounded-lg text-[10px]"
-                    >
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="w-3 h-3 rounded-full border border-white/20"
-                          style={{ backgroundColor: mat.color }}
-                        />
-                        <span className="font-mono text-white">{mat.name}</span>
-                      </div>
-                      <span className="text-[9px] font-mono text-[#888]">
-                        {mat.type} • Paint Mapped
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================
-          MODAL 3: AI COPILOT & STYLE TRANSFORMATION STUDIO
-          ======================================================== */}
-      {aiModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
-          <div className="w-full max-w-xl bg-[#0E0E12] border border-[#262630] rounded-2xl p-6 shadow-2xl relative max-h-[90vh] overflow-y-auto">
             <button
-              onClick={() => setAiModalOpen(false)}
-              className="absolute top-4 right-4 p-2 text-[#777] hover:text-white"
+              onClick={applyStyle}
+              disabled={aiBusy}
+              className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2 px-6 py-3.5 text-[12.5px] font-bold tracking-wide text-white disabled:opacity-50"
+              style={{ '--paint': AI_PAINT } as React.CSSProperties}
             >
-              <X size={18} />
+              {aiBusy ? <Loader2 size={14} className="animate-spin" /> : <Wand2 size={14} />}
+              {aiBusy ? 'Styling…' : 'Apply style'}
             </button>
 
-            <div className="flex items-center gap-2 mb-4">
-              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-violet-600 to-fuchsia-500 flex items-center justify-center text-white">
-                <Wand2 size={18} />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-white tracking-tight">AI Art Studio & Stylizer</h2>
-                <p className="text-[10px] text-[#888] font-mono">GEMINI MULTI-STYLE ART ENGINE</p>
-              </div>
-            </div>
-
-            {/* AI Modal Navigation Tabs */}
-            <div className="flex bg-[#14141C] p-1 rounded-xl border border-[#262633] mb-5">
-              <button
-                onClick={() => setAiTab('transform')}
-                className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
-                  aiTab === 'transform'
-                    ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow'
-                    : 'text-[#777] hover:text-white'
-                }`}
-              >
-                <Palette size={12} />
-                <span>Transform Style</span>
-              </button>
-              <button
-                onClick={() => setAiTab('generate')}
-                className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
-                  aiTab === 'generate'
-                    ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow'
-                    : 'text-[#777] hover:text-white'
-                }`}
-              >
-                <Sparkle size={12} />
-                <span>Concept Generator</span>
-              </button>
-              <button
-                onClick={() => setAiTab('critique')}
-                className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 ${
-                  aiTab === 'critique'
-                    ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white shadow'
-                    : 'text-[#777] hover:text-white'
-                }`}
-              >
-                <Eye size={12} />
-                <span>Valuation & Appraisal</span>
-              </button>
-            </div>
-
-            {/* TAB 1: TRANSFORM & STYLIZE ACTIVE ARTWORK */}
-            {aiTab === 'transform' && (
-              <div>
-                <label className="text-[10px] font-bold uppercase tracking-wider text-[#AAA] mb-2 block">
-                  Select Style Transformation Preset
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
-                  {STYLE_TRANSFORM_PRESETS.map((preset) => (
-                    <button
-                      key={preset.id}
-                      onClick={() => setSelectedStylePreset(preset.id)}
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        selectedStylePreset === preset.id
-                          ? 'bg-[#1C1A28] border-fuchsia-500/60 shadow-[0_0_15px_rgba(217,70,239,0.2)]'
-                          : 'bg-[#121218] border-[#222] hover:border-[#333]'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                          <span>{preset.icon}</span>
-                          <span>{preset.name}</span>
-                        </span>
-                        {selectedStylePreset === preset.id && (
-                          <Check size={12} className="text-fuchsia-400" />
-                        )}
-                      </div>
-                      <p className="text-[9px] text-[#888] leading-tight">{preset.desc}</p>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mb-4">
-                  <label className="text-[10px] font-bold uppercase tracking-wider text-[#AAA] mb-1.5 block">
-                    Custom Theme Words / Tag Calligraphy (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={aiPrompt}
-                    onChange={(e) => setAiPrompt(e.target.value)}
-                    placeholder="e.g. CYBER CITY, TOKYO, OVERDRIVE..."
-                    className="w-full px-3 py-2 bg-[#16161D] border border-[#2C2C38] rounded-xl text-xs text-white placeholder-[#555] focus:outline-none focus:border-violet-500"
-                  />
-                </div>
-
-                <button
-                  onClick={handleTransformArtwork}
-                  disabled={aiLoading}
-                  className="w-full py-3 bg-gradient-to-r from-violet-600 via-fuchsia-600 to-orange-500 hover:opacity-90 disabled:opacity-50 text-white rounded-xl text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 shadow-xl shadow-fuchsia-950/40 mb-4"
-                >
-                  <Wand2 size={15} />
-                  <span>{aiLoading ? 'AI Stylizing Artwork...' : `Apply ${selectedStylePreset.toUpperCase()} Style To 3D Canvas`}</span>
-                </button>
-
-                {transformResult && (
-                  <div className="bg-[#14141C] border border-fuchsia-900/40 rounded-xl p-3.5 mb-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-bold text-fuchsia-400">
-                        {transformResult.transformedTitle}
-                      </span>
-                      <span className="text-[9px] font-mono text-[#888]">{transformResult.tagLine}</span>
-                    </div>
-                    <p className="text-[10px] text-[#AAA] italic mt-1 leading-relaxed">
-                      "{transformResult.curatorNotes}"
-                    </p>
-                    <div className="flex gap-2 mt-3">
-                      <button
-                        onClick={handleDownloadSnapshot}
-                        className="flex-1 py-2 bg-[#FF3D00] hover:bg-orange-600 text-white rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 shadow"
-                      >
-                        <Download size={13} />
-                        <span>Save Stylized Artwork PNG</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB 2: STREET CONCEPT GENERATOR */}
-            {aiTab === 'generate' && (
-              <div>
-                <label className="text-[10px] font-bold uppercase tracking-wider text-[#AAA] mb-1.5 block">
-                  Street Concept / Tag Inspiration
-                </label>
-                <div className="flex gap-2 mb-4">
-                  <input
-                    type="text"
-                    value={aiPrompt}
-                    onChange={(e) => setAiPrompt(e.target.value)}
-                    placeholder="e.g. TOKYO CYBER, WILD STYLE, PHANTOM..."
-                    className="flex-1 px-3 py-2 bg-[#16161D] border border-[#2C2C38] rounded-xl text-xs text-white placeholder-[#555] focus:outline-none focus:border-violet-500"
-                  />
-                  <button
-                    onClick={handleGenerateAiTag}
-                    disabled={aiLoading}
-                    className="px-4 py-2 bg-gradient-to-r from-violet-600 to-fuchsia-600 hover:opacity-90 disabled:opacity-50 text-white rounded-xl text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-lg"
-                  >
-                    <Sparkles size={13} />
-                    <span>{aiLoading ? 'Thinking...' : 'Generate'}</span>
-                  </button>
-                </div>
-
-                {aiResult && (
-                  <div className="bg-[#14141C] border border-[#262633] rounded-xl p-4 mb-2">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[10px] font-bold uppercase tracking-widest text-violet-400">
-                        {aiResult.title}
-                      </span>
-                      <span className="text-[9px] font-mono text-[#888]">{aiResult.tagLine}</span>
-                    </div>
-
-                    <div className="flex items-center gap-4 my-3">
-                      <div className="w-16 h-16 rounded-xl bg-black/60 border border-violet-500/40 flex items-center justify-center text-3xl shadow-[0_0_20px_rgba(139,92,246,0.3)]">
-                        {aiResult.stencilSymbol}
-                      </div>
+            {styleResult &&
+              (styleResult.error ? (
+                <ResultNote>{styleResult.error}</ResultNote>
+              ) : (
+                <div className="mt-3.5 rounded-2xl border border-white/12 bg-white/[0.05] p-4">
+                  <div className="label-caps text-white/35">{styleResult.vibe || 'Applied'}</div>
+                  <h3 className="mt-0.5 truncate text-[15px] font-black tracking-tight">
+                    {styleResult.transformedTitle}
+                  </h3>
+                  <p className="mt-1.5 text-[11px] italic leading-relaxed text-white/55">
+                    “{styleResult.curatorNotes}”
+                  </p>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-3">
+                    <div className="flex items-center gap-2.5">
+                      <StencilPreview
+                        asset={stampForSymbol(styleResult.stencilSymbol)}
+                        tint={activeAiTint}
+                        size={40}
+                      />
                       <div>
-                        <h3 className="text-lg font-black tracking-tighter text-white uppercase">
-                          {aiResult.graffitiText}
-                        </h3>
-                        <p className="text-[10px] text-[#999] italic mt-0.5">{aiResult.styleNotes}</p>
+                        <div className="label-caps mb-1.5 text-white/30">Palette</div>
+                        <PaletteRow
+                          colors={paletteOf(styleResult.accentColor, styleResult.secondaryColor)}
+                          active={activeAiTint}
+                          onPick={setAiTint}
+                        />
                       </div>
                     </div>
-
                     <button
-                      onClick={handleStampAiConcept}
-                      className="w-full py-2.5 bg-[#FF3D00] hover:bg-orange-600 text-white rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-md flex items-center justify-center gap-1.5"
+                      onClick={() => stampSuggestion(styleResult.stencilSymbol, activeAiTint)}
+                      className="tap glass glass-sheen flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10.5px] font-bold text-white/85 hover:text-white"
                     >
-                      <Zap size={13} />
-                      <span>Stamp Stencil On {targetObject.toUpperCase()}</span>
+                      <StampIcon size={12} style={{ color: activeAiTint }} />
+                      Stamp its mark
                     </button>
                   </div>
-                )}
-              </div>
-            )}
-
-            {/* TAB 3: GALLERY VALUATION */}
-            {aiTab === 'critique' && (
-              <div>
-                <p className="text-[11px] text-[#AAA] mb-4">
-                  Request an official high-end art curator appraisal and auction house valuation based on your active 3D {targetObject} artwork and aerosol stroke velocity.
-                </p>
-                <button
-                  onClick={handleGenerateAiCritique}
-                  disabled={aiLoading}
-                  className="w-full py-3 bg-gradient-to-r from-violet-700 to-fuchsia-700 hover:opacity-90 disabled:opacity-50 text-white rounded-xl text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg mb-4"
-                >
-                  <Eye size={15} />
-                  <span>{aiLoading ? 'Curating Gallery Appraisal...' : 'Evaluate & Appraise Artwork'}</span>
-                </button>
-
-                {critiqueResult && (
-                  <div className="bg-[#121218] border border-fuchsia-900/40 rounded-xl p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[12px] font-bold text-fuchsia-400">
-                        {critiqueResult.exhibitionTitle}
-                      </span>
-                      <span className="text-[11px] font-mono font-bold text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/50">
-                        {critiqueResult.estimatedValue}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-[#AAA] leading-relaxed mt-2.5">
-                      "{critiqueResult.curatorCritique}"
-                    </p>
-                  </div>
-                )}
-              </div>
-            )}
+                </div>
+              ))}
           </div>
-        </div>
-      )}
+        )}
+
+        {aiTab === 'concept' && (
+          <div>
+            <div className="mb-3.5 flex gap-2">
+              <input
+                value={aiPrompt}
+                onChange={(e) => setAiPrompt(e.target.value)}
+                placeholder="A word to build a piece around, e.g. PHANTOM"
+                className="min-w-0 flex-1 rounded-xl border border-white/12 bg-black/40 px-3 py-2.5 text-[12px] placeholder-white/25 focus:border-[var(--color-airo-violet)] focus:outline-none"
+              />
+              <button
+                onClick={generateConcept}
+                disabled={aiBusy}
+                className="paint-btn paint-btn-2 paint-cta tap flex shrink-0 items-center gap-1.5 px-5 text-[11px] font-bold text-white disabled:opacity-50"
+                style={{ '--paint': AI_PAINT } as React.CSSProperties}
+              >
+                {aiBusy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                Generate
+              </button>
+            </div>
+
+            {conceptResult &&
+              (conceptResult.error ? (
+                <ResultNote>{conceptResult.error}</ResultNote>
+              ) : (
+                <div
+                  className="splatter-accent relative overflow-hidden rounded-2xl border border-white/12 bg-white/[0.05] p-4"
+                  style={{ '--paint': activeAiTint } as React.CSSProperties}
+                >
+                  <div className="relative z-10 flex items-start gap-3">
+                    <StencilPreview
+                      asset={stampForSymbol(conceptResult.stencilSymbol)}
+                      tint={activeAiTint}
+                      size={64}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="label-caps truncate text-white/35">
+                        {conceptResult.tagLine || conceptResult.title}
+                      </div>
+                      <h3 className="truncate text-[19px] font-black uppercase leading-tight tracking-tight">
+                        {conceptResult.graffitiText}
+                      </h3>
+                      <p className="mt-1 text-[10.5px] italic leading-snug text-white/50">
+                        {conceptResult.styleNotes}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="relative z-10 mt-3.5 border-t border-white/10 pt-3">
+                    <div className="label-caps mb-2 text-white/30">Suggested palette</div>
+                    <PaletteRow
+                      colors={paletteOf(conceptResult.recommendedPalette)}
+                      active={activeAiTint}
+                      onPick={setAiTint}
+                    />
+                  </div>
+
+                  <button
+                    onClick={() => stampSuggestion(conceptResult.stencilSymbol, activeAiTint)}
+                    className="paint-btn paint-cta tap relative z-10 mt-4 flex w-full items-center justify-center gap-2 px-5 py-3 text-[12px] font-bold text-white"
+                    style={
+                      {
+                        '--paint': `linear-gradient(120deg, ${activeAiTint}, ${activeAiTint}c0)`,
+                      } as React.CSSProperties
+                    }
+                  >
+                    <StampIcon size={14} />
+                    Stamp it on the {activeObject?.label ?? 'object'}
+                  </button>
+                  <p className="relative z-10 mt-2 text-center text-[9.5px] text-white/35">
+                    Placed as a real stencil, shared with every phone, undoable with Ctrl+Z.
+                  </p>
+                </div>
+              ))}
+          </div>
+        )}
+
+        {aiTab === 'critique' && (
+          <div>
+            <p className="mb-3.5 text-[11.5px] leading-relaxed text-white/55">
+              A gallery-style appraisal of the piece currently on the{' '}
+              {activeObject?.label ?? 'object'}.
+            </p>
+            <button
+              onClick={generateCritique}
+              disabled={aiBusy}
+              className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2 px-6 py-3.5 text-[12.5px] font-bold tracking-wide text-white disabled:opacity-50"
+              style={{ '--paint': AI_PAINT } as React.CSSProperties}
+            >
+              {aiBusy ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
+              {aiBusy ? 'Appraising…' : 'Appraise artwork'}
+            </button>
+
+            {critiqueResult &&
+              (critiqueResult.error ? (
+                <ResultNote>{critiqueResult.error}</ResultNote>
+              ) : (
+                <div className="mt-3.5 rounded-2xl border border-white/12 bg-white/[0.05] p-4">
+                  <div className="label-caps text-white/35">
+                    {critiqueResult.auctionHouse || 'Curator'}
+                  </div>
+                  <h3 className="mt-0.5 text-[16px] font-black leading-tight tracking-tight">
+                    {critiqueResult.exhibitionTitle}
+                  </h3>
+                  <p className="mt-2.5 text-[11.5px] leading-relaxed text-white/65">
+                    “{critiqueResult.curatorCritique}”
+                  </p>
+                  <div className="mt-3.5 flex items-center justify-between border-t border-white/10 pt-3">
+                    <span className="label-caps text-white/35">Estimate</span>
+                    <span className="font-mono text-[14px] font-bold text-emerald-300">
+                      {critiqueResult.estimatedValue}
+                    </span>
+                  </div>
+                  {Array.isArray(critiqueResult.vibeTags) && critiqueResult.vibeTags.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {critiqueResult.vibeTags.map((tag: string) => (
+                        <span
+                          key={tag}
+                          className="glass rounded-full px-2.5 py-1 text-[9.5px] font-semibold text-white/60"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+        )}
+      </Sheet>
     </div>
   );
 }

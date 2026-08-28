@@ -1,0 +1,42 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+  # Vite inlines VITE_* variables into the client bundle at build time, so these
+  # are public by construction — the "publishable" key is meant to ship to the
+  # browser. Realtime broadcast needs no tables and reads no data, so there is
+  # nothing behind this key to protect.
+  # GEMINI_API_KEY is a real secret and is deliberately NOT here; set it in the
+  # Netlify UI. Without it the AI panel serves curated fallbacks.
+  VITE_SUPABASE_URL = "https://zrtftliozslrjomxbfrr.supabase.co"
+  VITE_SUPABASE_ANON_KEY = "sb_publishable_4JZPu-HuA4MmYFqLW6DcnQ_HkfMvqSn"
+
+# SPA fallback. Functions and static assets are matched first by Netlify, so
+# this only catches client-side routes such as /canvas/:id and /controller/:id.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# Generated models are content-addressed by the build and never mutate in
+# place, so they can be cached hard.
+[[headers]]
+  for = "/models/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # The controller needs the motion sensors on the phone that opened it.
+    Permissions-Policy = "accelerometer=(self), gyroscope=(self), magnetometer=(self)"

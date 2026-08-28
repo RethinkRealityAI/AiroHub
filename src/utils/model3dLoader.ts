@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { Uploaded3DModelInfo, ModelMaterialInfo } from '../types';
+import { buildRaycastAcceleration } from '../paint/modelRegistry';
 
 export interface Parsed3DModelResult {
   info: Uploaded3DModelInfo;
@@ -140,6 +141,7 @@ export async function parseUploaded3DModel(
   const wrapper = new THREE.Group();
   wrapper.name = 'custom3DModelWrapper';
   wrapper.add(group);
+  buildRaycastAcceleration(wrapper);
 
   const modelInfo: Uploaded3DModelInfo = {
     id: `custom_${Date.now()}`,

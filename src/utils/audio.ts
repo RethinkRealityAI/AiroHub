@@ -15,6 +15,8 @@ class SoundEngine {
     source: AudioBufferSourceNode;
     gain: GainNode;
     filter: BiquadFilterNode;
+    lfo: OscillatorNode;
+    lfoGain: GainNode;
   } | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private isMuted: boolean = false;
@@ -126,7 +128,12 @@ class SoundEngine {
   }
 
   /**
-   * Wet bristle continuous brush stroke sound
+   * Bristles scrubbing over a surface.
+   *
+   * A mid-band hiss reads as an aerosol no matter how it's shaped, so the
+   * brush is built the opposite way: noise lowpassed deep into the "rub"
+   * register, with a slow amplitude wobble that gives it the back-and-forth
+   * swish of real strokes instead of a constant pressurised hiss.
    */
   public startBrush() {
     if (this.isMuted || this.isBrushActive) return;
@@ -141,39 +148,53 @@ class SoundEngine {
     source.loop = true;
 
     const filter = this.ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(1400, now);
-    filter.Q.setValueAtTime(2.5, now);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(700, now);
+    filter.Q.setValueAtTime(0.9, now);
 
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0.001, now);
-    gain.gain.exponentialRampToValueAtTime(0.28, now + 0.06);
+    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.07);
+
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.setValueAtTime(2.3, now);
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.setValueAtTime(0.09, now);
+    lfo.connect(lfoGain);
+    lfoGain.connect(gain.gain);
 
     source.connect(filter);
     filter.connect(gain);
     gain.connect(this.ctx.destination);
 
     source.start(now);
-    this.brushNode = { source, gain, filter };
+    lfo.start(now);
+    this.brushNode = { source, gain, filter, lfo, lfoGain };
   }
 
   public modulateBrush(speed: number) {
     if (!this.ctx || !this.brushNode || this.isMuted) return;
     const now = this.ctx.currentTime;
-    const targetFreq = 1000 + Math.min(speed * 30, 2200);
-    this.brushNode.filter.frequency.setTargetAtTime(targetFreq, now, 0.03);
+    // Faster strokes brighten the rub and quicken the swish, staying well
+    // below the register where noise starts reading as a spray hiss.
+    const targetFreq = 500 + Math.min(speed * 18, 700);
+    this.brushNode.filter.frequency.setTargetAtTime(targetFreq, now, 0.04);
+    this.brushNode.lfo.frequency.setTargetAtTime(1.8 + Math.min(speed * 0.06, 2.4), now, 0.08);
   }
 
   public stopBrush() {
     if (!this.isBrushActive || !this.brushNode || !this.ctx) return;
     const now = this.ctx.currentTime;
-    const { source, gain } = this.brushNode;
+    const { source, gain, lfo } = this.brushNode;
     gain.gain.setValueAtTime(gain.gain.value, now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
     setTimeout(() => {
       try {
         source.stop();
         source.disconnect();
+        lfo.stop();
+        lfo.disconnect();
       } catch {
         // already stopped
       }

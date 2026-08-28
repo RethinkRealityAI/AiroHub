@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>
+  body{margin:0;background:#111;font-family:system-ui;color:#eee}
+  #grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:8px}
+  .cell{background:#1b1b22;border-radius:10px;overflow:hidden;position:relative;height:230px}
+  .cell canvas{display:block;width:100%;height:230px}
+  .cap{position:absolute;left:8px;bottom:6px;font-size:12px;font-weight:600;text-shadow:0 1px 3px #000}
+  .err{position:absolute;inset:0;display:grid;place-items:center;color:#f66;font-size:11px;text-align:center;padding:8px}
+</style></head>
+<body><div id="grid"></div>
+<script type="importmap">
+{"imports":{"three":"/node_modules/three/build/three.module.js","three/":"/node_modules/three/"}}
+</script>
+<script type="module">
+import * as THREE from '/node_modules/three/build/three.module.js';
+import { GLTFLoader } from '/node_modules/three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from '/node_modules/three/examples/jsm/libs/meshopt_decoder.module.js';
+
+const IDS = window.__IDS__;
+const W = 320, H = 230;
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const grid = document.getElementById('grid');
+
+// One WebGL context for all cells: browsers cap simultaneous contexts well
+// below the number of models here.
+const gl = document.createElement('canvas');
+gl.width = W * 2; gl.height = H * 2;
+const renderer = new THREE.WebGLRenderer({ canvas: gl, antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H, false);
+renderer.setPixelRatio(2);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const errors = [];
+for (const id of IDS) {
+  const cell = document.createElement('div'); cell.className = 'cell';
+  const cap = document.createElement('div'); cap.className='cap'; cap.textContent = id;
+  const out = document.createElement('canvas'); out.width = W*2; out.height = H*2;
+  cell.appendChild(out); cell.appendChild(cap); grid.appendChild(cell);
+
+  try {
+    const gltf = await loader.loadAsync(`/models/${id}.glb`);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#1b1b22');
+    scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+    const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(4,6,6); scene.add(key);
+    const rim = new THREE.DirectionalLight(0x88bbff, 1.1); rim.position.set(-5,2,-4); scene.add(rim);
+
+    const obj = gltf.scene;
+    const box = new THREE.Box3().setFromObject(obj);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const k = 4 / (Math.max(size.x,size.y,size.z) || 1);
+    obj.scale.setScalar(k);
+    obj.position.set(-center.x*k, -center.y*k, -center.z*k);
+    scene.add(obj);
+
+    const cam = new THREE.PerspectiveCamera(40, W/H, 0.1, 100);
+    cam.position.set(4.4, 2.4, 5.6); cam.lookAt(0,0,0);
+    renderer.render(scene, cam);
+
+    out.getContext('2d').drawImage(gl, 0, 0);
+    scene.clear();
+  } catch (e) {
+    const err = document.createElement('div'); err.className='err';
+    err.textContent = 'FAILED: ' + (e && e.message ? e.message : e);
+    cell.appendChild(err);
+    errors.push(id + ': ' + (e && e.message ? e.message : e));
+  }
+}
+window.__ERRORS__ = errors;
+window.__READY__ = true;
+</script></body></html>
