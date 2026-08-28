@@ -233,6 +233,30 @@ input[type="range"].airo-slider::-moz-range-thumb {
   animation: airo-breathe 2.4s ease-in-out infinite;
 }
 
+/** Expanding ring that marks a point of interest without demanding a click.
+    Paired with a solid dot, so the motion reads as "there is something here"
+    rather than as a loading state. */
+@keyframes airo-ping {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.7;
+  }
+  70%,
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+.airo-ping {
+  animation: airo-ping 2.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .airo-ping {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
