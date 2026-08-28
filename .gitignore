@@ -11,3 +11,5 @@ coverage/
 scripts/.meshy-state.json
 .model-cache/
 scripts/preview/out/
+dist-guide/
+dist-hiw/

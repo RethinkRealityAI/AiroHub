@@ -282,6 +282,15 @@ export default function Home() {
               /
             </span>
             <Link
+              to="/how-it-works"
+              className="pointer-events-auto whitespace-nowrap text-white/35 transition-colors hover:text-white/70"
+            >
+              How it works
+            </Link>
+            <span aria-hidden className="text-white/15">
+              /
+            </span>
+            <Link
               to="/admin"
               className="pointer-events-auto whitespace-nowrap text-white/35 transition-colors hover:text-white/70"
             >
