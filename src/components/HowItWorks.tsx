@@ -393,6 +393,49 @@ function LoopDiagram() {
   );
 }
 
+/**
+ * The questions the guide answers in passing, gathered where somebody scanning
+ * for one of them will actually find it.
+ *
+ * Every answer is drawn from copy that already appears elsewhere on this page —
+ * nothing here is a new claim. The same seven pairs are duplicated verbatim as
+ * FAQPage structured data in how-it-works/index.html, because a static SPA has
+ * no way to emit JSON-LD at request time. That duplication is only honest while
+ * the two agree exactly, so scripts/preview/verify-seo.mjs reads the questions
+ * and answers out of the JSON-LD and asserts each one appears in this page's
+ * rendered text. Edit one side and the check fails; edit both and it passes.
+ */
+const FAQ: { q: string; a: string }[] = [
+  {
+    q: 'Do I need to install anything?',
+    a: 'No install, no account, one room code. Every studio gets a six-character code, and phones join by scanning the QR or typing it.',
+  },
+  {
+    q: 'How many people can paint at once?',
+    a: 'Up to four cans at once. Each phone scans the code and lands straight in the room as a painter with their own colour.',
+  },
+  {
+    q: 'Can I paint without a phone?',
+    a: 'Yes. The studio owns the object, the artwork and the camera — and it paints with a mouse just as happily as with phones.',
+  },
+  {
+    q: 'How does the phone control the spray?',
+    a: 'Point the phone at the screen and hold the trigger. Its gyroscope is read 40 times a second and integrated as rotation deltas, so tilting your wrist never bends a vertical stroke sideways. Shake the phone to re-centre your aim at any time.',
+  },
+  {
+    q: 'What can I paint on?',
+    a: 'A library of real 3D models, streamed on demand and rendered as live thumbnails. Swap the paintable object mid-session: everyone in the room switches with you, and the artwork follows.',
+  },
+  {
+    q: 'Can I keep what we painted?',
+    a: 'Save a PNG, or record a cinematic turntable of the finished object straight off the canvas as a video.',
+  },
+  {
+    q: 'Who controls the camera?',
+    a: 'The studio owns the view by default — otherwise ten people fight over it. To let someone spin the object for the room, tap CAM beside their name in the player list. Per-player, revocable, off by default.',
+  },
+];
+
 /* ------------------------------------------------------------------
    The page
    ------------------------------------------------------------------ */
@@ -753,6 +796,26 @@ export default function HowItWorks() {
             >
               <dt className="label-caps text-[11px] text-white/40">{term}</dt>
               <dd className="text-[0.97rem] leading-relaxed text-white/70">{def}</dd>
+            </div>
+          ))}
+        </dl>
+      </Section>
+
+      {/* ---------------------------- questions ----------------------------- */}
+      <Section
+        id="questions"
+        eyebrow="Straight answers"
+        title="Common questions"
+        lede="The things people ask before they open a room."
+      >
+        <dl className="overflow-hidden rounded-2xl border border-white/12">
+          {FAQ.map(({ q, a }) => (
+            <div
+              key={q}
+              className="grid gap-2 border-b border-white/10 p-4 last:border-b-0 sm:grid-cols-[minmax(14rem,20rem)_1fr] sm:gap-5 sm:px-5"
+            >
+              <dt className="text-[0.97rem] font-semibold leading-snug text-white/85">{q}</dt>
+              <dd className="text-[0.97rem] leading-relaxed text-white/70">{a}</dd>
             </div>
           ))}
         </dl>

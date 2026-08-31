@@ -11,6 +11,11 @@
       name="description"
       content="A collaborative 3D spray-paint studio. Put a real 3D object on the stage and paint it from any angle with up to four phones as spray cans."
     />
+    <!-- Every client route soft-200s onto this document, so the canonical is
+         pinned to the landing page itself: without it a crawler that reaches
+         /canvas/ABC123 would index a throwaway room code as a real page. The
+         app routes are additionally noindexed by X-Robots-Tag in netlify.toml. -->
+    <link rel="canonical" href="https://airohub.netlify.app/" />
     <meta name="theme-color" content="#05050a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -21,7 +26,34 @@
       content="Paint real 3D objects together. Up to four phones become motion-tracked spray cans."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://airohub.netlify.app/" />
+    <meta property="og:site_name" content="AiroHub" />
+    <!-- Absolute by requirement: unfurlers fetch this without a document base.
+         Built from the guide's real landing screenshot by scripts/generate-og.mjs. -->
+    <meta property="og:image" content="https://airohub.netlify.app/og-cover.jpg" />
+    <meta
+      property="og:image:alt"
+      content="The AiroHub landing page: a giant 3D spray can floating over a wall of fresh paint, beside the headline and the Create a Studio button."
+    />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- summary_large_image was already declared here with no image behind it,
+         which reserves a large card and then renders it empty. Twitter reads
+         its own tags first and only falls back to Open Graph, so the card is
+         spelled out rather than left to the fallback. -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="AiroHub — Collaborative 3D Spray Paint Studio" />
+    <meta
+      name="twitter:description"
+      content="Paint real 3D objects together. Up to four phones become motion-tracked spray cans."
+    />
+    <meta name="twitter:image" content="https://airohub.netlify.app/og-cover.jpg" />
+    <meta
+      name="twitter:image:alt"
+      content="The AiroHub landing page: a giant 3D spray can floating over a wall of fresh paint, beside the headline and the Create a Studio button."
+    />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -29,13 +61,69 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap"
       rel="stylesheet"
     />
+    <!-- The hero scene is code-split, so this still frame is what fills the
+         stage first. Preloaded because it is discovered from a style attribute
+         React has not written yet, which is far too late for the largest paint
+         on the page. -->
+    <link
+      rel="preload"
+      as="image"
+      href="/ui/hero-poster.webp"
+      type="image/webp"
+      fetchpriority="high"
+    />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF4D1C'/%3E%3Crect x='12' y='11' width='8' height='14' rx='3' fill='white'/%3E%3Crect x='14' y='6' width='4' height='4' rx='1' fill='white'/%3E%3C/svg%3E"
     />
+
+    <!-- The app is a client-rendered SPA, so a crawler that does not run the
+         bundle sees an empty #root and nothing else. This is the only
+         machine-readable description of what the product is; featureList is
+         copied from the claims actually made on the page below, never invented. -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "AiroHub",
+        "url": "https://airohub.netlify.app/",
+        "description": "A collaborative 3D spray-paint studio. Put a real 3D object on the stage and paint it from any angle with up to four phones as spray cans.",
+        "applicationCategory": "DesignApplication",
+        "operatingSystem": "Any (web browser)",
+        "browserRequirements": "Requires WebGL",
+        "image": "https://airohub.netlify.app/og-cover.jpg",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "featureList": [
+          "Up to four painters",
+          "14 paintable objects",
+          "Live in the same room",
+          "Studio on the big screen",
+          "Phones as spray cans"
+        ]
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Real content, not an apology: a reader without the bundle still learns
+         what AiroHub is and gets a route to the page that explains it. -->
+    <noscript>
+      <div style="max-width: 34rem; margin: 0 auto; padding: 3rem 1.5rem; font-family: system-ui, sans-serif; color: #f4f4f7">
+        <h1 style="font-size: 1.9rem; line-height: 1.1; margin: 0 0 1rem">AiroHub</h1>
+        <p style="line-height: 1.65; color: rgba(244, 244, 247, 0.75)">
+          AiroHub is a collaborative 3D spray-paint studio that runs in the browser. Put a real 3D
+          object on the big screen, and up to four phones become motion-tracked spray cans pointed
+          at it. Everyone paints the same object at the same time — no install, no account, one room
+          code. The studio itself needs JavaScript and WebGL, but the
+          <a href="/how-it-works" style="color: #ff4d1c">how it works</a> guide explains the whole
+          thing in words and pictures.
+        </p>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

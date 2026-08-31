@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <!--
+      A second Vite entry, not a second app.
+
+      The guide is the site's only real body of prose, and it was being served
+      the landing page's head: same title, same description, no canonical of its
+      own. There is no SSR here and none is wanted, so the fix is a static
+      multi-entry build — this file is `build.rollupOptions.input.howItWorks`,
+      it boots the same /src/main.tsx, and the router lands on the same
+      HowItWorks component. What changes is that Netlify now has a real
+      document to hand a crawler at /how-it-works instead of index.html.
+
+      The FAQPage block at the bottom is paired with a "Common questions"
+      section in src/components/HowItWorks.tsx and the two must stay identical
+      word for word — structured data that is not on the page is the one SEO
+      sin search engines actually punish. scripts/preview/verify-seo.mjs
+      asserts every question and answer here appears in the rendered body, so
+      editing one side alone fails the check rather than shipping quietly.
+    -->
+    <title>How AiroHub Works — The Field Guide</title>
+    <meta
+      name="description"
+      content="Put a 3D object on the big screen. Everyone points their phone at it like a spray can, and you paint it together, live. The full walkthrough of the studio, the phone controller and the ideas underneath."
+    />
+    <link rel="canonical" href="https://airohub.netlify.app/how-it-works" />
+    <meta name="theme-color" content="#05050a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <meta property="og:title" content="How AiroHub Works — The Field Guide" />
+    <meta
+      property="og:description"
+      content="Put a 3D object on the big screen. Everyone points their phone at it like a spray can, and you paint it together, live."
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="https://airohub.netlify.app/how-it-works" />
+    <meta property="og:site_name" content="AiroHub" />
+    <meta property="og:image" content="https://airohub.netlify.app/og-cover.jpg" />
+    <meta
+      property="og:image:alt"
+      content="The AiroHub landing page: a giant 3D spray can floating over a wall of fresh paint, beside the headline and the Create a Studio button."
+    />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="How AiroHub Works — The Field Guide" />
+    <meta
+      name="twitter:description"
+      content="Put a 3D object on the big screen. Everyone points their phone at it like a spray can, and you paint it together, live."
+    />
+    <meta name="twitter:image" content="https://airohub.netlify.app/og-cover.jpg" />
+    <meta
+      name="twitter:image:alt"
+      content="The AiroHub landing page: a giant 3D spray can floating over a wall of fresh paint, beside the headline and the Create a Studio button."
+    />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF4D1C'/%3E%3Crect x='12' y='11' width='8' height='14' rx='3' fill='white'/%3E%3Crect x='14' y='6' width='4' height='4' rx='1' fill='white'/%3E%3C/svg%3E"
+    />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Do I need to install anything?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No install, no account, one room code. Every studio gets a six-character code, and phones join by scanning the QR or typing it."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How many people can paint at once?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Up to four cans at once. Each phone scans the code and lands straight in the room as a painter with their own colour."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I paint without a phone?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. The studio owns the object, the artwork and the camera — and it paints with a mouse just as happily as with phones."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does the phone control the spray?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Point the phone at the screen and hold the trigger. Its gyroscope is read 40 times a second and integrated as rotation deltas, so tilting your wrist never bends a vertical stroke sideways. Shake the phone to re-centre your aim at any time."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What can I paint on?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A library of real 3D models, streamed on demand and rendered as live thumbnails. Swap the paintable object mid-session: everyone in the room switches with you, and the artwork follows."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I keep what we painted?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Save a PNG, or record a cinematic turntable of the finished object straight off the canvas as a video."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Who controls the camera?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The studio owns the view by default — otherwise ten people fight over it. To let someone spin the object for the room, tap CAM beside their name in the player list. Per-player, revocable, off by default."
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>
+      <div style="max-width: 34rem; margin: 0 auto; padding: 3rem 1.5rem; font-family: system-ui, sans-serif; color: #f4f4f7">
+        <h1 style="font-size: 1.9rem; line-height: 1.1; margin: 0 0 1rem">How AiroHub works</h1>
+        <p style="line-height: 1.65; color: rgba(244, 244, 247, 0.75)">
+          Put a 3D object on the big screen. Everyone points their phone at it like a spray can, and
+          you paint it together, live. Nobody streams pixels: a phone sends only where it is aiming,
+          and every screen in the room rebuilds the same artwork from the same instructions. No
+          install, no account, one room code. The illustrated guide and the studio itself both need
+          JavaScript — <a href="/" style="color: #ff4d1c">open the studio</a>.
+        </p>
+      </div>
+    </noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

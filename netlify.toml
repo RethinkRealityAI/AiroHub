@@ -14,6 +14,18 @@
   VITE_SUPABASE_URL = "https://zrtftliozslrjomxbfrr.supabase.co"
   VITE_SUPABASE_ANON_KEY = "sb_publishable_4JZPu-HuA4MmYFqLW6DcnQ_HkfMvqSn"
 
+# The guide is built as its own HTML entry (vite rollupOptions.input) so it can
+# carry its own title, canonical and FAQ structured data. Netlify would resolve
+# the pretty URL to that file on its own, but the SPA catch-all below is one
+# ordering mistake away from swallowing it and serving the landing page's head
+# instead — which is exactly the bug this whole pass exists to fix. Stated
+# explicitly, and stated ABOVE the catch-all, because redirect rules are matched
+# in file order and the first match wins.
+[[redirects]]
+  from = "/how-it-works"
+  to = "/how-it-works/index.html"
+  status = 200
+
 # SPA fallback. Functions and static assets are matched first by Netlify, so
 # this only catches client-side routes such as /canvas/:id and /controller/:id.
 [[redirects]]
@@ -32,6 +44,28 @@
   for = "/assets/*"
   [headers.values]
     Cache-Control = "public, max-age=31536000, immutable"
+
+# Every client route soft-200s onto index.html, so without these a crawler that
+# finds a shared room link indexes a throwaway session code as a page — with the
+# landing page's title and description on it, competing with the landing page
+# itself. The rooms are ephemeral and hold no content of their own; only / and
+# /how-it-works are worth an index entry. robots.txt disallows the same three
+# prefixes, but a Disallow only stops the crawl, not the indexing of a URL
+# somebody else linked to; the header is what actually keeps them out.
+[[headers]]
+  for = "/canvas/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+
+[[headers]]
+  for = "/controller/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
+
+[[headers]]
+  for = "/admin*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"
 
 [[headers]]
   for = "/*"
