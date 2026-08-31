@@ -194,6 +194,9 @@ export default function Home() {
           >
             <GlassPanel
               strong
+              // The one panel on the site with a live 3D scene running behind
+              // it, so the rim refraction has something worth bending.
+              liquid
               className="splatter-accent splatter-accent-bl p-5 sm:p-6"
               style={{
                 // A darker glass than the default tint: the can can pass right

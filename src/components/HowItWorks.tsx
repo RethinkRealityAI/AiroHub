@@ -14,6 +14,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useId, useRef, useState 
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { ArrowRight, Plus, X } from 'lucide-react';
+import { GlassPanel } from '../ui/Glass';
 
 const GuideStage = lazy(() =>
   import('../scene/GuideStage').then((m) => ({ default: m.GuideStage ?? m.default }))
@@ -624,9 +625,11 @@ export default function HowItWorks() {
               alt: 'The phone controller in Pad mode: a flat trackpad mapped onto the texture.',
             },
           ].map((m) => (
-            <div
+            <GlassPanel
               key={m.chip}
-              className="glass glass-sheen flex flex-col gap-4 rounded-2xl p-5"
+              liquid
+              radius="rounded-2xl"
+              className="flex flex-col gap-4 p-5"
               style={{ borderColor: `${m.accent}44` }}
             >
               <span
@@ -650,7 +653,7 @@ export default function HowItWorks() {
                 <h3 className="text-xl font-black uppercase leading-none tracking-tight">{m.head}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-white/60">{m.body}</p>
               </div>
-            </div>
+            </GlassPanel>
           ))}
         </div>
         <p className="mt-6 text-sm text-white/45">
