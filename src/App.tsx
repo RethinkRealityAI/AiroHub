@@ -14,6 +14,11 @@ import HowItWorks from './components/HowItWorks';
 // in a session ever needs, so it only loads when /admin is actually visited.
 const AdminView = lazy(() => import('./components/AdminView'));
 
+// The review gallery pulls in three.js, drei and the whole model loader to put
+// every catalog asset on a turntable — the same reasoning as /admin, and the
+// same lazy block below.
+const ReviewGallery = lazy(() => import('./review/ReviewGallery'));
+
 export default function App() {
   return (
     <Router>
@@ -36,8 +41,21 @@ export default function App() {
             </Suspense>
           }
         />
+        <Route
+          path="/admin/review"
+          element={
+            <Suspense
+              fallback={
+                <div className="min-h-[100svh] stage-vignette grid place-items-center">
+                  <span className="airo-breathe label-caps text-white/40">Loading review…</span>
+                </div>
+              }
+            >
+              <ReviewGallery />
+            </Suspense>
+          }
+        />
       </Routes>
     </Router>
   );
 }
-
