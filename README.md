@@ -67,6 +67,16 @@ generate + optimize.
 > ("brand new, pristine, plain white … no dirt, no weathering"). Meshy's refine pass
 > otherwise leans heavily toward weathered textures, which makes a poor painting surface.
 
+### Reviewing assets
+
+`/admin/review` puts every catalog model and every admin upload on a synchronized
+turntable grid for a ship-it / needs-work pass, with notes persisted to Supabase
+(`airohub_model_reviews`) so multiple reviewers share one checklist. Uploads are
+**gated**: a custom model only appears in the object picker once a reviewer approves
+it, and if the review table can't be reached the gate fails closed rather than letting
+unreviewed geometry into live rooms. Full contract and behaviour notes in
+[`src/review/README.md`](src/review/README.md).
+
 ---
 
 ## Motion tracking
@@ -148,3 +158,7 @@ BASE=http://127.0.0.1:4173 npm run shots
 Screenshots land in `scripts/preview/out/` across desktop, tablet and phone viewports.
 The harness fails the run on console errors, page errors or failed requests, so a page
 that looks fine but is quietly broken still gets caught.
+
+For agent-driven work there is a second tier: [docs/AGENT-VISUAL-QA.md](docs/AGENT-VISUAL-QA.md)
+says which tool answers which question — SceneProof for fresh leaf-component and scene
+renders, the `verify-*.mjs` harnesses for anything integrated.
