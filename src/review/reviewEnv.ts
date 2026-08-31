@@ -104,21 +104,35 @@ function disposeScene(scene: THREE.Scene) {
   });
 }
 
-const cache = new Map<ReviewEnvKind, THREE.Texture>();
+/**
+ * Keyed by the renderer, not just the kind. A PMREM bake is a render target on
+ * one specific WebGL context; leaving `/admin/review` destroys that context,
+ * and a plain per-kind cache would hand the next visit's fresh renderer a
+ * texture whose backing store died with the old one — every card lit by
+ * `scene.environment` alone then renders black. A WeakMap keyed by the
+ * renderer makes staleness impossible by construction, and lets a torn-down
+ * renderer's entries leave with it instead of pinning dead GPU handles.
+ */
+const cache = new WeakMap<THREE.WebGLRenderer, Map<ReviewEnvKind, THREE.WebGLRenderTarget>>();
 
 /**
- * The cached PMREM cube-UV texture for one environment.
+ * The cached PMREM cube-UV texture for one environment on one renderer.
  *
- * The renderer is only borrowed for the bake; the returned texture outlives
- * the generator, which is disposed immediately (it holds blur materials and
+ * The renderer is borrowed for the bake; the returned texture outlives the
+ * generator, which is disposed immediately (it holds blur materials and
  * scratch targets that nothing needs afterwards).
  */
 export function getReviewEnvironment(
   renderer: THREE.WebGLRenderer,
   kind: ReviewEnvKind
 ): THREE.Texture {
-  const cached = cache.get(kind);
-  if (cached) return cached;
+  let perRenderer = cache.get(renderer);
+  if (!perRenderer) {
+    perRenderer = new Map();
+    cache.set(renderer, perRenderer);
+  }
+  const cached = perRenderer.get(kind);
+  if (cached) return cached.texture;
 
   const scene = kind === 'neutral' ? (new RoomEnvironment() as unknown as THREE.Scene) : buildStudioEnvScene();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -129,15 +143,19 @@ export function getReviewEnvironment(
   disposeScene(scene);
 
   target.texture.name = `airo-review-env-${kind}`;
-  cache.set(kind, target.texture);
+  perRenderer.set(kind, target);
   return target.texture;
 }
 
 /**
- * Drops both bakes. Only for a renderer teardown — the textures belong to a
- * WebGL context, so they must not outlive it.
+ * Drops one renderer's bakes eagerly. The WeakMap already guarantees a new
+ * renderer never sees an old context's texture; this exists so the gallery can
+ * release the render targets the moment its canvas unmounts instead of waiting
+ * for the collector.
  */
-export function disposeReviewEnvironments() {
-  for (const texture of cache.values()) texture.dispose();
-  cache.clear();
+export function disposeReviewEnvironments(renderer: THREE.WebGLRenderer) {
+  const perRenderer = cache.get(renderer);
+  if (!perRenderer) return;
+  for (const target of perRenderer.values()) target.dispose();
+  cache.delete(renderer);
 }

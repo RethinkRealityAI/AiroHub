@@ -105,7 +105,7 @@ export interface CameraPose { azimuth: number; polar: number; zoom: number }
 Also exported: `verdictOf(map, key)`, `toneOf(row)` (the one place the flagged
 rule lives), `TONE_COLOR` / `TONE_LABEL`, `sharedTurntableYaw(elapsed, spinning)`,
 `fitDistance(radius, aspect, margin?)`, `GRID_POSE`, `REVIEW_FOV`,
-`buildStudioEnvScene()` and `disposeReviewEnvironments()`.
+`buildStudioEnvScene()` and `disposeReviewEnvironments(renderer)`.
 
 Debug hook, asserted by `scripts/preview/verify-asset-review.mjs`:
 

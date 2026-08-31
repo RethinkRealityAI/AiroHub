@@ -33,7 +33,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { Canvas, invalidate } from '@react-three/fiber';
+import { Canvas, invalidate, useThree } from '@react-three/fiber';
 import { View } from '@react-three/drei';
 import {
   ArrowLeft,
@@ -66,7 +66,7 @@ import { bucketAssets, buildChecklist } from './exportChecklist';
 import { ReviewCard, toneOf } from './ReviewCard';
 import { ReviewDetail } from './ReviewDetail';
 import { DEFAULT_DIAGNOSTICS, type ReviewDiagnostics, type StageStatus } from './TurntableView';
-import type { ReviewEnvKind } from './reviewEnv';
+import { disposeReviewEnvironments, type ReviewEnvKind } from './reviewEnv';
 
 const REVIEWER_KEY = 'airo:review:reviewer';
 
@@ -139,6 +139,18 @@ const StatChip: React.FC<{ paint: string; icon: React.ReactNode; children: React
 /* ------------------------------------------------------------------
    The route
    ------------------------------------------------------------------ */
+
+/**
+ * Frees the PMREM bakes with the context they belong to. The per-renderer
+ * cache in `reviewEnv.ts` already guarantees a remount never sees a dead
+ * context's texture; this releases the old render targets the moment the
+ * shared canvas unmounts instead of waiting for the collector.
+ */
+function EnvironmentJanitor(): null {
+  const gl = useThree((state) => state.gl);
+  useEffect(() => () => disposeReviewEnvironments(gl), [gl]);
+  return null;
+}
 
 export default function ReviewGallery(): React.JSX.Element {
   const backendReady = isBackendConfigured();
@@ -814,6 +826,7 @@ export default function ReviewGallery(): React.JSX.Element {
         style={{ position: 'fixed', inset: 0, zIndex: 70 }}
       >
         <View.Port />
+        <EnvironmentJanitor />
       </Canvas>
 
       <ReviewDetail
