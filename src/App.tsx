@@ -7,6 +7,8 @@ import { lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Home from './components/Home';
 import HowItWorks from './components/HowItWorks';
+import NotFound from './components/NotFound';
+import { RouteTracker } from './analytics/RouteTracker';
 
 // The studio and the phone controller are the only screens that need three.js,
 // yet importing them statically made the 1.1 MB rendering chunk a hard
@@ -21,6 +23,11 @@ const ControllerView = lazy(() => import('./components/ControllerView'));
 // in a session ever needs, so it only loads when /admin is actually visited.
 const AdminView = lazy(() => import('./components/AdminView'));
 
+// `NotFound` and `RouteTracker` are deliberately NOT lazy. The tracker has to
+// exist on the very first render to see the landing page view, and the 404 is
+// a handful of elements that must render instantly on a mistyped URL — a
+// Suspense fallback flashing before "Nothing here" would read as a real load.
+
 // The review gallery pulls in three.js, drei and the whole model loader to put
 // every catalog asset on a turntable — the same reasoning as /admin, and the
 // same lazy block below.
@@ -29,6 +36,7 @@ const ReviewGallery = lazy(() => import('./review/ReviewGallery'));
 export default function App() {
   return (
     <Router>
+      <RouteTracker />
       <Routes>
         <Route path="/" element={<Home />} />
         <Route
@@ -88,6 +96,8 @@ export default function App() {
             </Suspense>
           }
         />
+        {/* Last, and it must stay last: this is the catch-all. */}
+        <Route path="*" element={<NotFound />} />
       </Routes>
     </Router>
   );

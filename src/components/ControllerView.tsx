@@ -55,6 +55,9 @@ import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
 import { AimTracker, ShakeDetector } from '../utils/motion';
+import { useFlags } from '../config/flags';
+import { track } from '../analytics/track';
+import { FeedbackButton } from '../feedback/FeedbackButton';
 import { TargetObjectType, PlayerInfo, ImageStampData } from '../types';
 
 type ControllerMode = 'aim' | 'paint' | 'pad';
@@ -403,8 +406,35 @@ export default function ControllerView() {
     `ctrl-${Math.random().toString(36).slice(2, 8)}${Date.now().toString(36).slice(-4)}`
   );
 
+  /**
+   * Read up here, not down at the mode switch that uses it: the sensor
+   * permission gate returns early further down, and a hook called after an
+   * early return is a hook that sometimes does not run.
+   */
+  const flags = useFlags();
+
   const [mode, setMode] = useState<ControllerMode>('aim');
   const [interaction, setInteraction] = useState<Interaction>('paint');
+
+  /**
+   * Pad can be switched off from the dashboard while phones are holding it.
+   * The flag arrives a moment after first paint, so a phone that was on Pad
+   * would be left staring at a stage whose segment no longer exists — land it
+   * on Paint, which needs no sensors and no permission.
+   */
+  useEffect(() => {
+    if (!flags.ui.padMode && mode === 'pad') setMode('paint');
+  }, [flags.ui.padMode, mode]);
+
+  // Guarded on the room it last reported rather than a "first run" flag:
+  // StrictMode mounts effects twice in development, and one arrival is one
+  // arrival.
+  const enteredRoom = useRef<string | null>(null);
+  useEffect(() => {
+    if (enteredRoom.current === (roomId ?? null)) return;
+    enteredRoom.current = roomId ?? null;
+    track('room.enter', { role: 'controller' }, roomId);
+  }, [roomId]);
 
   /* ------------------------------ stamps ------------------------------ */
 
@@ -650,6 +680,9 @@ export default function ControllerView() {
   );
   useEffect(() => () => stampBatcher.dispose(), [stampBatcher]);
 
+  /** One per mount: the moment this phone stops being a viewer. */
+  const paintedOnce = useRef(false);
+
   /** Applies stamps locally AND queues them for the room — one code path for
    *  both the 3D preview and the flat pad, so the textures cannot diverge. */
   const handleStamps = useCallback(
@@ -659,6 +692,10 @@ export default function ControllerView() {
         stampBatcher.begin();
       }
       if (stamps.length) {
+        if (!paintedOnce.current) {
+          paintedOnce.current = true;
+          track('paint.first', { role: 'controller' }, roomId);
+        }
         const { tool: t, color: c } = live.current;
         paintSurface.applyStamps(stamps, t, c, strokeIdRef.current ?? undefined);
         paintSurface.commit();
@@ -669,7 +706,7 @@ export default function ControllerView() {
         strokeIdRef.current = null;
       }
     },
-    [stampBatcher, paintSurface]
+    [stampBatcher, paintSurface, roomId]
   );
 
   /* ----------------------------- sensors ----------------------------- */
@@ -1038,7 +1075,9 @@ export default function ControllerView() {
     { value: 'aim' as const, label: 'Aim', icon: <Crosshair size={13} />, accent: '#FF4D1C' },
     { value: 'paint' as const, label: 'Paint', icon: <Pencil size={13} />, accent: '#22D3EE' },
     { value: 'pad' as const, label: 'Pad', icon: <Square size={13} />, accent: '#A78BFA' },
-  ].filter((option) => option.value !== 'aim' || sensorsReady);
+  ]
+    .filter((option) => option.value !== 'aim' || sensorsReady)
+    .filter((option) => option.value !== 'pad' || flags.ui.padMode);
 
   return (
     <div className="fixed inset-0 stage-vignette text-white flex flex-col overflow-hidden touch-none select-none">
@@ -1103,6 +1142,7 @@ export default function ControllerView() {
           >
             {muted ? <VolumeX size={13} /> : <Volume2 size={13} className="text-[var(--color-airo-flame)]" />}
           </GlassIconButton>
+          <FeedbackButton variant="inline" roomId={roomId} />
         </div>
       </header>
 
@@ -1116,6 +1156,7 @@ export default function ControllerView() {
           value={mode}
           onChange={(next) => {
             setMode(next);
+            track('controller.mode', { mode: next }, roomId);
             sounds.playClick(1.25);
             navigator.vibrate?.(10);
           }}

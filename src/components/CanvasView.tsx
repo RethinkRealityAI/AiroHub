@@ -18,7 +18,7 @@ import {
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2,
   Wifi, WifiOff, Undo2, Redo2, History, Video, HelpCircle,
-  Stamp as StampIcon, Clapperboard,
+  Stamp as StampIcon, Clapperboard, Megaphone, X,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -45,7 +45,7 @@ import { ShowcasePanel } from '../showcase/ShowcasePanel';
 import type { ShowcaseHandles } from '../showcase/recorder';
 import { Finish } from '../scene/PaintTarget';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
-import { GlassPanel, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
+import { GlassPanel, GlassPill, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
 import { WelcomeGuide } from './WelcomeGuide';
 import { ColorWell } from '../ui/ColorWell';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
@@ -55,6 +55,9 @@ import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realti
 import { sounds } from '../utils/audio';
 import { parseUploaded3DModel } from '../utils/model3dLoader';
 import { TargetObjectType, PlayerState, Uploaded3DModelInfo, ImageStampData } from '../types';
+import { getFlags, useFlags } from '../config/flags';
+import { track } from '../analytics/track';
+import { FeedbackButton } from '../feedback/FeedbackButton';
 
 /**
  * Turns a tap on the stage into a surface UV.
@@ -382,6 +385,23 @@ function makeHost(color: string): PlayerState {
 export default function CanvasView() {
   const { roomId } = useParams<{ roomId: string }>();
 
+  /**
+   * What the owner has switched on. The defaults resolve synchronously (see
+   * src/config/flags.ts), so the AI button and the stamp tool are absent on the
+   * first frame rather than appearing and then being taken away.
+   */
+  const flags = useFlags();
+
+  // Guarded on the room it last reported rather than a "first run" flag:
+  // StrictMode mounts effects twice in development, and one arrival is one
+  // arrival.
+  const enteredRoom = useRef<string | null>(null);
+  useEffect(() => {
+    if (enteredRoom.current === (roomId ?? null)) return;
+    enteredRoom.current = roomId ?? null;
+    track('room.enter', { role: 'studio' }, roomId);
+  }, [roomId]);
+
   const paintSurface = useMemo(() => new PaintSurface(CANVAS_RES), []);
   const orbitRef = useRef<any>(null);
 
@@ -475,6 +495,27 @@ export default function CanvasView() {
       window.history.replaceState({}, '');
     }
   }, [guideOpen]);
+  /**
+   * The owner's banner, dismissed per tab and keyed by its own text: changing
+   * the notice makes it a new notice, so an announcement that matters is not
+   * silenced by someone having waved away the last one.
+   */
+  const [noticeSeen, setNoticeSeen] = useState(() => {
+    try {
+      return sessionStorage.getItem('airo:notice:seen') ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const dismissNotice = () => {
+    setNoticeSeen(flags.notice);
+    try {
+      sessionStorage.setItem('airo:notice:seen', flags.notice);
+    } catch {
+      /* private mode — it will be back on the next load */
+    }
+  };
+
   const [aiSheet, setAiSheet] = useState(false);
   const [uploadSheet, setUploadSheet] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -581,9 +622,15 @@ export default function CanvasView() {
   const stampBatchers = useRef(
     new Map<string, { batcher: StampBatcher; tool: 'spray' | 'brush'; color: string; strokeId: string }>()
   );
+  /** One per mount: the first paint this studio put on the model. */
+  const paintedOnce = useRef(false);
   const broadcastStamps = useCallback(
     (playerId: string, tool: 'spray' | 'brush', color: string, stamps: PaintStamp[], strokeId: string) => {
       roomStateKnown.current = true;
+      if (!paintedOnce.current && stamps.length) {
+        paintedOnce.current = true;
+        track('paint.first', { role: 'studio' }, roomId);
+      }
       let entry = stampBatchers.current.get(playerId);
       if (!entry || entry.tool !== tool || entry.color !== color || entry.strokeId !== strokeId) {
         entry?.batcher.dispose();
@@ -603,7 +650,7 @@ export default function CanvasView() {
       }
       entry.batcher.push(stamps);
     },
-    []
+    [roomId]
   );
   useEffect(
     () => () => {
@@ -958,7 +1005,9 @@ export default function CanvasView() {
       if (key === 'f') toggleFullscreen();
       if (key === 'b') setHostTool((t) => (t === 'spray' ? 'brush' : 'spray'));
       if (key === 'o') setStageMode((m) => (m === 'orbit' ? 'paint' : 'orbit'));
-      if (key === 's') setStageMode((m) => (m === 'stamp' ? 'paint' : 'stamp'));
+      // `getFlags()`, not the hook's value: this listener is bound once with
+      // empty deps, so a captured flags object would be the one from mount.
+      if (key === 's' && getFlags().ui.stamps) setStageMode((m) => (m === 'stamp' ? 'paint' : 'stamp'));
       if (key === 'z' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         if (e.shiftKey) redoRef.current();
@@ -995,9 +1044,10 @@ export default function CanvasView() {
       setObjectId(next);
       sounds.playClick(1.3);
       roomStateKnown.current = true;
+      track('object.change', { objectId: next }, roomId);
       connectionRef.current?.emit('change-object', { objectType: next });
     },
-    []
+    [roomId]
   );
 
   const handleHostColor = (hex: string) => {
@@ -1063,6 +1113,7 @@ export default function CanvasView() {
       paintSurface.commit();
       sounds.playWhoosh();
       roomStateKnown.current = true;
+      track('stamp.place', { builtin: asset.origin === 'builtin' }, roomId);
       updateLibrary((library) => markRecent(library, asset.id));
       connectionRef.current?.emit('image-stamp', {
         playerId: HOST_ID,
@@ -1113,6 +1164,7 @@ export default function CanvasView() {
 
   const saveSnapshot = () => {
     sounds.playClick(1.6);
+    track('snapshot.save', { objectId }, roomId);
     const link = document.createElement('a');
     const label = OBJECT_BY_ID.get(objectId)?.label.replace(/\s+/g, '-') ?? objectId;
     link.download = `AiroHub-${label}-${roomId || 'art'}.png`;
@@ -1140,6 +1192,7 @@ export default function CanvasView() {
   const copyLink = () => {
     navigator.clipboard.writeText(controllerUrl);
     setCopied(true);
+    track('invite.copy', undefined, roomId);
     sounds.playClick(1.5);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -1147,6 +1200,7 @@ export default function CanvasView() {
   /* -------------------------------- AI -------------------------------- */
 
   const callAi = async (path: string, body: unknown) => {
+    track('ai.run', { route: path }, roomId);
     const res = await fetch(`/api/ai/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1330,7 +1384,10 @@ export default function CanvasView() {
 
             <div className="flex items-center gap-2 shrink-0">
               <button
-                onClick={() => setInviteSheet(true)}
+                onClick={() => {
+                  setInviteSheet(true);
+                  track('invite.open', undefined, roomId);
+                }}
                 className="tap glass glass-sheen splat-btn-2 rounded-full pl-2 pr-3 py-1.5 flex items-center gap-2"
                 style={{ '--paint': 'rgba(34,211,238,0.34)' } as React.CSSProperties}
                 title="Invite players"
@@ -1353,13 +1410,29 @@ export default function CanvasView() {
                 </div>
               </button>
 
-              <GlassIconButton onClick={() => setGuideOpen(true)} title="How it works" size={38}>
+              <GlassIconButton
+                onClick={() => {
+                  setGuideOpen(true);
+                  track('guide.open', { role: 'studio' }, roomId);
+                }}
+                title="How it works"
+                size={38}
+              >
                 <HelpCircle size={15} className="text-[var(--color-airo-aqua)]" />
               </GlassIconButton>
               <span className="hidden md:contents">
-              <GlassIconButton onClick={() => setAiSheet(true)} title="AI copilot" size={38}>
-                <Wand2 size={15} className="text-[var(--color-airo-violet)]" />
-              </GlassIconButton>
+              {flags.ui.aiPanel && (
+                <GlassIconButton
+                  onClick={() => {
+                    setAiSheet(true);
+                    track('ai.open', undefined, roomId);
+                  }}
+                  title="AI copilot"
+                  size={38}
+                >
+                  <Wand2 size={15} className="text-[var(--color-airo-violet)]" />
+                </GlassIconButton>
+              )}
               <GlassIconButton
                 onClick={() => {
                   const next = sounds.toggleMute();
@@ -1378,6 +1451,37 @@ export default function CanvasView() {
               </span>
             </div>
           </motion.header>
+        )}
+      </AnimatePresence>
+
+      {/* --------------------------- owner's notice --------------------------- */}
+      {/* One line, under the top bar, over nothing that matters: the frame is
+          click-through so an announcement can never cost somebody a brush
+          stroke, and only the pill itself takes the pointer. */}
+      <AnimatePresence>
+        {!fullscreen && Boolean(flags.notice) && noticeSeen !== flags.notice && (
+          <motion.div
+            initial={{ y: -16, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -16, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+            className="absolute top-16 inset-x-0 z-30 flex justify-center pointer-events-none"
+          >
+            <GlassPill className="pointer-events-auto max-w-[min(92vw,640px)] pl-3 pr-1.5 py-1.5">
+              <Megaphone size={12} className="shrink-0 text-[var(--color-airo-ember)]" />
+              <span className="min-w-0 truncate text-[11px] font-medium text-white/80">
+                {flags.notice}
+              </span>
+              <button
+                type="button"
+                onClick={dismissNotice}
+                aria-label="Dismiss notice"
+                className="tap grid h-6 w-6 shrink-0 place-items-center rounded-full text-white/50 hover:bg-white/10 hover:text-white"
+              >
+                <X size={12} />
+              </button>
+            </GlassPill>
+          </motion.div>
         )}
       </AnimatePresence>
 
@@ -1458,27 +1562,48 @@ export default function CanvasView() {
                     ink: 'text-white',
                   },
                 ] as const
-              ).map((entry) => {
-                const active = stageMode === entry.mode;
-                return (
-                  <button
-                    key={entry.mode}
-                    onClick={() => {
-                      setStageMode(entry.mode);
-                      sounds.playClick(1.2);
-                    }}
-                    className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
-                      active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
-                    }`}
-                    style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
-                    title={entry.title}
-                    aria-pressed={active}
-                  >
-                    {entry.icon}
-                  </button>
-                );
-              })}
+              )
+                .filter((entry) => entry.mode !== 'stamp' || flags.ui.stamps)
+                .map((entry) => {
+                  const active = stageMode === entry.mode;
+                  return (
+                    <button
+                      key={entry.mode}
+                      onClick={() => {
+                        setStageMode(entry.mode);
+                        sounds.playClick(1.2);
+                      }}
+                      className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
+                        active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
+                      }`}
+                      style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
+                      title={entry.title}
+                      aria-pressed={active}
+                    >
+                      {entry.icon}
+                    </button>
+                  );
+                })}
             </GlassPanel>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* --------------------------- right feedback rail --------------------------- */}
+      {/* The left island's mirror image. Feedback belongs on the studio screen
+          — it is where a session actually goes wrong — but a fixed corner
+          button would sit under the bottom dock, so it rides the free middle
+          of the right edge and leaves with the rest of the furniture in
+          fullscreen. */}
+      <AnimatePresence>
+        {!fullscreen && (
+          <motion.div
+            initial={{ x: 80, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            exit={{ x: 80, opacity: 0 }}
+            className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 z-30"
+          >
+            <FeedbackButton variant="inline" roomId={roomId} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1545,10 +1670,10 @@ export default function CanvasView() {
                     if (stageMode !== 'paint') setStageMode('paint');
                   }}
                   options={[
-                    { value: 'spray', label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
-                    { value: 'brush', label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
-                    { value: 'stamp', label: 'Stamp', icon: <StampIcon size={13} />, accent: '#FFB020' },
-                  ]}
+                    { value: 'spray' as const, label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
+                    { value: 'brush' as const, label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
+                    { value: 'stamp' as const, label: 'Stamp', icon: <StampIcon size={13} />, accent: '#FFB020' },
+                  ].filter((option) => option.value !== 'stamp' || flags.ui.stamps)}
                 />
                 <ColorWell color={hostColor} onChange={handleHostColor} />
               </div>
@@ -1610,13 +1735,15 @@ export default function CanvasView() {
               <GlassIconButton onClick={clearCanvas} title="Clear paint" size={38}>
                 <Trash2 size={15} />
               </GlassIconButton>
-              <GlassIconButton
-                onClick={() => setShowcaseOpen(true)}
-                title="Showcase — record a turntable video of your piece"
-                size={38}
-              >
-                <Clapperboard size={15} className="text-[var(--color-airo-aqua)]" />
-              </GlassIconButton>
+              {flags.ui.showcase && (
+                <GlassIconButton
+                  onClick={() => setShowcaseOpen(true)}
+                  title="Showcase — record a turntable video of your piece"
+                  size={38}
+                >
+                  <Clapperboard size={15} className="text-[var(--color-airo-aqua)]" />
+                </GlassIconButton>
+              )}
               <button
                 onClick={saveSnapshot}
                 className="tap rounded-full px-4 py-2 bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-white text-[11px] font-bold tracking-wide flex items-center gap-1.5 shadow-[0_8px_24px_-6px_rgba(255,77,28,0.75)]"
@@ -1686,12 +1813,12 @@ export default function CanvasView() {
         onClose={() => setObjectSheet(false)}
         objectId={objectId}
         onSelect={changeObject}
-        onUpload={() => setUploadSheet(true)}
+        onUpload={flags.ui.uploads ? () => setUploadSheet(true) : undefined}
         customName={customInfo?.name}
       />
 
       <ShowcasePanel
-        open={showcaseOpen}
+        open={showcaseOpen && flags.ui.showcase}
         onClose={() => setShowcaseOpen(false)}
         handles={showcaseHandles}
       />
@@ -1800,7 +1927,7 @@ export default function CanvasView() {
       </Sheet>
 
       <Sheet
-        open={uploadSheet}
+        open={uploadSheet && flags.ui.uploads}
         onClose={() => setUploadSheet(false)}
         centered
         title="Upload a 3D model"
@@ -1847,7 +1974,7 @@ export default function CanvasView() {
       </Sheet>
 
       <Sheet
-        open={aiSheet}
+        open={aiSheet && flags.ui.aiPanel}
         onClose={() => setAiSheet(false)}
         centered
         wide
