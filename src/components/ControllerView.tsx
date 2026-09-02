@@ -426,6 +426,12 @@ export default function ControllerView() {
     if (!flags.ui.padMode && mode === 'pad') setMode('paint');
   }, [flags.ui.padMode, mode]);
 
+  // Same shape for stamps: the segment is filtered out below, and a phone that
+  // was mid-stamp when the flag flipped lands back on the brush.
+  useEffect(() => {
+    if (!flags.ui.stamps && interaction === 'stamp') setInteraction('paint');
+  }, [flags.ui.stamps, interaction]);
+
   // Guarded on the room it last reported rather than a "first run" flag:
   // StrictMode mounts effects twice in development, and one arrival is one
   // arrival.
@@ -1276,10 +1282,10 @@ export default function ControllerView() {
                     sounds.playClick(1.2);
                   }}
                   options={[
-                    { value: 'paint', label: 'Paint', icon: <Pencil size={11} />, accent: '#22D3EE' },
-                    { value: 'stamp', label: 'Stamp', icon: <StampIcon size={11} />, accent: '#FFB020' },
-                    { value: 'orbit', label: 'Rotate', icon: <Rotate3d size={11} />, accent: '#FF4D1C' },
-                  ]}
+                    { value: 'paint' as const, label: 'Paint', icon: <Pencil size={11} />, accent: '#22D3EE' },
+                    { value: 'stamp' as const, label: 'Stamp', icon: <StampIcon size={11} />, accent: '#FFB020' },
+                    { value: 'orbit' as const, label: 'Rotate', icon: <Rotate3d size={11} />, accent: '#FF4D1C' },
+                  ].filter((option) => option.value !== 'stamp' || flags.ui.stamps)}
                 />
                 <AnimatePresence>
                   {objectLoading && (
@@ -1299,7 +1305,7 @@ export default function ControllerView() {
               {/* The stamp shelf sits inside the stage, docked to its lower
                   edge: picking and placing are one gesture loop, so it must
                   never take a modal layer over the object. */}
-              {interaction === 'stamp' && (
+              {interaction === 'stamp' && flags.ui.stamps && (
                 <motion.div
                   initial={{ opacity: 0, y: 14 }}
                   animate={{ opacity: 1, y: 0 }}

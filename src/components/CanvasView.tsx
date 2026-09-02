@@ -427,6 +427,12 @@ export default function CanvasView() {
   const [hostColor, setHostColor] = useState('#FF4D1C');
   const [hostSize, setHostSize] = useState(1);
   const [stageMode, setStageMode] = useState<'paint' | 'stamp' | 'orbit'>('paint');
+  // The island entry and the `s` key are gated on the flag, but a flag can flip
+  // off while the tray is already open (the fetch lands ~2s after first paint).
+  // Without this the tray would stay up with no control left to close it.
+  useEffect(() => {
+    if (!flags.ui.stamps && stageMode === 'stamp') setStageMode('paint');
+  }, [flags.ui.stamps, stageMode]);
 
   /* ------------------------------ stamps ------------------------------ */
 
