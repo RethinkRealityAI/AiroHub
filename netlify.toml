@@ -3,6 +3,11 @@
   publish = "dist"
   functions = "netlify/functions"
 
+[functions]
+  # @netlify/database brings pg / ws / @neondatabase/serverless along; inlining pg is the classic
+  # esbuild failure (its optional pg-native require), so these ship as real node_modules.
+  external_node_modules = ["@netlify/database", "@neondatabase/serverless", "pg", "ws", "waddler", "@netlify/runtime-utils"]
+
 # Netlify's pretty-URL post-processing 301s /how-it-works to /how-it-works/,
 # because the guide is a directory index (how-it-works/index.html). That hop is
 # not free: the sitemap, the canonical link and og:url all advertise the
