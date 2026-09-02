@@ -423,7 +423,11 @@ async function flagRun(label, flags) {
   const aiButtons = await page.locator('[title="AI copilot"]').count();
 
   await page.goto(`${BASE}/controller/VLTEST`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('[role="tablist"]', { timeout: 90000 });
+  // The phone opens on the motion-permission gate, which has no tab bar at
+  // all; the mode tabs only exist once a choice is made. Take the no-sensor
+  // path, the same one a desktop browser or a denied phone ends up on.
+  await page.getByRole('button', { name: 'Just paint on my screen' }).click({ timeout: 60000 });
+  await page.waitForSelector('[role="tablist"]', { timeout: 60000 });
   await settleFlags(page);
   const padTabs = await page.getByRole('tab', { name: 'Pad' }).count();
 
