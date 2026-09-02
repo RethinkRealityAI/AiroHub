@@ -12,9 +12,11 @@
     "models:optimize": "node scripts/optimize-models.mjs",
     "models:preview": "node scripts/preview/shoot-contact-sheet.mjs",
     "shots": "node scripts/preview/shoot-ui.mjs",
-    "test": "npm run test:aim && npm run test:realtime",
+    "test": "npm run test:aim && npm run test:realtime && npm run test:liquid-glass && npm run test:review",
     "test:aim": "node scripts/test/aim-regression.mjs",
-    "test:realtime": "node scripts/test/realtime-reconnect.mjs"
+    "test:realtime": "node scripts/test/realtime-reconnect.mjs",
+    "test:liquid-glass": "node scripts/test/liquid-glass.mjs",
+    "test:review": "node scripts/test/review-export.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

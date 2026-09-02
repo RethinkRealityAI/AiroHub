@@ -1,0 +1,16 @@
+# AiroHub — https://airohub.netlify.app
+#
+# Two pages are worth indexing: the landing page and the guide. Everything else
+# is a live session surface behind a throwaway code, with no stable content of
+# its own, and every one of them soft-200s onto the landing page's HTML — so a
+# crawl of them would file a hundred duplicates of /. The same three prefixes
+# also carry an X-Robots-Tag: noindex header from netlify.toml, which is what
+# covers URLs a crawler was handed rather than found here.
+
+User-agent: *
+Allow: /
+Disallow: /canvas/
+Disallow: /controller/
+Disallow: /admin
+
+Sitemap: https://airohub.netlify.app/sitemap.xml

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two URLs, and that is the whole site as far as a crawler is concerned.
+  /canvas/*, /controller/* and /admin* are live session surfaces behind
+  throwaway codes; they are disallowed in robots.txt and noindexed by header.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://airohub.netlify.app/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://airohub.netlify.app/how-it-works</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+</urlset>

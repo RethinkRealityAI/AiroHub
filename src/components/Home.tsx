@@ -23,7 +23,7 @@
  * The Create action navigates with `state: { justCreated: true }` — the studio
  * screen keys its first-run invite moment off that flag.
  */
-import React, { useMemo, useState } from 'react';
+import React, { Suspense, lazy, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
@@ -31,7 +31,24 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
-import LandingHero from '../scene/LandingHero';
+
+/**
+ * The hero is a full three.js scene and by far the largest thing the landing
+ * page can ask for. Imported statically it put the whole rendering bundle on
+ * the critical path of `/`, so a visitor who only ever wanted to read the
+ * headline paid for the renderer before a single word appeared. Code-split, it
+ * arrives after the copy instead of ahead of it.
+ */
+const LandingHero = lazy(() => import('../scene/LandingHero'));
+
+/**
+ * A still frame of that very scene, baked from the running page by
+ * `ONLY=hero-poster node scripts/preview/shoot-brand.mjs`. It holds the stage
+ * until the hero mounts. Because it comes out of the real scene rather than
+ * being drawn by hand, the handover reads as the picture coming alive rather
+ * than as one image being swapped for another.
+ */
+const HERO_POSTER = '/ui/hero-poster.webp';
 
 /** Session codes: uppercase alphanumeric, 4-8 chars. */
 const CODE_RE = /^[A-Z0-9]{4,8}$/;
@@ -73,9 +90,24 @@ export default function Home() {
 
   return (
     <div className="relative min-h-[100svh] overflow-hidden bg-[var(--color-airo-void)] stage-vignette text-white">
-      {/* Live hero: spray can + paintable backdrop, behind everything. */}
-      <div className="absolute inset-0" aria-hidden>
-        <LandingHero />
+      {/* Live hero: spray can + paintable backdrop, behind everything.
+          The container already reserves the full viewport, so swapping the
+          poster for the canvas shifts nothing — the lazy hero costs no layout
+          stability. The poster is left in place underneath rather than torn
+          down on mount: the canvas is `alpha: true` and its backdrop plane is
+          overscanned past every edge, so it is never visible again, and
+          keeping it spares the page a second of void if the first WebGL frame
+          is slow. `data-hero-stage` is the hook shoot-brand.mjs isolates when
+          it re-bakes the poster. */}
+      <div
+        data-hero-stage
+        className="absolute inset-0 bg-cover bg-center"
+        style={{ backgroundImage: `url(${HERO_POSTER})` }}
+        aria-hidden
+      >
+        <Suspense fallback={null}>
+          <LandingHero />
+        </Suspense>
       </div>
 
       {/* Legibility washes. Split layout gets a left-hand column of ink; the
@@ -194,6 +226,9 @@ export default function Home() {
           >
             <GlassPanel
               strong
+              // The one panel on the site with a live 3D scene running behind
+              // it, so the rim refraction has something worth bending.
+              liquid
               className="splatter-accent splatter-accent-bl p-5 sm:p-6"
               style={{
                 // A darker glass than the default tint: the can can pass right

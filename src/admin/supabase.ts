@@ -49,6 +49,20 @@ function getClient(): SupabaseClient {
   return client;
 }
 
+/**
+ * The memoised client, for modules that query a table this file does not wrap
+ * (`src/review/reviews.ts` and the `airohub_model_reviews` verdicts).
+ *
+ * Exported rather than copied because a second `createClient()` would open a
+ * second auth/realtime stack against the same project — two clients is how you
+ * end up with two websockets and two token refresh timers for one session.
+ * Throws when the backend is unconfigured, exactly like every call here, so
+ * callers gate on `isBackendConfigured()` first.
+ */
+export function getSupabaseClient(): SupabaseClient {
+  return getClient();
+}
+
 /** Public download URL for a stored model. */
 export function publicModelUrl(storagePath: string): string {
   return `${SUPABASE_URL ?? ''}/storage/v1/object/public/${BUCKET}/${storagePath}`;

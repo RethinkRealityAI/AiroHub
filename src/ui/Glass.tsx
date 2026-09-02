@@ -4,23 +4,42 @@
  * Every floating surface in AiroHub is one of these, so blur strength, edge
  * treatment and the specular sheen stay identical between the studio and the
  * phone controller.
+ *
+ * `GlassPanel` takes an opt-in `liquid` prop that adds real refraction at the
+ * panel's rim (src/ui/liquidGlass.ts, src/ui/useLiquidGlass.ts). It is purely
+ * additive — where the browser will not render it, the panel is the panel it
+ * has always been — so it is worth turning on where a panel floats over live
+ * imagery and not worth the raster where it floats over flat ink.
  */
 import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X } from 'lucide-react';
+import { useLiquidGlass } from './useLiquidGlass';
 
 type Div = React.HTMLAttributes<HTMLDivElement>;
 
 export const GlassPanel: React.FC<
-  Div & { strong?: boolean; sheen?: boolean; radius?: string }
-> = ({ strong, sheen = true, radius = 'rounded-[26px]', className = '', children, ...rest }) => (
-  <div
-    className={`${strong ? 'glass-strong' : 'glass'} ${sheen ? 'glass-sheen' : ''} ${radius} ${className}`}
-    {...rest}
-  >
-    {children}
-  </div>
-);
+  Div & { strong?: boolean; sheen?: boolean; radius?: string; liquid?: boolean }
+> = ({
+  strong,
+  sheen = true,
+  radius = 'rounded-[26px]',
+  liquid = false,
+  className = '',
+  children,
+  ...rest
+}) => {
+  const ref = useLiquidGlass<HTMLDivElement>(liquid);
+  return (
+    <div
+      ref={ref}
+      className={`${strong ? 'glass-strong' : 'glass'} ${sheen ? 'glass-sheen' : ''} ${radius} ${className}`}
+      {...rest}
+    >
+      {children}
+    </div>
+  );
+};
 
 /** Small pill used for status readouts and player badges. */
 export const GlassPill: React.FC<Div & { tone?: 'neutral' | 'live' }> = ({

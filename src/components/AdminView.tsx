@@ -23,6 +23,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ClipboardCheck,
   CloudOff,
   Copy,
   Database,
@@ -974,13 +975,24 @@ export default function AdminView() {
         {/* ============ Header ============ */}
         <header className="pt-6 sm:pt-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link
-              to="/"
-              className="tap glass glass-sheen inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-semibold text-white/70 hover:text-white"
-            >
-              <ArrowLeft size={14} />
-              Home
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                to="/"
+                className="tap glass glass-sheen inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-semibold text-white/70 hover:text-white"
+              >
+                <ArrowLeft size={14} />
+                Home
+              </Link>
+              {/* Uploads published here stay out of the picker until they are
+                  approved on this page. */}
+              <Link
+                to="/admin/review"
+                className="tap glass glass-sheen inline-flex items-center gap-2 rounded-full px-4 py-2 text-[12px] font-semibold text-white/70 hover:text-white"
+              >
+                <ClipboardCheck size={14} />
+                Review
+              </Link>
+            </div>
             <span className="inline-flex items-center gap-1.5 rounded-full border border-[#FFB020]/40 bg-[#FFB020]/10 px-3 py-1.5 text-[10px] font-semibold text-[#FFB020]">
               <ShieldAlert size={12} className="shrink-0" />
               Anyone with this URL can manage models

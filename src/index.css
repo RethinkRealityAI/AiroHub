@@ -34,6 +34,16 @@
   --glass-edge-bright: rgba(255, 255, 255, 0.28);
   --glass-blur: 30px;
   --glass-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.85);
+
+  /* Refraction, read by src/ui/useLiquidGlass.ts and by nothing in this file.
+     `<GlassPanel liquid>` bends the backdrop at a panel's rim on top of the
+     blur above; every rule here is the fallback for the browsers and the
+     visitors that do not get it, so it stays exactly as it is. Thickness is the
+     strength dial; the bezel is the widest that band may get — the band itself
+     is min(corner radius * 1.2, this), so a tighter corner keeps a
+     proportionally tighter band. */
+  --glass-refract-thickness: 20px;
+  --glass-refract-bezel: 24px;
   color-scheme: dark;
 }
 
@@ -70,8 +80,8 @@ body {
 @utility glass {
   position: relative;
   background: var(--glass-tint);
-  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   border: 1px solid var(--glass-edge);
   box-shadow: var(--glass-shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.14),
     inset 0 -1px 0 0 rgba(0, 0, 0, 0.35);
@@ -80,8 +90,8 @@ body {
 @utility glass-strong {
   position: relative;
   background: var(--glass-tint-strong);
-  backdrop-filter: blur(40px) saturate(200%);
   -webkit-backdrop-filter: blur(40px) saturate(200%);
+  backdrop-filter: blur(40px) saturate(200%);
   border: 1px solid var(--glass-edge-bright);
   box-shadow: var(--glass-shadow), inset 0 1px 0 0 rgba(255, 255, 255, 0.2),
     inset 0 -1px 0 0 rgba(0, 0, 0, 0.4);
@@ -98,8 +108,8 @@ body {
       rgba(255, 255, 255, 0.04)
     ),
     rgba(11, 11, 17, 0.965);
-  backdrop-filter: blur(42px) saturate(190%);
   -webkit-backdrop-filter: blur(42px) saturate(190%);
+  backdrop-filter: blur(42px) saturate(190%);
   border: 1px solid var(--glass-edge-bright);
   box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.92),
     inset 0 1px 0 0 rgba(255, 255, 255, 0.18);
@@ -148,8 +158,8 @@ body {
   gap: 2px;
   border-radius: 9999px;
   background: rgba(10, 10, 18, 0.55);
-  backdrop-filter: blur(24px) saturate(180%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1),
     0 8px 24px -8px rgba(0, 0, 0, 0.8);
