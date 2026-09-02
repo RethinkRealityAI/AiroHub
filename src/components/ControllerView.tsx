@@ -1153,22 +1153,27 @@ export default function ControllerView() {
       </header>
 
       {/* --------------------------- mode selector --------------------------- */}
-      <div className="shrink-0 px-3 pb-2 z-30">
-        <Segmented
-          layoutId="controller-mode"
-          size="lg"
-          paint
-          className="w-full"
-          value={mode}
-          onChange={(next) => {
-            setMode(next);
-            track('controller.mode', { mode: next }, roomId);
-            sounds.playClick(1.25);
-            navigator.vibrate?.(10);
-          }}
-          options={modeOptions}
-        />
-      </div>
+      {/* A switch with one position is furniture: on the no-sensor path with
+          Pad hidden the only mode is Paint, so the row goes entirely and comes
+          back the moment motion access (or the Pad flag) adds a second one. */}
+      {modeOptions.length > 1 && (
+        <div className="shrink-0 px-3 pb-2 z-30">
+          <Segmented
+            layoutId="controller-mode"
+            size="lg"
+            paint
+            className="w-full"
+            value={mode}
+            onChange={(next) => {
+              setMode(next);
+              track('controller.mode', { mode: next }, roomId);
+              sounds.playClick(1.25);
+              navigator.vibrate?.(10);
+            }}
+            options={modeOptions}
+          />
+        </div>
+      )}
 
       {/* ------------------------------- stage ------------------------------- */}
       <main className="flex-1 relative min-h-0">
