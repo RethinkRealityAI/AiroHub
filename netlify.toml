@@ -3,6 +3,16 @@
   publish = "dist"
   functions = "netlify/functions"
 
+# Netlify's pretty-URL post-processing 301s /how-it-works to /how-it-works/,
+# because the guide is a directory index (how-it-works/index.html). That hop is
+# not free: the sitemap, the canonical link and og:url all advertise the
+# extensionless URL, so every crawler that follows them lands on a redirect and
+# the explicit 200 rule below never fires at all. Turning the rewrite off makes
+# the URL we publish the URL we serve, which is the whole point of the pass that
+# added the second HTML entry.
+[build.processing.html]
+  pretty_urls = false
+
 [build.environment]
   NODE_VERSION = "22"
   # Vite inlines VITE_* variables into the client bundle at build time, so these
