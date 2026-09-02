@@ -31,9 +31,9 @@
 import type { Config, Context } from '@netlify/functions';
 import { randomBytes } from 'node:crypto';
 import { TRACK_MAX_BODY_BYTES, type TrackResponse } from '../../src/api/contracts.js';
-import { getDb, isDbConfigured, json, safeQuery } from './_db.js';
-import { deviceFromUa } from './_ua.js';
-import { validateTrack, visitorHash, type CleanEvent } from './_validate.js';
+import { getDb, isDbConfigured, json, safeQuery } from './lib/db.js';
+import { deviceFromUa } from './lib/ua.js';
+import { validateTrack, visitorHash, type CleanEvent } from './lib/validate.js';
 
 const encoder = new TextEncoder();
 

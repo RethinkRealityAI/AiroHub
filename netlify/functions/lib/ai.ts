@@ -7,7 +7,7 @@
  * Two rules hold the panel together, and both are about the model being an
  * untrusted, occasionally unavailable dependency:
  *
- *  - Every parsed response goes through `_sanitize.ts` before it leaves this
+ *  - Every parsed response goes through `lib/sanitize.ts` before it leaves this
  *    file. A model answer is JSON the studio renders as colours, shader inputs
  *    and canvas text; sanitising at the boundary means no caller has to
  *    remember to. A parse that throws stays inside the per-model `try`, so a
@@ -26,7 +26,7 @@ import {
   type Critique,
   type GraffitiConcept,
   type StyleTransformation,
-} from "./_sanitize.js";
+} from "./sanitize.js";
 
 let genAIClient: GoogleGenAI | null = null;
 function getGenAI(): GoogleGenAI | null {

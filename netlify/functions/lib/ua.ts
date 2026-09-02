@@ -13,7 +13,7 @@
  * launch's traffic graph counts crawlers as real phones — the exact mistake
  * that makes a Reddit launch look twice as successful as it was.
  */
-import type { Device } from '../../src/api/contracts.js';
+import type { Device } from '../../../src/api/contracts.js';
 
 /**
  * Crawlers, previewers and headless browsers. Link unfurlers (Slack, Discord,

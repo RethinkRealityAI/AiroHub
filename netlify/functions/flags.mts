@@ -29,8 +29,8 @@
  */
 import type { Config } from '@netlify/functions';
 import { DEFAULT_FLAGS, type Flags } from '../../src/api/contracts.js';
-import { getDb, isDbConfigured, json, safeQuery } from './_db.js';
-import { mergeFlags, publicSubset, type SettingRow } from './_flags.js';
+import { getDb, isDbConfigured, json, safeQuery } from './lib/db.js';
+import { mergeFlags, publicSubset, type SettingRow } from './lib/flags.js';
 
 const CACHE_HEADERS = { 'Cache-Control': 'public, max-age=60' };
 

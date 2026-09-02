@@ -45,11 +45,11 @@ import {
   curatedStyle,
   TRANSFORMATION_PRESETS,
   DEFAULT_TRANSFORMATION,
-} from './_ai.js';
+} from './lib/ai.js';
 import { DEFAULT_FLAGS, type Flags } from '../../src/api/contracts.js';
-import { getDb, isDbConfigured, json, safeQuery } from './_db.js';
-import { mergeFlags, type SettingRow } from './_flags.js';
-import { hex } from './_sanitize.js';
+import { getDb, isDbConfigured, json, safeQuery } from './lib/db.js';
+import { mergeFlags, type SettingRow } from './lib/flags.js';
+import { hex } from './lib/sanitize.js';
 
 /** Long enough for any real idea, short enough to bound the token bill. */
 const PROMPT_MAX = 120;

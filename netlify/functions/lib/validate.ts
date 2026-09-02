@@ -30,7 +30,7 @@ import {
   TRACK_MAX_PROPS_BYTES,
   type EventName,
   type FeedbackKind,
-} from '../../src/api/contracts.js';
+} from '../../../src/api/contracts.js';
 
 export const PATH_MAX = 200;
 export const REFERRER_HOST_MAX = 120;

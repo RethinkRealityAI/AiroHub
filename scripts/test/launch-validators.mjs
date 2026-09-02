@@ -2,8 +2,8 @@
  * Launch input/output validator suite.
  *
  * Everything here sits on a boundary the app cannot control: the browser on one
- * side (`_validate.ts`, `_ua.ts`), a settings table anyone with SQL access can
- * edit (`_flags.ts`), and a language model on the other (`_sanitize.ts`). Each
+ * side (`lib/validate.ts`, `lib/ua.ts`), a settings table anyone with SQL access can
+ * edit (`lib/flags.ts`), and a language model on the other (`lib/sanitize.ts`). Each
  * check encodes a specific thing that goes wrong when the boundary is trusted:
  *
  *  A  `normalisePath` folds room codes to `:room`. Skip it and every throwaway
@@ -49,10 +49,10 @@ const entryFile = path.join(outDir, 'entry.ts');
 fs.writeFileSync(
   entryFile,
   [
-    `export * from ${fn('_validate.ts')};`,
-    `export * from ${fn('_ua.ts')};`,
-    `export * from ${fn('_flags.ts')};`,
-    `export * from ${fn('_sanitize.ts')};`,
+    `export * from ${fn('lib/validate.ts')};`,
+    `export * from ${fn('lib/ua.ts')};`,
+    `export * from ${fn('lib/flags.ts')};`,
+    `export * from ${fn('lib/sanitize.ts')};`,
     `export { DEFAULT_FLAGS, TRACK_MAX_BATCH, TRACK_MAX_PROPS_BYTES, NOTICE_MAX, AI_DAILY_CAP_MAX } from ${JSON.stringify(
       path.join(repo, 'src/api/contracts.ts')
     )};`,

@@ -37,9 +37,9 @@ import {
   type OverviewResponse,
   type Ranked,
 } from '../../src/api/contracts.js';
-import { requireAdmin } from './_auth.js';
-import { dbUnavailable, getDb, isDbConfigured, json, safeQuery } from './_db.js';
-import { FLAG_KEYS, mergeFlags, type FlagKey, type SettingRow } from './_flags.js';
+import { requireAdmin } from './lib/auth.js';
+import { dbUnavailable, getDb, isDbConfigured, json, safeQuery } from './lib/db.js';
+import { FLAG_KEYS, mergeFlags, type FlagKey, type SettingRow } from './lib/flags.js';
 
 /** The two ranges the dashboard offers. Anything else falls back to 14. */
 const OVERVIEW_DAYS: readonly number[] = [14, 30];

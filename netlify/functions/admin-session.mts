@@ -14,8 +14,8 @@
  */
 import type { Config, Context } from '@netlify/functions';
 import type { AdminSessionResponse } from '../../src/api/contracts.js';
-import { clearSessionCookie, readAdminEnv, readSessionCookie, verifySession } from './_auth.js';
-import { json } from './_db.js';
+import { clearSessionCookie, readAdminEnv, readSessionCookie, verifySession } from './lib/auth.js';
+import { json } from './lib/db.js';
 
 export default async (request: Request, context: Context): Promise<Response> => {
   const path = new URL(request.url).pathname;

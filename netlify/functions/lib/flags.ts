@@ -25,7 +25,7 @@ import {
   type Flags,
   type PublicFlags,
   type UiFlags,
-} from '../../src/api/contracts.js';
+} from '../../../src/api/contracts.js';
 
 /** One row of the `settings` table, as read back from Postgres. */
 export interface SettingRow {

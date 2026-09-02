@@ -23,8 +23,8 @@
  * client is the one thing that cannot be relied on when the client is broken.
  */
 import type { Config, Context } from '@netlify/functions';
-import { validateFeedback } from './_validate.js';
-import { dbUnavailable, getDb, isDbConfigured, json } from './_db.js';
+import { validateFeedback } from './lib/validate.js';
+import { dbUnavailable, getDb, isDbConfigured, json } from './lib/db.js';
 
 /** Well above a 2,000-character message plus overhead; far below anything abusive. */
 const BODY_MAX_BYTES = 16 * 1024;

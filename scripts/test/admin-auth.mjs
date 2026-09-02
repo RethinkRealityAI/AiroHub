@@ -1,7 +1,7 @@
 /**
  * Admin session regression suite.
  *
- * `_auth.ts` is the whole of `/admin`'s security: one shared password, one
+ * `lib/auth.ts` is the whole of `/admin`'s security: one shared password, one
  * signed cookie, no user table and no second factor. Every check below encodes
  * a way in which that arrangement fails quietly rather than loudly:
  *
@@ -27,7 +27,7 @@
  *  J  `requireAdmin` answers 503 unconfigured, 401 with no or bad cookie, and
  *     `null` — meaning "carry on" — only for a valid one.
  *
- * Runs headless: bundles netlify/functions/_auth.ts with esbuild (same pattern
+ * Runs headless: bundles netlify/functions/lib/auth.ts with esbuild (same pattern
  * as review-export.mjs). No Netlify, no database, no network.
  */
 import { build } from 'esbuild';
@@ -41,7 +41,7 @@ const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'airo-auth-'));
 const bundle = path.join(outDir, 'auth.mjs');
 
 await build({
-  entryPoints: [path.join(repo, 'netlify/functions/_auth.ts')],
+  entryPoints: [path.join(repo, 'netlify/functions/lib/auth.ts')],
   bundle: true,
   format: 'esm',
   platform: 'node',

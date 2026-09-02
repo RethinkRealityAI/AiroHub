@@ -19,7 +19,7 @@
  *    is what keeps a cross-site POST from acting as the owner.
  *
  * This module deliberately imports nothing but `node:crypto`. It does not reuse
- * `_db.ts`'s `json()`: that would drag `@netlify/database` (and pg, ws) into
+ * `lib/db.ts`'s `json()`: that would drag `@netlify/database` (and pg, ws) into
  * every bundle that only needs to check a cookie, and into a unit test that has
  * no database at all.
  */

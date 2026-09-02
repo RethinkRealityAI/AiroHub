@@ -14,8 +14,8 @@
  */
 import type { Config, Context } from '@netlify/functions';
 import type { AdminSessionResponse } from '../../src/api/contracts.js';
-import { constantTimeEqual, createSession, readAdminEnv, setSessionCookie } from './_auth.js';
-import { json } from './_db.js';
+import { constantTimeEqual, createSession, readAdminEnv, setSessionCookie } from './lib/auth.js';
+import { json } from './lib/db.js';
 
 /** Long enough for any real password, short enough that nobody hashes a novel. */
 const PASSWORD_MAX = 512;

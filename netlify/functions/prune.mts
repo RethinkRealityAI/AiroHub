@@ -20,7 +20,7 @@
  * schedule slot every other cron job in the world picked.
  */
 import type { Config } from '@netlify/functions';
-import { getDb, isDbConfigured } from './_db.js';
+import { getDb, isDbConfigured } from './lib/db.js';
 
 const EVENT_RETENTION_DAYS = 90;
 const SALT_RETENTION_DAYS = 95;
