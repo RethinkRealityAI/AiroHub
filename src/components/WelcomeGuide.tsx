@@ -28,6 +28,7 @@ import {
   Droplets, MousePointer, QrCode, Video, SprayCan, X,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
+import { useFlags } from '../config/flags';
 
 /* ------------------------------------------------------------------
    Content
@@ -197,7 +198,13 @@ export const WelcomeGuide: React.FC<{
   role: 'studio' | 'controller';
 }> = ({ open, onClose, role }) => {
   const isStudio = role === 'studio';
-  const cards = isStudio ? STUDIO_CARDS : CONTROLLER_CARDS;
+  const flags = useFlags();
+  // Filtered at render, not at the source: the Pad card is written and ready,
+  // and the day the owner switches Pad back on it must reappear in the guide
+  // without a deploy.
+  const cards = (isStudio ? STUDIO_CARDS : CONTROLLER_CARDS).filter(
+    (card) => card.tag !== 'Pad' || flags.ui.padMode
+  );
 
   // Illustration assets ship from another workstream and may not exist yet;
   // a failed load hides that slot for the rest of the session.

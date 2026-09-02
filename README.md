@@ -77,6 +77,13 @@ it, and if the review table can't be reached the gate fails closed rather than l
 unreviewed geometry into live rooms. Full contract and behaviour notes in
 [`src/review/README.md`](src/review/README.md).
 
+`/admin` and `/admin/review` sit behind a shared password, and the gate is the API
+endpoints rather than the route — reaching the URL only gets you a login card, because
+every request for analytics, feedback or settings is refused without a valid admin
+session cookie. The one exception, for now, is the model library and the review
+verdicts on those pages: they still talk to Supabase with the public anon key. Moving
+them behind the same cookie is the planned follow-up.
+
 ---
 
 ## Motion tracking
@@ -131,6 +138,14 @@ reports "Solo mode" instead of a phone count.
 | `VITE_SUPABASE_ANON_KEY`  | build     | Realtime publishable key                         |
 | `GEMINI_API_KEY`          | runtime   | AI copilot; falls back to curated content if unset |
 | `MESHY_API_KEY`           | local only| Regenerating the 3D models                       |
+
+### Deploy previews
+
+Every pull request gets its own deploy preview, and Netlify gives that preview a
+database branch **seeded from production**. A preview link can therefore show real
+visitor feedback and real analytics rather than an empty table — which is also why the
+email field on the feedback form is optional: previews are ours, but the rows in them
+are not synthetic.
 
 ---
 

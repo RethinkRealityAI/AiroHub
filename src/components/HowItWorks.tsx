@@ -15,6 +15,7 @@ import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
 import { ArrowRight, Plus, X } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
+import { FeedbackButton } from '../feedback/FeedbackButton';
 
 const GuideStage = lazy(() =>
   import('../scene/GuideStage').then((m) => ({ default: m.GuideStage ?? m.default }))
@@ -53,26 +54,20 @@ const HOTSPOTS: Hotspot[] = [
   {
     key: 'object-picker',
     x: 44.4, y: 3.2, side: 'bottom', accent: '#FFB020',
-    title: 'The subject',
-    body: 'Swap the paintable object mid-session. Everyone in the room switches with you, and the artwork follows.',
+    title: 'The object',
+    body: 'Swap the object mid-session. Everyone in the room switches with you, and the artwork follows.',
   },
   {
     key: 'roster',
     x: 83.0, y: 3.2, side: 'bottom', accent: '#34D399',
     title: 'Who is holding a can',
-    body: 'Live presence. Each painter is given a slot colour that follows them across the scene, the roster and their phone.',
-  },
-  {
-    key: 'ai-button',
-    x: 91.2, y: 3.2, side: 'left', accent: '#E879F9',
-    title: 'The copilot',
-    body: 'Describe a direction and it comes back with palettes and stencils you can spray straight onto the piece.',
+    body: 'Everyone painting right now. Each person gets a colour that follows them on the screen and on their phone.',
   },
   {
     key: 'camera-rail',
     x: 3.4, y: 43.3, side: 'right', accent: '#22D3EE',
     title: 'Camera presets',
-    body: 'Snap the view to front, three-quarter, side or top. Drag anywhere on the stage to orbit freely.',
+    body: 'Snap the view to the front, the side or the top. Drag anywhere on the stage to spin it yourself.',
   },
   {
     key: 'stage-mode',
@@ -84,37 +79,37 @@ const HOTSPOTS: Hotspot[] = [
     key: 'player-tag',
     x: 67.0, y: 36.1, side: 'right', accent: '#22D3EE',
     title: 'Their aim, live',
-    body: 'Each phone gets a floating can drawn where it is pointing — rendered about 90 ms in the past through a jitter buffer, so a lumpy network still reads as one smooth line.',
+    body: 'A floating can shows where each phone is pointing, so you see a stroke coming before it lands.',
   },
   {
     key: 'subject',
     x: 53.4, y: 52.3, side: 'left', accent: '#FF4D1C',
-    title: 'One shared texture',
-    body: 'Paint is composited into the model’s own texture rather than floating in front of it, so it survives camera moves, object spins and a page reload.',
+    title: 'The paint sticks',
+    body: 'Paint goes onto the object itself, not a layer in front. Spin it, move the camera, reload the page — it stays.',
   },
   {
     key: 'tool-toggle',
     x: 21.5, y: 95.8, side: 'top', accent: '#FF4D1C',
     title: 'Spray, brush, stamp',
-    body: 'Soft atomised spray for fades, a hard brush for lines, and stamps for stencils and uploaded images.',
+    body: 'A soft spray for fades, a hard brush for lines, and stamps for stencils and your own images.',
   },
   {
     key: 'finish-toggle',
     x: 54.6, y: 95.8, side: 'top', accent: '#22D3EE',
-    title: 'Textured or primer',
-    body: 'Paint over the model’s own material, or strip it back to a bare primer coat and start from white.',
+    title: 'Textured or bare',
+    body: 'Paint over the object as it comes, or strip it back to plain white and start from there.',
   },
   {
     key: 'history',
     x: 66.1, y: 95.8, side: 'top', accent: '#A78BFA',
     title: 'Undo for the whole room',
-    body: 'Every stroke is logged, so undo, redo and a full replay of the piece work across all the painters at once.',
+    body: 'Undo and redo cover everybody’s strokes, not just yours. You can replay the whole piece from the first spray.',
   },
   {
     key: 'showcase-button',
     x: 80.0, y: 95.8, side: 'top', accent: '#FFB020',
     title: 'Take it with you',
-    body: 'Save a PNG, or record a cinematic turntable of the finished object straight off the canvas as a video.',
+    body: 'Save a PNG, or record a slow spin of the finished object straight off the canvas as a video.',
   },
 ];
 
@@ -360,9 +355,9 @@ function Section({
 /** The mechanism, drawn rather than described. */
 function LoopDiagram() {
   const nodes = [
-    { n: '01', tag: 'Phone', head: 'The can', body: 'Reads its gyroscope 40 times a second.', accent: '#FF4D1C' },
-    { n: '02', tag: 'Studio', head: 'The wall', body: 'Raycasts that aim onto the model and stamps the texture.', accent: '#22D3EE' },
-    { n: '03', tag: 'Everyone', head: 'In sync', body: 'Every screen rebuilds the identical artwork.', accent: '#A78BFA' },
+    { n: '01', tag: 'Phone', head: 'You aim', body: 'You point your phone at the screen, like a can of spray paint.', accent: '#FF4D1C' },
+    { n: '02', tag: 'Studio', head: 'Paint lands', body: 'Paint lands on the object exactly where you pointed.', accent: '#22D3EE' },
+    { n: '03', tag: 'Everyone', head: 'Same picture', body: 'Every screen in the room shows the same picture.', accent: '#A78BFA' },
   ];
   return (
     <div className="grid gap-4 sm:grid-cols-3">
@@ -398,7 +393,7 @@ function LoopDiagram() {
  * for one of them will actually find it.
  *
  * Every answer is drawn from copy that already appears elsewhere on this page —
- * nothing here is a new claim. The same seven pairs are duplicated verbatim as
+ * nothing here is a new claim. The same six pairs are duplicated verbatim as
  * FAQPage structured data in how-it-works/index.html, because a static SPA has
  * no way to emit JSON-LD at request time. That duplication is only honest while
  * the two agree exactly, so scripts/preview/verify-seo.mjs reads the questions
@@ -416,15 +411,11 @@ const FAQ: { q: string; a: string }[] = [
   },
   {
     q: 'Can I paint without a phone?',
-    a: 'Yes. The studio owns the object, the artwork and the camera — and it paints with a mouse just as happily as with phones.',
-  },
-  {
-    q: 'How does the phone control the spray?',
-    a: 'Point the phone at the screen and hold the trigger. Its gyroscope is read 40 times a second and integrated as rotation deltas, so tilting your wrist never bends a vertical stroke sideways. Shake the phone to re-centre your aim at any time.',
+    a: 'Yes. The big screen paints with a mouse just as happily as with phones, so you can open a studio and spray on your own.',
   },
   {
     q: 'What can I paint on?',
-    a: 'A library of real 3D models, streamed on demand and rendered as live thumbnails. Swap the paintable object mid-session: everyone in the room switches with you, and the artwork follows.',
+    a: 'Fourteen ready-made 3D objects — a fire hydrant, a skate deck, a subway car, a helmet and more. Swap the object mid-session and everyone in the room switches with you.',
   },
   {
     q: 'Can I keep what we painted?',
@@ -515,8 +506,8 @@ export default function HowItWorks() {
       <Section
         id="loop"
         eyebrow="The loop"
-        title="Nobody streams pixels"
-        lede="Your phone sends where it is aiming — nothing else. Every screen in the room rebuilds the same artwork from the same instructions."
+        title="What actually happens"
+        lede="Your phone sends where it is pointing — nothing else. Every screen in the room draws the same picture from the same instructions."
       >
         <LoopDiagram />
         <div className="mt-12 grid items-start gap-10 md:grid-cols-2">
@@ -525,27 +516,19 @@ export default function HowItWorks() {
             alt="A phone tilted in mid-air with a cone of orange paint erupting from its top edge like an aerosol nozzle."
             caption={
               <>
-                <b className="font-semibold text-white/80">The phone is the nozzle.</b> Its gyroscope
-                is read 40 times a second and integrated as rotation deltas, so tilting your wrist
-                never bends a vertical stroke sideways.
+                <b className="font-semibold text-white/80">The phone is the nozzle.</b> Hold the
+                trigger, move your hand, and the paint follows.
               </>
             }
           />
           <div className="flex flex-col gap-4">
             <h3 className="text-2xl font-black uppercase leading-none tracking-tight">
-              Why it feels like a mouse
+              It feels like a mouse
             </h3>
             <p className="leading-relaxed text-white/70">
-              Aim is accumulated from how the phone <em>turned</em>, not from where it thinks it is
-              pointing. A movement estimate stiffens the filter when you hold still and gets out of
-              the way the instant you flick, so you can hold a line pixel-steady and still snap
-              across the model.
+              Hold your hand still and the line stays put, flick your wrist and the paint jumps
+              across the object — and a shake of the phone re-centres your aim whenever it drifts.
             </p>
-            <p className="leading-relaxed text-white/70">
-              Pulling the trigger briefly freezes that integrator, so a thumb tap can never kick your
-              aim off target.
-            </p>
-            <p className="text-sm text-white/40">Shake the phone to re-centre your aim at any time.</p>
           </div>
         </div>
       </Section>
@@ -554,7 +537,7 @@ export default function HowItWorks() {
       <Section
         eyebrow="Try it"
         title="Have a go, right here"
-        lede="A real paintable object, the same paint pipeline the studio uses. Drag to spray, then spin it and look at what you did."
+        lede="A real object, painted the way the studio paints. Drag to spray, then spin it and look at what you did."
       >
         <div className="overflow-hidden rounded-3xl border border-white/12 bg-[#0B0B12]">
           <Suspense
@@ -570,7 +553,7 @@ export default function HowItWorks() {
           </Suspense>
         </div>
         <p className="mt-3 text-sm text-white/40">
-          This is the studio&rsquo;s renderer running on its own — no room, nobody else painting.
+          This is the studio running on its own — no room, nobody else painting.
         </p>
       </Section>
 
@@ -584,7 +567,7 @@ export default function HowItWorks() {
               n: '01',
               accent: '#FF4D1C',
               head: 'Open a studio',
-              body: 'Hit Create a Studio on a laptop or TV. You get a six-character room code and a QR panel that fills the screen.',
+              body: 'Hit Create a Studio on a laptop or TV. You get a six-character room code and a big QR code on screen.',
               shot: 'landing',
               alt: 'The AiroHub landing page with a large 3D spray can following the pointer and fresh paint on the wall behind it.',
             },
@@ -600,7 +583,7 @@ export default function HowItWorks() {
               n: '03',
               accent: '#22D3EE',
               head: 'Point and spray',
-              body: 'Hold the trigger and move the phone. Paint lands on the model on the big screen, in front of everyone, instantly.',
+              body: 'Hold the trigger and move the phone. Paint lands on the object on the big screen, in front of everyone, straight away.',
               shot: 'phone-aim',
               alt: 'The phone controller in Aim mode: the motion-tracked spray-can HUD with a trigger.',
             },
@@ -622,9 +605,9 @@ export default function HowItWorks() {
 
       {/* ------------------------------ studio ------------------------------ */}
       <Section
-        eyebrow="The big screen"
-        title="The studio"
-        lede="The shared canvas. It owns the object, the artwork and the camera — and it paints with a mouse just as happily as with phones."
+        eyebrow="The studio"
+        title="The big screen"
+        lede="The shared canvas. It holds the object, the artwork and the camera — and it paints with a mouse just as happily as with phones."
       >
         <StudioExplorer />
         <p className="mt-3 text-sm text-white/45">
@@ -638,34 +621,26 @@ export default function HowItWorks() {
       {/* ------------------------------ remote ------------------------------ */}
       <Section
         eyebrow="The phone"
-        title="Three ways to hold it"
-        lede="Switch any time from the segmented control at the top of the controller. Each mode paints the same shared texture."
+        title="Two ways to hold your phone"
+        lede="Switch between them any time, from the buttons at the top of the controller. Both paint the same object."
       >
-        <div className="grid gap-7 sm:grid-cols-3">
+        <div className="grid gap-7 sm:grid-cols-2">
           {[
             {
               chip: 'Aim',
               accent: '#FF4D1C',
               shot: 'phone-aim',
               head: 'The spray can',
-              body: 'Point the phone at the screen and hold the trigger. Motion-tracked, roll-proof, and re-centred with a shake.',
+              body: 'Point the phone at the screen and hold the trigger. Move your hand, and the paint follows.',
               alt: 'The phone controller in Aim mode.',
             },
             {
               chip: 'Paint',
               accent: '#22D3EE',
               shot: 'phone-paint',
-              head: 'On-device canvas',
-              body: 'The object appears on your phone. Drag a finger to paint straight onto it. One-finger action toggles between paint, stamp and rotate.',
+              head: 'On the phone itself',
+              body: 'The object appears on your phone. Drag a finger to paint straight onto it, or switch to stamping and spinning.',
               alt: 'The phone controller in Paint mode with an on-device 3D preview.',
-            },
-            {
-              chip: 'Pad',
-              accent: '#A78BFA',
-              shot: 'phone-pad',
-              head: 'Trackpad',
-              body: 'A flat pad mapped directly onto the texture. The precise one, for lettering and detail work.',
-              alt: 'The phone controller in Pad mode: a flat trackpad mapped onto the texture.',
             },
           ].map((m) => (
             <GlassPanel
@@ -700,53 +675,38 @@ export default function HowItWorks() {
           ))}
         </div>
         <p className="mt-6 text-sm text-white/45">
-          Every mode carries the same kit: spray or brush, your colour, and a size dial.
+          Both modes carry the same kit: spray or brush, your colour, and a size dial.
         </p>
       </Section>
 
       {/* ------------------------------ camera ------------------------------ */}
-      <Section eyebrow="Permissions" title={<>Hand over<br />the camera</>}>
+      <Section eyebrow="Permissions" title="Who moves the camera">
         <div className="grid items-center gap-10 md:grid-cols-2">
           <div className="flex flex-col gap-4">
             <p className="leading-relaxed text-white/70">
-              The studio owns the view by default — otherwise ten people fight over it. To let
+              The big screen owns the view by default — otherwise ten people fight over it. To let
               someone spin the object for the room, tap <span className="rounded-md border border-white/15 bg-white/8 px-1.5 py-0.5 font-mono text-[0.85em]">CAM</span> beside
-              their name in the player list.
-            </p>
-            <p className="leading-relaxed text-white/70">
-              Their rotate gesture now drives the studio camera for everyone. Tap again to take it
-              back.
+              their name in the player list. Tap it again to take the camera back.
             </p>
           </div>
           <Shot
             src={`${IMG}/studio-roster-cam.webp`}
             alt="The player list, showing each painter with a CAM button that grants them control of the studio camera."
-            caption={<b className="font-semibold text-white/80">Per-player, revocable, off by default.</b>}
+            caption={<b className="font-semibold text-white/80">One person at a time. Off unless you turn it on.</b>}
           />
         </div>
       </Section>
 
       {/* ------------------------------- more ------------------------------- */}
-      <Section eyebrow="Beyond the can" title="The rest of the kit">
+      <Section eyebrow="Beyond the can" title="What else is in there">
         <div className="grid gap-9 md:grid-cols-2">
           <Shot
             src={`${IMG}/studio-stamps.webp`}
             alt="The stamp tray, showing tintable graffiti stencils and uploaded images."
             caption={
               <>
-                <b className="font-semibold text-white/80">Stamps.</b> Tintable graffiti stencils, or
-                upload your own image and slap it anywhere on the model. Each stamp is one undoable
-                stroke.
-              </>
-            }
-          />
-          <Shot
-            src={`${IMG}/studio-ai.webp`}
-            alt="The AI copilot sheet, offering palettes and stencil suggestions."
-            caption={
-              <>
-                <b className="font-semibold text-white/80">AI copilot.</b> Ask for a direction and it
-                returns palettes and stencils you can spray straight onto the piece.
+                <b className="font-semibold text-white/80">Stamps.</b> Graffiti stencils you can tint
+                any colour, or upload your own image and slap it on the object. One tap, one undo.
               </>
             }
           />
@@ -755,8 +715,8 @@ export default function HowItWorks() {
             alt="The object picker, showing rendered thumbnails of the paintable 3D models."
             caption={
               <>
-                <b className="font-semibold text-white/80">Objects.</b> A library of real 3D models,
-                streamed on demand and rendered as live thumbnails.
+                <b className="font-semibold text-white/80">Objects.</b> Fourteen of them — a fire
+                hydrant, a skate deck, a subway car, a helmet and more.
               </>
             }
           />
@@ -765,8 +725,8 @@ export default function HowItWorks() {
             alt="The showcase panel, which records a turntable video of the finished piece."
             caption={
               <>
-                <b className="font-semibold text-white/80">Showcase.</b> Records a cinematic 360°
-                turntable of the finished piece straight off the canvas as a video.
+                <b className="font-semibold text-white/80">Showcase.</b> Records a slow 360° spin of
+                the finished piece as a video you can post.
               </>
             }
           />
@@ -776,29 +736,25 @@ export default function HowItWorks() {
       <Divider />
 
       {/* ------------------------------ builders ---------------------------- */}
-      <Section
-        eyebrow="For the builders"
-        title="Under the hood"
-        lede="Built in public. The interesting problems were not the rendering ones."
-      >
-        <dl className="overflow-hidden rounded-2xl border border-white/12">
-          {[
-            ['Rendering', 'three.js and React Three Fiber. Paint composites over each model’s own PBR albedo inside the material, so strokes survive camera moves, object swaps and reloads.'],
-            ['Painting', 'Strokes resolve to a 2048² texture via BVH-accelerated raycasts with per-hit texel density, so a dab stays the same size in texture space no matter how far the camera is.'],
-            ['Tracking', 'Device orientation integrated as player-space rotation deltas — roll-invariant, seam-free, edge-ratcheting — behind a movement-gated filter and trigger suppression.'],
-            ['Networking', 'Peers exchange resolved stamp batches, never pixels. Remote cursors render through a jitter buffer about 90 ms in the past rather than chasing the newest packet.'],
-            ['Transport', 'Supabase Realtime broadcast and presence — no dedicated socket server. Rejoins with backoff, and the roster self-heals if presence is slow.'],
-            ['WebGPU', 'Evaluated and declined for now: this scene submits few draw calls and has no compute work, while its one hot path — a large canvas-to-texture upload — currently benchmarks behind WebGL, worst on Safari.'],
-          ].map(([term, def]) => (
-            <div
-              key={term}
-              className="grid gap-2 border-b border-white/10 p-4 last:border-b-0 sm:grid-cols-[minmax(9rem,12rem)_1fr] sm:gap-5 sm:px-5"
-            >
-              <dt className="label-caps text-[11px] text-white/40">{term}</dt>
-              <dd className="text-[0.97rem] leading-relaxed text-white/70">{def}</dd>
-            </div>
-          ))}
-        </dl>
+      <Section eyebrow="For the builders" title="Built in public">
+        <div className="flex max-w-[62ch] flex-col gap-5">
+          <p className="leading-relaxed text-white/70">
+            AiroHub is open source: the big screen, the phone controller and everything that puts
+            paint on an object live in one public repository.
+          </p>
+          <p className="leading-relaxed text-white/70">
+            Read it, borrow from it, or open an issue if something here does not match what you see.
+          </p>
+          <a
+            href="https://github.com/RethinkRealityAI/AiroHub"
+            target="_blank"
+            rel="noreferrer"
+            className="tap glass inline-flex items-center gap-2 self-start rounded-full px-6 py-3 text-sm font-bold text-white/90"
+          >
+            The code on GitHub
+            <ArrowRight size={15} />
+          </a>
+        </div>
       </Section>
 
       {/* ---------------------------- questions ----------------------------- */}
@@ -847,6 +803,8 @@ export default function HowItWorks() {
         </Link>
         <p className="text-sm text-white/35">Works in any modern mobile browser.</p>
       </footer>
+
+      <FeedbackButton variant="floating" />
     </div>
   );
 }

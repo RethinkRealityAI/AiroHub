@@ -2,6 +2,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, type Plugin } from 'vite';
+import { DEFAULT_FLAGS } from './src/api/contracts';
 
 /**
  * Teaches the dev and preview servers the one rewrite Netlify does for us.
@@ -33,8 +34,80 @@ function netlifyPrettyUrls(): Plugin {
   };
 }
 
+/**
+ * Answers the `/api` calls that only exist in production, so a local server is
+ * not a different app.
+ *
+ * Every screen now talks to Netlify Functions on load: `/api/flags` before the
+ * first paint, `/api/track` on every route change, `/api/feedback` when
+ * somebody writes in. Neither `vite` nor `vite preview` knows those functions
+ * exist, so each request falls through to the SPA handler and comes back as
+ * HTML — which Chromium reports as a failed JSON fetch and logs as a console
+ * error. That matters more than it sounds: five Playwright harnesses
+ * (`shoot-ui`, `shoot-review`, `verify-seo`, `verify-liquid-glass`,
+ * `verify-asset-review`) fail on ANY console error, so the day this shipped
+ * without a stub, all five would have gone red for a reason that has nothing
+ * to do with what they check. Answering here keeps a local run honest instead
+ * of merely quiet.
+ *
+ * These are fixtures, not an implementation: flags are the shipped defaults,
+ * writes are accepted and discarded, the admin gate always says "signed out"
+ * and always rejects a password, so nothing local can be mistaken for the real
+ * dashboard. Everything else under `/api/` answers 501 rather than 404 —
+ * "this server does not implement that", which is exactly true. Serving only;
+ * the build output never sees it.
+ */
+function airoApiStub(): Plugin {
+  const send = (res: any, status: number, body: unknown) => {
+    const payload = JSON.stringify(body);
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json');
+    res.setHeader('cache-control', 'no-store');
+    res.end(payload);
+  };
+
+  const handle = (req: any, res: any, next: () => void) => {
+    const url: string = req.url || '/';
+    const pathname = url.split('?')[0];
+    if (!pathname.startsWith('/api/')) return next();
+
+    const method: string = (req.method || 'GET').toUpperCase();
+    // A response written before the body is read can reset the socket, which
+    // the browser then reports as a failed request — the exact noise this
+    // plugin exists to remove.
+    req.resume();
+
+    if (method === 'GET' && pathname === '/api/flags') {
+      return send(res, 200, { ui: DEFAULT_FLAGS.ui, notice: '' });
+    }
+    if (method === 'POST' && pathname === '/api/track') {
+      return send(res, 200, { accepted: 0, dropped: 0 });
+    }
+    if (method === 'POST' && pathname === '/api/feedback') {
+      return send(res, 201, { ok: true, id: 0 });
+    }
+    if (method === 'GET' && pathname === '/api/admin/auth/session') {
+      return send(res, 200, { authenticated: false });
+    }
+    if (method === 'POST' && pathname === '/api/admin/auth/login') {
+      return send(res, 401, { error: 'invalid_password' });
+    }
+    return send(res, 501, { error: 'not_implemented', message: `No local stub for ${pathname}` });
+  };
+
+  return {
+    name: 'airo-api-stub',
+    configureServer(server) {
+      server.middlewares.use(handle);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(handle);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), netlifyPrettyUrls()],
+  plugins: [react(), tailwindcss(), netlifyPrettyUrls(), airoApiStub()],
   resolve: {
     alias: { '@': path.resolve(__dirname, '.') },
   },

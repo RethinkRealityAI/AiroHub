@@ -7,6 +7,10 @@
  * `page.route()` intercepting `**\/rest/v1/airohub_model*` is the browser
  * analogue of the esbuild transport stub in `scripts/test/realtime-reconnect.mjs`.
  *
+ * The gallery moved behind the shared admin password while this was written,
+ * so the session probe is stubbed "signed in" alongside the Supabase routes;
+ * everything else in here is unchanged.
+ *
  * What it locks in:
  *  1. the grid draws through exactly ONE WebGL canvas — a per-card canvas grid
  *     silently blanks cells past Chromium's ~16-context cap;
@@ -155,6 +159,15 @@ async function open(label, viewport = { width: 1440, height: 900 }) {
     if (/fonts\.(googleapis|gstatic)\.com/.test(url)) return;
     problems.push(`[${label}] request failed: ${url.slice(0, 140)}`);
   });
+
+  // The gallery is behind the admin password now. The session probe is the
+  // only admin call this file makes, and it has to answer before the first
+  // navigation or every check below would run against a login card.
+  await page.route('**/api/admin/auth/session', (route) =>
+    route.request().method() === 'OPTIONS'
+      ? route.fulfill({ status: 204, headers: CORS })
+      : route.fulfill(json({ authenticated: true, expiresAt: Date.now() + 3600000 }))
+  );
 
   // The uploaded GLB, served as real bytes from the stubbed bucket.
   await page.route('**/storage/v1/object/public/airohub-models/**', (route) =>

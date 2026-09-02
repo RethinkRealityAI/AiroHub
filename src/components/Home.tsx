@@ -31,6 +31,8 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
+import { track } from '../analytics/track';
+import { FeedbackButton } from '../feedback/FeedbackButton';
 
 /**
  * The hero is a full three.js scene and by far the largest thing the landing
@@ -80,12 +82,17 @@ export default function Home() {
 
   // `justCreated` tells the studio this is a brand-new room, so it can open
   // its invite moment instead of dropping the host straight onto an empty wall.
-  const createStudio = () => navigate(`/canvas/${roomId}`, { state: { justCreated: true } });
+  const createStudio = () => {
+    track('studio.create', undefined, roomId);
+    navigate(`/canvas/${roomId}`, { state: { justCreated: true } });
+  };
 
   const joinValid = CODE_RE.test(joinCode);
   const joinStudio = (e: React.FormEvent) => {
     e.preventDefault();
-    if (joinValid) navigate(`/controller/${joinCode}`);
+    if (!joinValid) return;
+    track('studio.join', undefined, joinCode);
+    navigate(`/controller/${joinCode}`);
   };
 
   return (
@@ -322,15 +329,6 @@ export default function Home() {
             >
               How it works
             </Link>
-            <span aria-hidden className="text-white/15">
-              /
-            </span>
-            <Link
-              to="/admin"
-              className="pointer-events-auto whitespace-nowrap text-white/35 transition-colors hover:text-white/70"
-            >
-              Admin
-            </Link>
           </motion.div>
 
           {/* Reads as a caption, works as onboarding: nothing else on the page
@@ -347,6 +345,11 @@ export default function Home() {
           </motion.p>
         </footer>
       </div>
+
+      {/* Outside the pointer-events-none overlay frame on purpose: that frame
+          exists so the hero keeps tracking the pointer, and a button inside it
+          would inherit the same click-through. */}
+      <FeedbackButton variant="floating" />
     </div>
   );
 }

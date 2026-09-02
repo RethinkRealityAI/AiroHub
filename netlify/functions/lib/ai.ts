@@ -3,8 +3,30 @@
  * server. Every entry point falls back to a curated response when the API key
  * is absent or the call fails, so the studio's AI panel always returns
  * something usable rather than erroring.
+ *
+ * Two rules hold the panel together, and both are about the model being an
+ * untrusted, occasionally unavailable dependency:
+ *
+ *  - Every parsed response goes through `lib/sanitize.ts` before it leaves this
+ *    file. A model answer is JSON the studio renders as colours, shader inputs
+ *    and canvas text; sanitising at the boundary means no caller has to
+ *    remember to. A parse that throws stays inside the per-model `try`, so a
+ *    malformed answer moves on to the next model instead of ending the request.
+ *  - The curated builders are exported. `ai.mts` needs the exact same answers
+ *    for the "AI panel is switched off" and "daily budget spent" paths, and a
+ *    second copy of them inline in the endpoint is a copy that drifts.
  */
 import { GoogleGenAI, Type } from "@google/genai";
+import {
+  sanitizeConcept,
+  sanitizeCritique,
+  sanitizeStyle,
+  TAG_TEXT_MAX,
+  TITLE_MAX,
+  type Critique,
+  type GraffitiConcept,
+  type StyleTransformation,
+} from "./sanitize.js";
 
 let genAIClient: GoogleGenAI | null = null;
 function getGenAI(): GoogleGenAI | null {
@@ -18,7 +40,7 @@ function getGenAI(): GoogleGenAI | null {
 }
 
 // Fallback curated graffiti concepts
-const CURATED_GRAFFITI_PRESETS = [
+const CURATED_GRAFFITI_PRESETS: GraffitiConcept[] = [
   {
     title: "NEON PHANTOM",
     tagLine: "Midnight Cyber Drip",
@@ -53,7 +75,7 @@ const CURATED_GRAFFITI_PRESETS = [
   },
 ];
 
-const CURATED_TRANSFORMATIONS: Record<string, any> = {
+const CURATED_TRANSFORMATIONS: Record<string, StyleTransformation> = {
   cyberpunk: {
     transformedTitle: "NEO-SHINJUKU OVERDRIVE",
     vibe: "Cyberpunk 2099",
@@ -116,72 +138,62 @@ const CURATED_TRANSFORMATIONS: Record<string, any> = {
   },
 };
 
-const DEFAULT_PLAYER_COLORS = ["#FF3D00", "#06B6D4", "#10B981", "#EC4899"];
+/** The style ids `transform-style` accepts; anything else falls back to the default. */
+const TRANSFORMATION_PRESETS: readonly string[] = Object.keys(CURATED_TRANSFORMATIONS);
+const DEFAULT_TRANSFORMATION = "cyberpunk";
 
-interface RoomPlayer {
-  id: string;
-  socketId: string;
-  slot: number; // 1 to 4
-  name: string;
-  color: string;
-  tool: "spray" | "brush";
-  mode: "motion" | "projection";
-}
+/* ------------------------------------------------------------------------ */
+/* Curated answers.                                                          */
+/*                                                                           */
+/* These are the studio's answer whenever Gemini is not going to be asked:    */
+/* no API key, every model failed, the AI panel is switched off, or the daily */
+/* budget is spent. They are exported so `ai.mts` returns the identical shape */
+/* on those paths — the panel is never allowed to render an error state, so   */
+/* there has to be exactly one definition of "what it shows instead".         */
+/* ------------------------------------------------------------------------ */
 
-interface RoomState {
-  roomId: string;
-  players: Map<string, RoomPlayer>;
-  activeObject: string;
-}
-
-const activeRooms = new Map<string, RoomState>();
-
-function getOrCreateRoom(roomId: string): RoomState {
-  if (!activeRooms.has(roomId)) {
-    activeRooms.set(roomId, {
-      roomId,
-      players: new Map(),
-      activeObject: "easel",
-    });
-  }
-  return activeRooms.get(roomId)!;
-}
-
-function assignNextPlayerSlot(room: RoomState, socketId: string, customName?: string): RoomPlayer {
-  const usedSlots = new Set(Array.from(room.players.values()).map((p) => p.slot));
-  let slot = 1;
-  while (slot <= 4 && usedSlots.has(slot)) {
-    slot++;
-  }
-  if (slot > 4) slot = ((room.players.size) % 4) + 1;
-
-  const color = DEFAULT_PLAYER_COLORS[(slot - 1) % DEFAULT_PLAYER_COLORS.length];
-  const name = customName || `Tagger ${slot}`;
-
-  const player: RoomPlayer = {
-    id: socketId,
-    socketId,
-    slot,
-    name,
-    color,
-    tool: "spray",
-    mode: "motion",
+/** A curated concept, personalised with the visitor's word when they gave one. */
+function curatedConcept(promptText?: string): GraffitiConcept {
+  const preset = CURATED_GRAFFITI_PRESETS[Math.floor(Math.random() * CURATED_GRAFFITI_PRESETS.length)];
+  const word = typeof promptText === "string" ? promptText.trim() : "";
+  return {
+    ...preset,
+    recommendedPalette: [...preset.recommendedPalette],
+    // Capped to the same bounds the sanitizer enforces on a model answer: the
+    // curated path skips the sanitizer, and the panel renders both fields.
+    title: word ? word.toUpperCase().slice(0, TITLE_MAX) : preset.title,
+    graffitiText: word ? word.toUpperCase().slice(0, 10) : preset.graffitiText,
   };
-
-  room.players.set(socketId, player);
-  return player;
 }
 
-async function generateGraffitiWithFallback(promptText: string, style: string) {
+function curatedCritique(objectType?: string): Critique {
+  const subject = typeof objectType === "string" && objectType.trim() ? objectType.trim() : "easel";
+  return {
+    exhibitionTitle: "VIBRATIONS IN LOWER EAST SIDE",
+    curatorCritique: `A bold, kinetic exploration of aerosol velocity and physical gesture across the 3D ${subject}.`,
+    estimatedValue: "$24,500 USD",
+    auctionHouse: "SOTHEBY'S CONTEMPORARY STREET",
+    vibeTags: ["#AerosolExpressionism", "#NeoGraffiti", "#RawEnergy"],
+  };
+}
+
+function curatedStyle(presetName?: string, customPrompt?: string): StyleTransformation {
+  // `hasOwnProperty`, not a bare lookup: `presetName` reaches here from a
+  // request body, and "constructor" would otherwise resolve to a prototype
+  // member and spread into an empty object.
+  const known =
+    typeof presetName === "string" && Object.prototype.hasOwnProperty.call(CURATED_TRANSFORMATIONS, presetName);
+  const fallback = known ? CURATED_TRANSFORMATIONS[presetName] : CURATED_TRANSFORMATIONS[DEFAULT_TRANSFORMATION];
+  const word = typeof customPrompt === "string" ? customPrompt.trim() : "";
+  return {
+    ...fallback,
+    tagText: word ? word.toUpperCase().slice(0, TAG_TEXT_MAX) : fallback.tagText,
+  };
+}
+
+async function generateGraffitiWithFallback(promptText: string, style: string): Promise<GraffitiConcept> {
   const ai = getGenAI();
-  if (!ai) {
-    const preset = CURATED_GRAFFITI_PRESETS[Math.floor(Math.random() * CURATED_GRAFFITI_PRESETS.length)];
-    return {
-      ...preset,
-      title: promptText ? promptText.toUpperCase() : preset.title,
-      graffitiText: promptText ? promptText.toUpperCase().slice(0, 10) : preset.graffitiText,
-    };
-  }
+  if (!ai) return curatedConcept(promptText);
 
   const modelsToTry = ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
 
@@ -216,32 +228,21 @@ Generate a creative street art concept response in JSON format.`,
       });
 
       if (response.text) {
-        return JSON.parse(response.text.trim());
+        // Inside the try on purpose: a parse throw is this model failing, and
+        // the loop's job is to ask the next one.
+        return sanitizeConcept(JSON.parse(response.text.trim()), curatedConcept(promptText));
       }
     } catch (err: any) {
       console.warn(`Model ${model} attempt failed:`, err?.message || err);
     }
   }
 
-  const preset = CURATED_GRAFFITI_PRESETS[Math.floor(Math.random() * CURATED_GRAFFITI_PRESETS.length)];
-  return {
-    ...preset,
-    title: promptText ? promptText.toUpperCase() : preset.title,
-    graffitiText: promptText ? promptText.toUpperCase().slice(0, 10) : preset.graffitiText,
-  };
+  return curatedConcept(promptText);
 }
 
-async function generateCritiqueWithFallback(objectType: string, dominantColor: string) {
+async function generateCritiqueWithFallback(objectType: string, dominantColor: string): Promise<Critique> {
   const ai = getGenAI();
-  if (!ai) {
-    return {
-      exhibitionTitle: "VIBRATIONS IN LOWER EAST SIDE",
-      curatorCritique: `A bold, kinetic exploration of aerosol velocity and physical gesture across the 3D ${objectType}.`,
-      estimatedValue: "$24,500 USD",
-      auctionHouse: "SOTHEBY'S CONTEMPORARY STREET",
-      vibeTags: ["#AerosolExpressionism", "#NeoGraffiti", "#RawEnergy"],
-    };
-  }
+  if (!ai) return curatedCritique(objectType);
 
   const modelsToTry = ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
 
@@ -271,32 +272,25 @@ async function generateCritiqueWithFallback(objectType: string, dominantColor: s
       });
 
       if (response.text) {
-        return JSON.parse(response.text.trim());
+        return sanitizeCritique(JSON.parse(response.text.trim()), curatedCritique(objectType));
       }
     } catch (err: any) {
       console.warn(`Critique model ${model} attempt failed:`, err?.message || err);
     }
   }
 
-  return {
-    exhibitionTitle: `CHRONICLES OF ${objectType.toUpperCase()}`,
-    curatorCritique: `A magnificent masterclass in raw physical gesture and aerosol texture.`,
-    estimatedValue: "$32,000 USD",
-    auctionHouse: "CHRISTIE'S POST-WAR & URBAN",
-    vibeTags: ["#UrbanMasterpiece", "#Wildstyle3D", "#CollectorGrade"],
-  };
+  return curatedCritique(objectType);
 }
 
-async function generateStyleTransformation(presetName: string, objectType: string, customPrompt?: string) {
-  const fallback = CURATED_TRANSFORMATIONS[presetName] || CURATED_TRANSFORMATIONS.cyberpunk;
+async function generateStyleTransformation(
+  presetName: string,
+  objectType: string,
+  customPrompt?: string
+): Promise<StyleTransformation> {
+  const fallback = curatedStyle(presetName, customPrompt);
   const ai = getGenAI();
 
-  if (!ai) {
-    return {
-      ...fallback,
-      tagText: customPrompt ? customPrompt.toUpperCase().slice(0, 10) : fallback.tagText,
-    };
-  }
+  if (!ai) return fallback;
 
   const modelsToTry = ["gemini-3.7-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
 
@@ -339,17 +333,14 @@ Generate artistic transformation parameters and stylized elements in JSON format
       });
 
       if (response.text) {
-        return JSON.parse(response.text.trim());
+        return sanitizeStyle(JSON.parse(response.text.trim()), fallback);
       }
     } catch (err: any) {
       console.warn(`Style transform model ${model} attempt failed:`, err?.message || err);
     }
   }
 
-  return {
-    ...fallback,
-    tagText: customPrompt ? customPrompt.toUpperCase().slice(0, 10) : fallback.tagText,
-  };
+  return fallback;
 }
 
 
@@ -357,6 +348,11 @@ export {
   generateGraffitiWithFallback,
   generateCritiqueWithFallback,
   generateStyleTransformation,
+  curatedConcept,
+  curatedCritique,
+  curatedStyle,
   CURATED_GRAFFITI_PRESETS,
   CURATED_TRANSFORMATIONS,
+  TRANSFORMATION_PRESETS,
+  DEFAULT_TRANSFORMATION,
 };

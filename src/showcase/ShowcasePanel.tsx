@@ -6,10 +6,11 @@
  * and then shows it back as an inline preview with a "Save again" action.
  *
  * Self-contained by design: it imports nothing from the app besides its own
- * recorder module, and leans only on the global utilities already defined in
- * src/index.css (`glass-strong`, `glass-sheen`, `paint-btn`, `splat-btn`,
- * `label-caps`, `segmented`, `tap`, `airo-breathe`). Mount it anywhere in the
- * studio tree and hand it `handles`; see src/showcase/README.md.
+ * recorder module and the analytics queue, and leans only on the global
+ * utilities already defined in src/index.css (`glass-strong`, `glass-sheen`,
+ * `paint-btn`, `splat-btn`, `label-caps`, `segmented`, `tap`, `airo-breathe`).
+ * Mount it anywhere in the studio tree and hand it `handles`; see
+ * src/showcase/README.md.
  *
  * The backdrop deliberately thins out while recording — the whole point is to
  * watch the turntable happen behind the panel. The overlay itself never lands
@@ -26,6 +27,7 @@ import {
   type ShowcaseHandles,
   type ShowcaseSeconds,
 } from './recorder';
+import { track } from '../analytics/track';
 
 export type { ShowcaseHandles } from './recorder';
 
@@ -104,6 +106,7 @@ export const ShowcasePanel: React.FC<ShowcasePanelProps> = ({ open, onClose, han
     setSaveNote(null);
     setPercent(0);
     setPhase('recording');
+    track('showcase.record', { seconds });
 
     const controller = new AbortController();
     abortRef.current = controller;

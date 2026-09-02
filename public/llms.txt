@@ -1,9 +1,9 @@
 # AiroHub
 
 > A collaborative 3D spray-paint studio that runs in a browser tab. Put a real
-> 3D object on a big screen, and up to four phones become motion-tracked spray
-> cans pointed at it. Everyone paints the same object at the same time. No
-> install, no account, one six-character room code.
+> 3D object on a big screen, and up to four phones become spray cans pointed at
+> it. Everyone paints the same object at the same time. No install, no account,
+> one six-character room code.
 
 This file follows the llms.txt community convention (llmstxt.org). It is a
 convention, not a web standard: nothing is obliged to read it, and nothing here
@@ -15,18 +15,19 @@ bundle, and a plain-text pointer costs nothing.
 
 - https://airohub.netlify.app/ — the landing page and the entry point. Creates a
   studio (a room) or joins one with a code.
-- https://airohub.netlify.app/how-it-works — the field guide. The long-form
-  explanation of the studio, the phone controller, the three controller modes
-  and the engineering underneath, plus a list of common questions.
+- https://airohub.netlify.app/how-it-works — the field guide. A plain-language
+  walkthrough of the big screen and of the phone, which can be held two ways:
+  aimed at the screen like a can, or painted on directly. Includes an object you
+  can paint in the page and a list of common questions.
 
 ## How it works, in one paragraph
 
-Nobody streams pixels. A phone reads its own gyroscope about 40 times a second
-and sends where it is aiming; the studio raycasts that aim onto the model and
-composites the stroke into the model's own texture, so paint survives camera
-moves, object swaps and a page reload. Every screen in the room rebuilds the
-identical artwork from the same instructions. The transport is Supabase Realtime
-broadcast and presence — there is no dedicated socket server.
+A phone sends where it is pointing, and nothing else. The studio puts paint on
+the object exactly where the phone was aimed, and that paint goes onto the
+object itself rather than a layer floating in front of it, so it survives camera
+moves, object swaps and a page reload. Every screen in the room draws the same
+picture from the same instructions, so nobody is watching a video of somebody
+else's screen.
 
 ## Not for indexing
 

@@ -48,7 +48,6 @@ import {
   PaintBucket,
   RefreshCw,
   RotateCw,
-  ShieldAlert,
   SprayCan,
   XCircle,
 } from 'lucide-react';
@@ -67,6 +66,7 @@ import { ReviewCard, toneOf } from './ReviewCard';
 import { ReviewDetail } from './ReviewDetail';
 import { DEFAULT_DIAGNOSTICS, type ReviewDiagnostics, type StageStatus } from './TurntableView';
 import { disposeReviewEnvironments, type ReviewEnvKind } from './reviewEnv';
+import AdminGate, { AdminSessionChip } from '../admin/AdminGate';
 
 const REVIEWER_KEY = 'airo:review:reviewer';
 
@@ -152,7 +152,7 @@ function EnvironmentJanitor(): null {
   return null;
 }
 
-export default function ReviewGallery(): React.JSX.Element {
+function ReviewGalleryInner(): React.JSX.Element {
   const backendReady = isBackendConfigured();
   const reducedMotion = usePrefersReducedMotion();
 
@@ -595,10 +595,7 @@ export default function ReviewGallery(): React.JSX.Element {
               <ArrowLeft size={14} />
               Admin
             </Link>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[#FFB020]/40 bg-[#FFB020]/10 px-3 py-1.5 text-[10px] font-semibold text-[#FFB020]">
-              <ShieldAlert size={12} className="shrink-0" />
-              Anyone with this URL can approve models
-            </span>
+            <AdminSessionChip />
           </div>
 
           <motion.div
@@ -842,5 +839,20 @@ export default function ReviewGallery(): React.JSX.Element {
         onSubmit={submitDetail}
       />
     </div>
+  );
+}
+
+/**
+ * The route: the gallery, behind the same password gate as /admin.
+ *
+ * A verdict written from here decides what every live session may load, so it
+ * belongs behind the same door — and, like /admin, the door that counts is the
+ * API's, not this one.
+ */
+export default function ReviewGallery(): React.JSX.Element {
+  return (
+    <AdminGate>
+      <ReviewGalleryInner />
+    </AdminGate>
   );
 }

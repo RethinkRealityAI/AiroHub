@@ -1,14 +1,27 @@
 /**
- * /admin — the AiroHub model-management portal.
+ * /admin — the AiroHub owner's dashboard.
  *
- * One scrolling page over the stage vignette, all liquid glass + paint skin:
+ * One scrolling page over the stage vignette, all liquid glass + paint skin,
+ * behind a shared password. Four tabs, addressable by hash so a bookmark can
+ * land on the one you check every morning:
  *
- *   LIBRARY  — audits the built-in catalog (fetch → analyze → graded checks)
- *              and lists custom models published to Supabase.
- *   UPLOAD   — drop a .glb/.gltf, get instant analysis + health checks, run
- *              the in-browser optimizer (textures → ≤1024² WebP), then publish
- *              to the `airohub-models` bucket + registry table.
- *   SETTINGS — editable check budgets (localStorage) and the danger zone.
+ *   OVERVIEW — first-party, cookieless analytics: who came, from where, and
+ *              what they did (`src/admin/panels/OverviewPanel.tsx`).
+ *   FEEDBACK — the messages people sent, and their triage state.
+ *   MODELS   — the original portal. Audits the built-in catalog (fetch →
+ *              analyze → graded checks), lists custom models published to
+ *              Supabase, and the upload station: drop a .glb/.gltf, get
+ *              instant analysis + health checks, run the in-browser optimizer
+ *              (textures → ≤1024² WebP), then publish to the
+ *              `airohub-models` bucket + registry table.
+ *   SETTINGS — the live feature switches and AI budget every visitor is
+ *              served, then the model check budgets (localStorage) and the
+ *              danger zone.
+ *
+ * The password gate is `AdminGate`, wrapped around this page rather than
+ * around its route: the API is the real gate, so downloading the chunk before
+ * signing in costs a stranger bandwidth and gains them nothing, and `App.tsx`
+ * keeps one shape for every route.
  *
  * Everything three.js-heavy lives in src/admin/* and this whole route is
  * lazy-loaded, so none of it touches the main entry bundle.
@@ -17,6 +30,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
+  Activity,
   AlertTriangle,
   ArrowLeft,
   Boxes,
@@ -29,19 +43,19 @@ import {
   Database,
   HardDrive,
   Info,
+  Inbox,
   Loader2,
   Play,
   RefreshCw,
   Ruler,
   Settings2,
-  ShieldAlert,
   Sparkles,
   SprayCan,
   Trash2,
   UploadCloud,
   XCircle,
 } from 'lucide-react';
-import { GlassPanel } from '../ui/Glass';
+import { GlassPanel, Segmented, type SegmentOption } from '../ui/Glass';
 import { ObjectThumb } from '../ui/ObjectPicker';
 import { PAINTABLE_OBJECTS, type PaintableObject } from '../paint/objectCatalog';
 import { analyzeModel, type ModelStats } from '../admin/analyze';
@@ -71,6 +85,17 @@ import {
   MAX_UPLOAD_BYTES,
   type CustomModelRow,
 } from '../admin/supabase';
+import AdminGate, { AdminSessionChip } from '../admin/AdminGate';
+import {
+  BudgetField,
+  SectionHeader,
+  StatTile,
+  useCopyPing,
+  useTwoTapConfirm,
+} from '../admin/panels/primitives';
+import OverviewPanel from '../admin/panels/OverviewPanel';
+import FeedbackPanel from '../admin/panels/FeedbackPanel';
+import FlagsPanel, { AiUsagePanel } from '../admin/panels/FlagsPanel';
 
 /* ------------------------------------------------------------------
    Shared bits
@@ -223,38 +248,6 @@ function StatsLine({ stats }: { stats: ModelStats }) {
       {formatCount(stats.triangles)} tris · {stats.meshes} mesh{stats.meshes === 1 ? '' : 'es'} ·{' '}
       {stats.textures} tex · {stats.textureMP.toFixed(1)} MP · {stats.vramMB.toFixed(0)} MB VRAM
     </p>
-  );
-}
-
-function SectionHeader({
-  icon,
-  accent,
-  title,
-  sub,
-  right,
-}: {
-  icon: React.ReactNode;
-  accent: string;
-  title: string;
-  sub: string;
-  right?: React.ReactNode;
-}) {
-  return (
-    <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-      <div className="flex items-center gap-3">
-        <span
-          className="glass glass-sheen grid h-9 w-9 shrink-0 place-items-center rounded-xl"
-          style={{ color: accent }}
-        >
-          {icon}
-        </span>
-        <div>
-          <h2 className="paint-title text-xl font-black tracking-tight sm:text-2xl">{title}</h2>
-          <p className="mt-0.5 text-[11px] text-white/45">{sub}</p>
-        </div>
-      </div>
-      {right}
-    </div>
   );
 }
 
@@ -574,15 +567,6 @@ function DeltaBadge({
   );
 }
 
-function StatTile({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5">
-      <div className="label-caps text-white/35">{label}</div>
-      <div className="mt-0.5 font-mono text-[13px] font-bold text-white/90">{value}</div>
-    </div>
-  );
-}
-
 /* ------------------------------------------------------------------
    Settings
    ------------------------------------------------------------------ */
@@ -598,44 +582,50 @@ const BUDGET_FIELDS: { key: keyof CheckBudgets; label: string; step: number }[] 
   { key: 'vramWarnMB', label: 'VRAM warn · MB', step: 5 },
 ];
 
-function BudgetField({
-  label,
-  value,
-  step,
-  onCommit,
-}: {
-  label: string;
-  value: number;
-  step: number;
-  onCommit: (n: number) => void;
-}) {
-  const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="label-caps text-white/35">{label}</span>
-      <input
-        type="number"
-        min={0}
-        step={step}
-        value={text}
-        onChange={(e) => {
-          setText(e.target.value);
-          const n = Number(e.target.value);
-          if (Number.isFinite(n) && n > 0) onCommit(n);
-        }}
-        className="w-full rounded-xl border border-white/12 bg-white/[0.06] px-3 py-2 font-mono text-[12px] text-white focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
-      />
-    </label>
-  );
-}
-
 /* ==================================================================
    The dashboard
    ================================================================== */
 
-export default function AdminView() {
+type AdminTab = 'overview' | 'feedback' | 'models' | 'settings';
+
+const ADMIN_TABS: AdminTab[] = ['overview', 'feedback', 'models', 'settings'];
+
+const TAB_OPTIONS: SegmentOption<AdminTab>[] = [
+  { value: 'overview', label: 'Overview', icon: <Activity size={13} />, accent: '#22D3EE' },
+  { value: 'feedback', label: 'Feedback', icon: <Inbox size={13} />, accent: '#FFB020' },
+  { value: 'models', label: 'Models', icon: <Boxes size={13} />, accent: '#A78BFA' },
+  { value: 'settings', label: 'Settings', icon: <Settings2 size={13} /> },
+];
+
+/** The tab named by `#feedback`, or the default. */
+function tabFromHash(): AdminTab {
+  const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+  return (ADMIN_TABS as string[]).includes(hash) ? (hash as AdminTab) : 'overview';
+}
+
+function AdminViewInner() {
   const backendReady = isBackendConfigured();
+
+  /* ---------- Tabs ----------
+     The hash is the source of truth in both directions: the back button and a
+     pasted /admin#settings both land where they say they will, and picking a
+     tab leaves a URL worth bookmarking. */
+  const [tab, setTab] = useState<AdminTab>(() => tabFromHash());
+
+  useEffect(() => {
+    const sync = () => setTab(tabFromHash());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+
+  const selectTab = useCallback((next: AdminTab) => {
+    setTab(next);
+    // Compared against the literal hash, not the resolved tab: arriving at
+    // /admin with no hash resolves to Overview, and picking Overview from
+    // there should still leave a URL worth bookmarking.
+    if (window.location.hash !== `#${next}`) window.location.hash = next;
+  }, []);
+
   const [budgets, setBudgetsState] = useState<CheckBudgets>(() => loadBudgets());
 
   const updateBudget = useCallback((key: keyof CheckBudgets, value: number) => {
@@ -733,8 +723,8 @@ export default function AdminView() {
   const [customRows, setCustomRows] = useState<CustomModelRow[] | null>(null);
   const [customError, setCustomError] = useState<string | null>(null);
   const [customLoading, setCustomLoading] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const { copiedId, copy } = useCopyPing();
+  const { armedId: confirmDeleteId, arm: armDelete } = useTwoTapConfirm();
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refreshCustom = useCallback(async () => {
@@ -754,24 +744,15 @@ export default function AdminView() {
     void refreshCustom();
   }, [refreshCustom]);
 
-  const copyRowUrl = useCallback(async (row: CustomModelRow) => {
-    try {
-      await navigator.clipboard.writeText(publicModelUrl(row.storage_path));
-      setCopiedId(row.id);
-      setTimeout(() => setCopiedId((c) => (c === row.id ? null : c)), 1600);
-    } catch {
-      // Clipboard blocked — the copy button just stays inert.
-    }
-  }, []);
+  const copyRowUrl = useCallback(
+    async (row: CustomModelRow) => copy(row.id, publicModelUrl(row.storage_path)),
+    [copy]
+  );
 
   const handleDeleteRow = useCallback(
     async (row: CustomModelRow) => {
-      if (confirmDeleteId !== row.id) {
-        setConfirmDeleteId(row.id);
-        setTimeout(() => setConfirmDeleteId((c) => (c === row.id ? null : c)), 4000);
-        return;
-      }
-      setConfirmDeleteId(null);
+      // First tap arms the row, second one deletes; walking away disarms it.
+      if (!armDelete(row.id)) return;
       setDeletingId(row.id);
       try {
         await deleteCustomModel(row);
@@ -782,7 +763,7 @@ export default function AdminView() {
         setDeletingId(null);
       }
     },
-    [confirmDeleteId]
+    [armDelete]
   );
 
   /* ---------- Upload ---------- */
@@ -993,10 +974,7 @@ export default function AdminView() {
                 Review
               </Link>
             </div>
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-[#FFB020]/40 bg-[#FFB020]/10 px-3 py-1.5 text-[10px] font-semibold text-[#FFB020]">
-              <ShieldAlert size={12} className="shrink-0" />
-              Anyone with this URL can manage models
-            </span>
+            <AdminSessionChip />
           </div>
 
           <motion.div
@@ -1013,540 +991,597 @@ export default function AdminView() {
               </h1>
             </div>
             <p className="mt-3 max-w-xl text-[13px] leading-relaxed text-white/55">
-              The model-management portal — audit the built-in catalog, upload and optimize new
-              models, and publish them to Supabase so they land in live sessions.
+              Who came and what they did, what they wrote in, which parts of the product are
+              switched on, and the model library behind all of it.
             </p>
           </motion.div>
+
+          {/* The library counts describe one tab's worth of page, so they only
+              appear on it — a chip that never changes on three of four tabs
+              reads as chrome, not as a readout. */}
+          {tab === 'models' && (
+            <motion.div
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ ...spring, delay: 0.18 }}
+              className="mt-12 flex flex-wrap items-center gap-2.5"
+            >
+              <span
+                className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
+                style={{ '--paint': 'rgba(255,77,28,0.85)' } as React.CSSProperties}
+              >
+                <Boxes size={13} />
+                {builtins ? builtins.length : '…'} built-in
+              </span>
+              <span
+                className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
+                style={{ '--paint': 'rgba(34,211,238,0.8)' } as React.CSSProperties}
+              >
+                <Database size={13} />
+                {backendReady ? (customRows ? customRows.length : '…') : 0} custom
+              </span>
+              <span
+                className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
+                style={{ '--paint': 'rgba(167,139,250,0.8)' } as React.CSSProperties}
+              >
+                <HardDrive size={13} />
+                {formatBytes(totalLibraryBytes)} library
+              </span>
+            </motion.div>
+          )}
 
           <motion.div
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ ...spring, delay: 0.18 }}
-            className="mt-12 flex flex-wrap items-center gap-2.5"
+            transition={{ ...spring, delay: 0.22 }}
+            className={`no-scrollbar min-w-0 overflow-x-auto ${tab === 'models' ? 'mt-6' : 'mt-12'}`}
           >
-            <span
-              className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
-              style={{ '--paint': 'rgba(255,77,28,0.85)' } as React.CSSProperties}
-            >
-              <Boxes size={13} />
-              {builtins ? builtins.length : '…'} built-in
-            </span>
-            <span
-              className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
-              style={{ '--paint': 'rgba(34,211,238,0.8)' } as React.CSSProperties}
-            >
-              <Database size={13} />
-              {backendReady ? (customRows ? customRows.length : '…') : 0} custom
-            </span>
-            <span
-              className="splat-chip glass glass-sheen inline-flex items-center gap-2 rounded-full px-3.5 py-2 text-[11px] font-extrabold tracking-wide"
-              style={{ '--paint': 'rgba(167,139,250,0.8)' } as React.CSSProperties}
-            >
-              <HardDrive size={13} />
-              {formatBytes(totalLibraryBytes)} library
-            </span>
+            <Segmented<AdminTab>
+              options={TAB_OPTIONS}
+              value={tab}
+              onChange={selectTab}
+              layoutId="admin-tabs"
+              size="lg"
+              paint
+              className="w-full min-w-max"
+            />
           </motion.div>
         </header>
 
-        {/* ============ LIBRARY — built-ins ============ */}
-        <section className="mt-14">
-          <SectionHeader
-            icon={<Boxes size={15} />}
-            accent="#FF7A34"
-            title="Built-in Library"
-            sub="The shipped catalog — fetch, analyze and grade each model in-browser."
-            right={
-              <button
-                type="button"
-                onClick={() => void auditAll()}
-                disabled={!builtins || builtins.length === 0 || Boolean(audit?.running)}
-                className="paint-btn tap inline-flex items-center gap-2 px-7 py-2.5 text-[12px] font-bold text-white disabled:opacity-60"
-                style={{ '--paint': 'linear-gradient(120deg, #FF4D1C, #FF7A34 70%, #FFB020)' } as React.CSSProperties}
-              >
-                {audit?.running ? (
-                  <>
-                    <Loader2 size={13} className="animate-spin" />
-                    Auditing {audit.done}/{audit.total}
-                  </>
-                ) : (
-                  <>
-                    <Play size={13} />
-                    Audit all
-                  </>
-                )}
-              </button>
-            }
-          />
+        {tab === 'overview' && <OverviewPanel />}
 
-          {audit?.running && (
-            <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/10">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-[#FF4D1C] to-[#FFB020] transition-all duration-300"
-                style={{ width: `${audit.total ? (audit.done / audit.total) * 100 : 0}%` }}
+        {tab === 'feedback' && <FeedbackPanel />}
+
+        {tab === 'settings' && (
+          <>
+            <FlagsPanel />
+            <AiUsagePanel />
+          </>
+        )}
+
+        {/* The original model portal, unchanged behind its own tab. */}
+        {tab === 'models' && (
+          <div data-testid="admin-models">
+            {/* ============ LIBRARY — built-ins ============ */}
+            <section className="mt-14">
+              <SectionHeader
+                icon={<Boxes size={15} />}
+                accent="#FF7A34"
+                title="Built-in Library"
+                sub="The shipped catalog — fetch, analyze and grade each model in-browser."
+                right={
+                  <button
+                    type="button"
+                    onClick={() => void auditAll()}
+                    disabled={!builtins || builtins.length === 0 || Boolean(audit?.running)}
+                    className="paint-btn tap inline-flex items-center gap-2 px-7 py-2.5 text-[12px] font-bold text-white disabled:opacity-60"
+                    style={{ '--paint': 'linear-gradient(120deg, #FF4D1C, #FF7A34 70%, #FFB020)' } as React.CSSProperties}
+                  >
+                    {audit?.running ? (
+                      <>
+                        <Loader2 size={13} className="animate-spin" />
+                        Auditing {audit.done}/{audit.total}
+                      </>
+                    ) : (
+                      <>
+                        <Play size={13} />
+                        Audit all
+                      </>
+                    )}
+                  </button>
+                }
               />
-            </div>
-          )}
 
-          {builtins === null ? (
-            <GlassPanel className="flex items-center gap-3 p-5 text-[12px] text-white/50">
-              <Loader2 size={15} className="animate-spin" /> Scanning the shipped catalog…
-            </GlassPanel>
-          ) : builtins.length === 0 ? (
-            <GlassPanel className="p-5 text-[12px] text-white/50">
-              No built-in model assets were found under /models.
-            </GlassPanel>
-          ) : (
-            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-              {builtins.map((entry, i) => (
-                <BuiltinCard
-                  key={entry.def.id}
-                  entry={entry}
-                  run={runs[entry.def.id] ?? { status: 'idle' }}
-                  budgets={budgets}
-                  expanded={expandedIds.has(entry.def.id)}
-                  onToggle={() => toggleExpanded(entry.def.id)}
-                  onRun={() => void runBuiltinCheck(entry.def.id)}
-                  index={i}
-                />
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* ============ LIBRARY — custom ============ */}
-        <section className="mt-14">
-          <SectionHeader
-            icon={<Database size={15} />}
-            accent="#34D399"
-            title="Custom Models"
-            sub="Published to the airohub-models bucket — available to every session."
-            right={
-              backendReady ? (
-                <button
-                  type="button"
-                  onClick={() => void refreshCustom()}
-                  disabled={customLoading}
-                  className="tap glass glass-sheen inline-flex items-center gap-2 rounded-full px-4 py-2 text-[11px] font-bold text-white/70 hover:text-white disabled:opacity-60"
-                >
-                  <RefreshCw size={12} className={customLoading ? 'animate-spin' : ''} />
-                  Refresh
-                </button>
-              ) : undefined
-            }
-          />
-
-          {!backendReady ? (
-            <GlassPanel className="flex items-start gap-3 border-[#FFB020]/30 p-5">
-              <CloudOff size={17} className="mt-0.5 shrink-0 text-[#FFB020]" />
-              <div>
-                <p className="text-[13px] font-bold text-[#FFB020]">Supabase is offline</p>
-                <p className="mt-1 text-[12px] leading-relaxed text-white/55">
-                  <code className="font-mono text-white/70">VITE_SUPABASE_URL</code> /{' '}
-                  <code className="font-mono text-white/70">VITE_SUPABASE_ANON_KEY</code> are not
-                  set, so the custom library and publishing are disabled. Built-in audits and the
-                  optimizer still work.
-                </p>
-              </div>
-            </GlassPanel>
-          ) : (
-            <>
-              {customError && (
-                <p className="mb-3 flex items-center gap-1.5 text-[12px] text-[#FF4D1C]">
-                  <XCircle size={13} className="shrink-0" /> {customError}
-                </p>
+              {audit?.running && (
+                <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-[#FF4D1C] to-[#FFB020] transition-all duration-300"
+                    style={{ width: `${audit.total ? (audit.done / audit.total) * 100 : 0}%` }}
+                  />
+                </div>
               )}
-              {customRows === null ? (
+
+              {builtins === null ? (
                 <GlassPanel className="flex items-center gap-3 p-5 text-[12px] text-white/50">
-                  <Loader2 size={15} className="animate-spin" /> Loading the custom library…
+                  <Loader2 size={15} className="animate-spin" /> Scanning the shipped catalog…
                 </GlassPanel>
-              ) : customRows.length === 0 ? (
-                <GlassPanel className="p-6 text-center">
-                  <Sparkles size={18} className="mx-auto text-white/30" />
-                  <p className="mt-2 text-[13px] font-semibold text-white/60">No custom models yet</p>
-                  <p className="mt-1 text-[11.5px] text-white/40">
-                    Publish your first one from the upload station below.
-                  </p>
+              ) : builtins.length === 0 ? (
+                <GlassPanel className="p-5 text-[12px] text-white/50">
+                  No built-in model assets were found under /models.
                 </GlassPanel>
               ) : (
                 <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-                  {customRows.map((row, i) => (
-                    <CustomCard
-                      key={row.id}
-                      row={row}
+                  {builtins.map((entry, i) => (
+                    <BuiltinCard
+                      key={entry.def.id}
+                      entry={entry}
+                      run={runs[entry.def.id] ?? { status: 'idle' }}
                       budgets={budgets}
-                      expanded={expandedIds.has(row.id)}
-                      onToggle={() => toggleExpanded(row.id)}
-                      copied={copiedId === row.id}
-                      onCopy={() => void copyRowUrl(row)}
-                      confirming={confirmDeleteId === row.id}
-                      deleting={deletingId === row.id}
-                      onDelete={() => void handleDeleteRow(row)}
+                      expanded={expandedIds.has(entry.def.id)}
+                      onToggle={() => toggleExpanded(entry.def.id)}
+                      onRun={() => void runBuiltinCheck(entry.def.id)}
                       index={i}
                     />
                   ))}
                 </div>
               )}
-            </>
-          )}
-        </section>
+            </section>
 
-        {/* ============ UPLOAD ============ */}
-        <section className="mt-14">
-          <SectionHeader
-            icon={<UploadCloud size={15} />}
-            accent="#22D3EE"
-            title="Upload Station"
-            sub="Drop a model → instant analysis → optimize in-browser → publish."
-          />
-
-          <GlassPanel
-            strong
-            className="splatter-accent overflow-hidden p-5 sm:p-6"
-            style={{ '--paint': '#22D3EE' } as React.CSSProperties}
-          >
-            {/* Dropzone */}
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => fileInputRef.current?.click()}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click();
-              }}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragging(true);
-              }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragging(false);
-                void handleFiles(e.dataTransfer.files);
-              }}
-              className={`tap relative z-10 cursor-pointer rounded-[22px] border-2 border-dashed px-6 py-9 text-center transition-colors ${
-                dragging
-                  ? 'border-[#22D3EE] bg-[#22D3EE]/10'
-                  : 'border-white/15 bg-white/[0.03] hover:border-white/30'
-              }`}
-            >
-              <UploadCloud size={26} className={`mx-auto ${dragging ? 'text-[#22D3EE]' : 'text-white/40'}`} />
-              <p className="mt-2.5 text-[13.5px] font-bold text-white/80">
-                Drop a <span className="text-[#22D3EE]">.glb</span> /{' '}
-                <span className="text-[#22D3EE]">.gltf</span> here
-              </p>
-              <p className="mt-1 text-[11px] text-white/40">or click to browse · 25 MB max</p>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
-                className="hidden"
-                onChange={(e) => void handleFiles(e.target.files)}
+            {/* ============ LIBRARY — custom ============ */}
+            <section className="mt-14">
+              <SectionHeader
+                icon={<Database size={15} />}
+                accent="#34D399"
+                title="Custom Models"
+                sub="Published to the airohub-models bucket — available to every session."
+                right={
+                  backendReady ? (
+                    <button
+                      type="button"
+                      onClick={() => void refreshCustom()}
+                      disabled={customLoading}
+                      className="tap glass glass-sheen inline-flex items-center gap-2 rounded-full px-4 py-2 text-[11px] font-bold text-white/70 hover:text-white disabled:opacity-60"
+                    >
+                      <RefreshCw size={12} className={customLoading ? 'animate-spin' : ''} />
+                      Refresh
+                    </button>
+                  ) : undefined
+                }
               />
-            </div>
 
-            {fileError && (
-              <p className="mt-3 flex items-center gap-1.5 text-[12px] text-[#FF4D1C]">
-                <XCircle size={13} className="shrink-0" /> {fileError}
-              </p>
-            )}
-            {publishSuccess && !draft && (
-              <p className="mt-3 flex items-center gap-1.5 text-[12px] text-[#34D399]">
-                <CheckCircle2 size={13} className="shrink-0" /> {publishSuccess}
-              </p>
-            )}
-
-            {/* Draft workbench */}
-            {draft && (
-              <motion.div
-                initial={{ opacity: 0, y: 14 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={spring}
-                className="relative z-10 mt-5"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-3.5 py-1.5 font-mono text-[11px] text-white/80">
-                    {draft.fileName}
-                    <span className="text-white/35">{formatBytes(draft.original.byteLength)}</span>
-                  </span>
-                  {!draft.isBinary && (
-                    <span className="rounded-full border border-[#FFB020]/40 bg-[#FFB020]/10 px-2.5 py-1 text-[10px] font-semibold text-[#FFB020]">
-                      JSON .gltf — analysis only, publish needs a binary .glb
-                    </span>
+              {!backendReady ? (
+                <GlassPanel className="flex items-start gap-3 border-[#FFB020]/30 p-5">
+                  <CloudOff size={17} className="mt-0.5 shrink-0 text-[#FFB020]" />
+                  <div>
+                    <p className="text-[13px] font-bold text-[#FFB020]">Supabase is offline</p>
+                    <p className="mt-1 text-[12px] leading-relaxed text-white/55">
+                      <code className="font-mono text-white/70">VITE_SUPABASE_URL</code> /{' '}
+                      <code className="font-mono text-white/70">VITE_SUPABASE_ANON_KEY</code> are not
+                      set, so the custom library and publishing are disabled. Built-in audits and the
+                      optimizer still work.
+                    </p>
+                  </div>
+                </GlassPanel>
+              ) : (
+                <>
+                  {customError && (
+                    <p className="mb-3 flex items-center gap-1.5 text-[12px] text-[#FF4D1C]">
+                      <XCircle size={13} className="shrink-0" /> {customError}
+                    </p>
                   )}
-                  <button
-                    type="button"
-                    onClick={clearDraft}
-                    className="tap ml-auto rounded-full border border-white/12 bg-white/[0.05] px-3 py-1.5 text-[10.5px] font-semibold text-white/50 hover:text-white"
-                  >
-                    Clear
-                  </button>
+                  {customRows === null ? (
+                    <GlassPanel className="flex items-center gap-3 p-5 text-[12px] text-white/50">
+                      <Loader2 size={15} className="animate-spin" /> Loading the custom library…
+                    </GlassPanel>
+                  ) : customRows.length === 0 ? (
+                    <GlassPanel className="p-6 text-center">
+                      <Sparkles size={18} className="mx-auto text-white/30" />
+                      <p className="mt-2 text-[13px] font-semibold text-white/60">No custom models yet</p>
+                      <p className="mt-1 text-[11.5px] text-white/40">
+                        Publish your first one from the upload station below.
+                      </p>
+                    </GlassPanel>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                      {customRows.map((row, i) => (
+                        <CustomCard
+                          key={row.id}
+                          row={row}
+                          budgets={budgets}
+                          expanded={expandedIds.has(row.id)}
+                          onToggle={() => toggleExpanded(row.id)}
+                          copied={copiedId === row.id}
+                          onCopy={() => void copyRowUrl(row)}
+                          confirming={confirmDeleteId === row.id}
+                          deleting={deletingId === row.id}
+                          onDelete={() => void handleDeleteRow(row)}
+                          index={i}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+
+            {/* ============ UPLOAD ============ */}
+            <section className="mt-14">
+              <SectionHeader
+                icon={<UploadCloud size={15} />}
+                accent="#22D3EE"
+                title="Upload Station"
+                sub="Drop a model → instant analysis → optimize in-browser → publish."
+              />
+
+              <GlassPanel
+                strong
+                className="splatter-accent overflow-hidden p-5 sm:p-6"
+                style={{ '--paint': '#22D3EE' } as React.CSSProperties}
+              >
+                {/* Dropzone */}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => fileInputRef.current?.click()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') fileInputRef.current?.click();
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragging(true);
+                  }}
+                  onDragLeave={() => setDragging(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragging(false);
+                    void handleFiles(e.dataTransfer.files);
+                  }}
+                  className={`tap relative z-10 cursor-pointer rounded-[22px] border-2 border-dashed px-6 py-9 text-center transition-colors ${
+                    dragging
+                      ? 'border-[#22D3EE] bg-[#22D3EE]/10'
+                      : 'border-white/15 bg-white/[0.03] hover:border-white/30'
+                  }`}
+                >
+                  <UploadCloud size={26} className={`mx-auto ${dragging ? 'text-[#22D3EE]' : 'text-white/40'}`} />
+                  <p className="mt-2.5 text-[13.5px] font-bold text-white/80">
+                    Drop a <span className="text-[#22D3EE]">.glb</span> /{' '}
+                    <span className="text-[#22D3EE]">.gltf</span> here
+                  </p>
+                  <p className="mt-1 text-[11px] text-white/40">or click to browse · 25 MB max</p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+                    className="hidden"
+                    onChange={(e) => void handleFiles(e.target.files)}
+                  />
                 </div>
 
-                {analyzing && (
-                  <p className="mt-4 flex items-center gap-2 text-[12px] text-white/55">
-                    <Loader2 size={14} className="animate-spin" /> Parsing and measuring…
+                {fileError && (
+                  <p className="mt-3 flex items-center gap-1.5 text-[12px] text-[#FF4D1C]">
+                    <XCircle size={13} className="shrink-0" /> {fileError}
                   </p>
                 )}
-                {draft.analyzeError && (
-                  <p className="mt-4 flex items-start gap-1.5 text-[12px] leading-relaxed text-[#FF4D1C]">
-                    <XCircle size={13} className="mt-0.5 shrink-0" /> {draft.analyzeError}
+                {publishSuccess && !draft && (
+                  <p className="mt-3 flex items-center gap-1.5 text-[12px] text-[#34D399]">
+                    <CheckCircle2 size={13} className="shrink-0" /> {publishSuccess}
                   </p>
                 )}
 
-                {draftStats && draftChecks && (
-                  <>
-                    {/* Stats */}
-                    <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-                      <StatTile label="Size" value={formatBytes(draftStats.sizeBytes)} />
-                      <StatTile label="Triangles" value={formatCount(draftStats.triangles)} />
-                      <StatTile label="Meshes" value={String(draftStats.meshes)} />
-                      <StatTile
-                        label="Textures"
-                        value={`${draftStats.textures} · ${draftStats.textureMP.toFixed(1)} MP`}
-                      />
-                      <StatTile label="Est. VRAM" value={`${draftStats.vramMB.toFixed(0)} MB`} />
-                      <StatTile
-                        label="Bounds"
-                        value={`${draftStats.dims.x.toFixed(1)}×${draftStats.dims.y.toFixed(1)}×${draftStats.dims.z.toFixed(1)}`}
-                      />
-                    </div>
-
-                    {/* Checks */}
-                    <div className="mt-4">
-                      <div className="label-caps mb-2 text-white/35">Health checks</div>
-                      <ChecksDetail
-                        checks={draftChecks}
-                        inputs={inputsFromStats(draftStats)}
-                        budgets={budgets}
-                      />
-                    </div>
-
-                    {/* Optimize */}
-                    <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() => void runOptimize()}
-                          disabled={optimizing || !draft.isBinary || Boolean(draft.optimized)}
-                          className="paint-btn paint-btn-2 tap inline-flex items-center gap-2 px-7 py-2.5 text-[12px] font-bold text-white disabled:opacity-50"
-                          style={{ '--paint': 'linear-gradient(120deg, #A78BFA, #e879f9)' } as React.CSSProperties}
-                        >
-                          {optimizing ? (
-                            <>
-                              <Loader2 size={13} className="animate-spin" /> Optimizing…
-                            </>
-                          ) : (
-                            <>
-                              <Sparkles size={13} /> Optimize
-                            </>
-                          )}
-                        </button>
-                        <p className="min-w-0 flex-1 text-[11px] leading-snug text-white/45">
-                          {(draft.optimizeOk !== false && draft.optimizeNote) ||
-                            'Downscales embedded textures over 1024px to WebP (q0.82) and rewrites the GLB in-browser — validated by a full re-parse before it replaces your file.'}
-                        </p>
-                      </div>
-
-                      {draft.optimizeNote && !draft.optimized && draft.optimizeOk === false && (
-                        <p className="mt-2 flex items-center gap-1.5 text-[11px] text-[#FFB020]">
-                          <AlertTriangle size={12} className="shrink-0" /> {draft.optimizeNote}
-                        </p>
-                      )}
-
-                      {draft.optimized && draft.stats && (
-                        <div className="mt-4">
-                          <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-[#34D399]">
-                            <CheckCircle2 size={12} />
-                            Optimized — {draft.optimized.imagesTouched} texture
-                            {draft.optimized.imagesTouched === 1 ? '' : 's'} re-encoded, re-parse
-                            verified
-                          </p>
-                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                            <DeltaBadge
-                              label="File size"
-                              before={draft.stats.sizeBytes}
-                              after={draft.optimized.stats.sizeBytes}
-                              format={formatBytes}
-                            />
-                            <DeltaBadge
-                              label="Triangles"
-                              before={draft.stats.triangles}
-                              after={draft.optimized.stats.triangles}
-                              format={formatCount}
-                            />
-                            <DeltaBadge
-                              label="Texture MP"
-                              before={draft.stats.textureMP}
-                              after={draft.optimized.stats.textureMP}
-                              format={(n) => `${n.toFixed(1)} MP`}
-                            />
-                            <DeltaBadge
-                              label="Est. VRAM"
-                              before={draft.stats.vramMB}
-                              after={draft.optimized.stats.vramMB}
-                              format={(n) => `${n.toFixed(0)} MB`}
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Publish form */}
-                    <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                      <label className="flex flex-col gap-1.5">
-                        <span className="label-caps text-white/35">Model name</span>
-                        <input
-                          value={modelName}
-                          onChange={(e) => setModelName(e.target.value)}
-                          maxLength={64}
-                          placeholder="My model"
-                          className="w-full rounded-2xl border border-white/15 bg-white/[0.07] px-4 py-3 text-[13px] text-white placeholder:text-white/25 focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
-                        />
-                      </label>
-                      <label className="flex flex-col gap-1.5">
-                        <span className="label-caps flex items-baseline justify-between text-white/35">
-                          <span>Target display size</span>
-                          <span className="font-mono text-[11px] normal-case tracking-normal text-[#22D3EE]">
-                            {targetSize} world units
-                          </span>
+                {/* Draft workbench */}
+                {draft && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 14 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={spring}
+                    className="relative z-10 mt-5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-3.5 py-1.5 font-mono text-[11px] text-white/80">
+                        {draft.fileName}
+                        <span className="text-white/35">{formatBytes(draft.original.byteLength)}</span>
+                      </span>
+                      {!draft.isBinary && (
+                        <span className="rounded-full border border-[#FFB020]/40 bg-[#FFB020]/10 px-2.5 py-1 text-[10px] font-semibold text-[#FFB020]">
+                          JSON .gltf — analysis only, publish needs a binary .glb
                         </span>
-                        <input
-                          type="range"
-                          min={3}
-                          max={12}
-                          step={0.5}
-                          value={targetSize}
-                          onChange={(e) => setTargetSize(Number(e.target.value))}
-                          className="airo-slider w-full"
-                        />
-                        <span className="flex justify-between font-mono text-[9px] text-white/25">
-                          <span>3 · handheld</span>
-                          <span>12 · monumental</span>
-                        </span>
-                      </label>
-                    </div>
-
-                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      )}
                       <button
                         type="button"
-                        onClick={() => void publish()}
-                        disabled={!backendReady || !draft.isBinary || publishing || !modelName.trim()}
-                        className="paint-btn tap inline-flex items-center gap-2 px-9 py-3 text-[13px] font-bold text-white disabled:opacity-50"
-                        style={{ '--paint': 'linear-gradient(120deg, #22D3EE, #34D399)' } as React.CSSProperties}
+                        onClick={clearDraft}
+                        className="tap ml-auto rounded-full border border-white/12 bg-white/[0.05] px-3 py-1.5 text-[10.5px] font-semibold text-white/50 hover:text-white"
                       >
-                        {publishing ? (
-                          <>
-                            <Loader2 size={14} className="animate-spin" /> Publishing…
-                          </>
-                        ) : (
-                          <>
-                            <UploadCloud size={14} /> Publish to library
-                          </>
-                        )}
+                        Clear
                       </button>
-                      {draft.optimized && (
-                        <span className="text-[11px] text-white/45">
-                          Publishing the <span className="font-semibold text-[#A78BFA]">optimized</span>{' '}
-                          build ({formatBytes(draft.optimized.stats.sizeBytes)})
-                        </span>
-                      )}
-                      {!backendReady && (
-                        <span className="text-[11px] text-[#FFB020]">
-                          Publishing disabled — Supabase env vars are missing.
-                        </span>
-                      )}
                     </div>
-                    {publishError && (
-                      <p className="mt-3 flex items-start gap-1.5 text-[12px] leading-relaxed text-[#FF4D1C]">
-                        <XCircle size={13} className="mt-0.5 shrink-0" /> {publishError}
+
+                    {analyzing && (
+                      <p className="mt-4 flex items-center gap-2 text-[12px] text-white/55">
+                        <Loader2 size={14} className="animate-spin" /> Parsing and measuring…
                       </p>
                     )}
-                  </>
+                    {draft.analyzeError && (
+                      <p className="mt-4 flex items-start gap-1.5 text-[12px] leading-relaxed text-[#FF4D1C]">
+                        <XCircle size={13} className="mt-0.5 shrink-0" /> {draft.analyzeError}
+                      </p>
+                    )}
+
+                    {draftStats && draftChecks && (
+                      <>
+                        {/* Stats */}
+                        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                          <StatTile label="Size" value={formatBytes(draftStats.sizeBytes)} />
+                          <StatTile label="Triangles" value={formatCount(draftStats.triangles)} />
+                          <StatTile label="Meshes" value={String(draftStats.meshes)} />
+                          <StatTile
+                            label="Textures"
+                            value={`${draftStats.textures} · ${draftStats.textureMP.toFixed(1)} MP`}
+                          />
+                          <StatTile label="Est. VRAM" value={`${draftStats.vramMB.toFixed(0)} MB`} />
+                          <StatTile
+                            label="Bounds"
+                            value={`${draftStats.dims.x.toFixed(1)}×${draftStats.dims.y.toFixed(1)}×${draftStats.dims.z.toFixed(1)}`}
+                          />
+                        </div>
+
+                        {/* Checks */}
+                        <div className="mt-4">
+                          <div className="label-caps mb-2 text-white/35">Health checks</div>
+                          <ChecksDetail
+                            checks={draftChecks}
+                            inputs={inputsFromStats(draftStats)}
+                            budgets={budgets}
+                          />
+                        </div>
+
+                        {/* Optimize */}
+                        <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => void runOptimize()}
+                              disabled={optimizing || !draft.isBinary || Boolean(draft.optimized)}
+                              className="paint-btn paint-btn-2 tap inline-flex items-center gap-2 px-7 py-2.5 text-[12px] font-bold text-white disabled:opacity-50"
+                              style={{ '--paint': 'linear-gradient(120deg, #A78BFA, #e879f9)' } as React.CSSProperties}
+                            >
+                              {optimizing ? (
+                                <>
+                                  <Loader2 size={13} className="animate-spin" /> Optimizing…
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles size={13} /> Optimize
+                                </>
+                              )}
+                            </button>
+                            <p className="min-w-0 flex-1 text-[11px] leading-snug text-white/45">
+                              {(draft.optimizeOk !== false && draft.optimizeNote) ||
+                                'Downscales embedded textures over 1024px to WebP (q0.82) and rewrites the GLB in-browser — validated by a full re-parse before it replaces your file.'}
+                            </p>
+                          </div>
+
+                          {draft.optimizeNote && !draft.optimized && draft.optimizeOk === false && (
+                            <p className="mt-2 flex items-center gap-1.5 text-[11px] text-[#FFB020]">
+                              <AlertTriangle size={12} className="shrink-0" /> {draft.optimizeNote}
+                            </p>
+                          )}
+
+                          {draft.optimized && draft.stats && (
+                            <div className="mt-4">
+                              <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-[#34D399]">
+                                <CheckCircle2 size={12} />
+                                Optimized — {draft.optimized.imagesTouched} texture
+                                {draft.optimized.imagesTouched === 1 ? '' : 's'} re-encoded, re-parse
+                                verified
+                              </p>
+                              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                <DeltaBadge
+                                  label="File size"
+                                  before={draft.stats.sizeBytes}
+                                  after={draft.optimized.stats.sizeBytes}
+                                  format={formatBytes}
+                                />
+                                <DeltaBadge
+                                  label="Triangles"
+                                  before={draft.stats.triangles}
+                                  after={draft.optimized.stats.triangles}
+                                  format={formatCount}
+                                />
+                                <DeltaBadge
+                                  label="Texture MP"
+                                  before={draft.stats.textureMP}
+                                  after={draft.optimized.stats.textureMP}
+                                  format={(n) => `${n.toFixed(1)} MP`}
+                                />
+                                <DeltaBadge
+                                  label="Est. VRAM"
+                                  before={draft.stats.vramMB}
+                                  after={draft.optimized.stats.vramMB}
+                                  format={(n) => `${n.toFixed(0)} MB`}
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Publish form */}
+                        <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                          <label className="flex flex-col gap-1.5">
+                            <span className="label-caps text-white/35">Model name</span>
+                            <input
+                              value={modelName}
+                              onChange={(e) => setModelName(e.target.value)}
+                              maxLength={64}
+                              placeholder="My model"
+                              className="w-full rounded-2xl border border-white/15 bg-white/[0.07] px-4 py-3 text-[13px] text-white placeholder:text-white/25 focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1.5">
+                            <span className="label-caps flex items-baseline justify-between text-white/35">
+                              <span>Target display size</span>
+                              <span className="font-mono text-[11px] normal-case tracking-normal text-[#22D3EE]">
+                                {targetSize} world units
+                              </span>
+                            </span>
+                            <input
+                              type="range"
+                              min={3}
+                              max={12}
+                              step={0.5}
+                              value={targetSize}
+                              onChange={(e) => setTargetSize(Number(e.target.value))}
+                              className="airo-slider w-full"
+                            />
+                            <span className="flex justify-between font-mono text-[9px] text-white/25">
+                              <span>3 · handheld</span>
+                              <span>12 · monumental</span>
+                            </span>
+                          </label>
+                        </div>
+
+                        <div className="mt-5 flex flex-wrap items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => void publish()}
+                            disabled={!backendReady || !draft.isBinary || publishing || !modelName.trim()}
+                            className="paint-btn tap inline-flex items-center gap-2 px-9 py-3 text-[13px] font-bold text-white disabled:opacity-50"
+                            style={{ '--paint': 'linear-gradient(120deg, #22D3EE, #34D399)' } as React.CSSProperties}
+                          >
+                            {publishing ? (
+                              <>
+                                <Loader2 size={14} className="animate-spin" /> Publishing…
+                              </>
+                            ) : (
+                              <>
+                                <UploadCloud size={14} /> Publish to library
+                              </>
+                            )}
+                          </button>
+                          {draft.optimized && (
+                            <span className="text-[11px] text-white/45">
+                              Publishing the <span className="font-semibold text-[#A78BFA]">optimized</span>{' '}
+                              build ({formatBytes(draft.optimized.stats.sizeBytes)})
+                            </span>
+                          )}
+                          {!backendReady && (
+                            <span className="text-[11px] text-[#FFB020]">
+                              Publishing disabled — Supabase env vars are missing.
+                            </span>
+                          )}
+                        </div>
+                        {publishError && (
+                          <p className="mt-3 flex items-start gap-1.5 text-[12px] leading-relaxed text-[#FF4D1C]">
+                            <XCircle size={13} className="mt-0.5 shrink-0" /> {publishError}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </motion.div>
                 )}
-              </motion.div>
-            )}
-          </GlassPanel>
-        </section>
-
-        {/* ============ SETTINGS ============ */}
-        <section className="mt-14">
-          <SectionHeader
-            icon={<Settings2 size={15} />}
-            accent="#A78BFA"
-            title="Settings"
-            sub="Check budgets apply everywhere immediately and persist on this device."
-          />
-
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <GlassPanel className="p-5">
-              <div className="mb-4 flex items-center justify-between gap-3">
-                <h3 className="text-[13px] font-bold text-white/85">Check budgets</h3>
-                <button
-                  type="button"
-                  onClick={resetBudgets}
-                  className="tap rounded-full border border-white/12 bg-white/[0.05] px-3 py-1.5 text-[10.5px] font-semibold text-white/55 hover:text-white"
-                >
-                  Reset defaults
-                </button>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                {BUDGET_FIELDS.map((field) => (
-                  <BudgetField
-                    key={field.key}
-                    label={field.label}
-                    step={field.step}
-                    value={budgets[field.key]}
-                    onCommit={(n) => updateBudget(field.key, n)}
-                  />
-                ))}
-              </div>
-              <p className="mt-3 text-[10.5px] leading-relaxed text-white/35">
-                Stored in localStorage (<code className="font-mono">airo:admin:budgets</code>). Values
-                at or under “pass” are green; under “warn”, amber; anything above fails.
-              </p>
-            </GlassPanel>
-
-            <GlassPanel className="border-[#FF4D1C]/25 p-5">
-              <h3 className="flex items-center gap-2 text-[13px] font-bold text-[#FF4D1C]">
-                <AlertTriangle size={14} /> Danger zone
-              </h3>
-              <p className="mt-2 text-[11.5px] leading-relaxed text-white/50">
-                Removes every custom model — storage objects and registry rows. Built-in models are
-                never touched. Two confirmations required.
-              </p>
-              <button
-                type="button"
-                onClick={() => void purgeAll()}
-                disabled={!backendReady || purging || (customRows ?? []).length === 0}
-                className={`tap mt-4 inline-flex items-center gap-2 rounded-full border px-5 py-2.5 text-[12px] font-bold transition-colors disabled:opacity-40 ${
-                  dangerArmed
-                    ? 'border-[#FF4D1C] bg-[#FF4D1C]/30 text-white'
-                    : 'border-[#FF4D1C]/45 bg-[#FF4D1C]/10 text-[#FF4D1C]'
-                }`}
-              >
-                {purging ? (
-                  <>
-                    <Loader2 size={13} className="animate-spin" /> Deleting…
-                  </>
-                ) : dangerArmed ? (
-                  <>
-                    <AlertTriangle size={13} /> Click again to confirm
-                  </>
-                ) : (
-                  <>
-                    <Trash2 size={13} /> Delete ALL custom models
-                  </>
-                )}
-              </button>
-              {dangerMsg && <p className="mt-3 text-[11.5px] text-white/55">{dangerMsg}</p>}
-            </GlassPanel>
+              </GlassPanel>
+            </section>
           </div>
-        </section>
+        )}
+
+        {tab === 'settings' && (
+          <div data-testid="admin-model-budgets">
+            {/* ============ MODEL CHECKS ============ */}
+            <section className="mt-14">
+              <SectionHeader
+                icon={<Settings2 size={15} />}
+                accent="#A78BFA"
+                title="Model checks"
+                sub="Check budgets apply everywhere immediately and persist on this device."
+              />
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <GlassPanel className="p-5">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h3 className="text-[13px] font-bold text-white/85">Check budgets</h3>
+                    <button
+                      type="button"
+                      onClick={resetBudgets}
+                      className="tap rounded-full border border-white/12 bg-white/[0.05] px-3 py-1.5 text-[10.5px] font-semibold text-white/55 hover:text-white"
+                    >
+                      Reset defaults
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    {BUDGET_FIELDS.map((field) => (
+                      <BudgetField
+                        key={field.key}
+                        label={field.label}
+                        step={field.step}
+                        value={budgets[field.key]}
+                        onCommit={(n) => updateBudget(field.key, n)}
+                      />
+                    ))}
+                  </div>
+                  <p className="mt-3 text-[10.5px] leading-relaxed text-white/35">
+                    Stored in localStorage (<code className="font-mono">airo:admin:budgets</code>). Values
+                    at or under “pass” are green; under “warn”, amber; anything above fails.
+                  </p>
+                </GlassPanel>
+
+                <GlassPanel className="border-[#FF4D1C]/25 p-5">
+                  <h3 className="flex items-center gap-2 text-[13px] font-bold text-[#FF4D1C]">
+                    <AlertTriangle size={14} /> Danger zone
+                  </h3>
+                  <p className="mt-2 text-[11.5px] leading-relaxed text-white/50">
+                    Removes every custom model — storage objects and registry rows. Built-in models are
+                    never touched. Two confirmations required.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void purgeAll()}
+                    disabled={!backendReady || purging || (customRows ?? []).length === 0}
+                    className={`tap mt-4 inline-flex items-center gap-2 rounded-full border px-5 py-2.5 text-[12px] font-bold transition-colors disabled:opacity-40 ${
+                      dangerArmed
+                        ? 'border-[#FF4D1C] bg-[#FF4D1C]/30 text-white'
+                        : 'border-[#FF4D1C]/45 bg-[#FF4D1C]/10 text-[#FF4D1C]'
+                    }`}
+                  >
+                    {purging ? (
+                      <>
+                        <Loader2 size={13} className="animate-spin" /> Deleting…
+                      </>
+                    ) : dangerArmed ? (
+                      <>
+                        <AlertTriangle size={13} /> Click again to confirm
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 size={13} /> Delete ALL custom models
+                      </>
+                    )}
+                  </button>
+                  {dangerMsg && <p className="mt-3 text-[11.5px] text-white/55">{dangerMsg}</p>}
+                </GlassPanel>
+              </div>
+            </section>
+          </div>
+        )}
 
         <footer className="safe-bottom mt-16 flex items-center justify-center gap-2 text-[10px] text-white/30">
           <SprayCan size={11} />
-          AiroHub model portal · checks graded against local budgets
+          AiroHub admin · signed-in session, 12 h
         </footer>
       </div>
     </div>
+  );
+}
+
+/**
+ * The route itself: the dashboard, behind the password gate.
+ *
+ * Wrapping here rather than in `App.tsx` keeps every route in that file the
+ * same shape, and costs nothing that matters — the chunk is a shell, and the
+ * API refuses to fill it without the session cookie.
+ */
+export default function AdminView() {
+  return (
+    <AdminGate>
+      <AdminViewInner />
+    </AdminGate>
   );
 }

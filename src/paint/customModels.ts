@@ -10,13 +10,13 @@
  *
  * **What changed, and the bug it prevents.** Until this gate existed, a model
  * appeared in the picker of every live session the moment it was published —
- * geometry nobody had ever seen rendered, on a public admin page with no auth,
- * in a room full of people. That is the failure the review gallery exists to
- * stop, and this is where it is enforced: a row here is registered only if
- * `airohub_model_reviews` carries `status = 'approved'` for its catalog id.
- * Absence of a review row means pending, so publishing writes nothing to the
- * verdict table — there is exactly one source of truth and no second failure
- * path at publish time.
+ * geometry nobody had ever seen rendered, on an admin page behind a shared
+ * password, in a room full of people. That is the failure the review gallery
+ * exists to stop, and this is where it is enforced: a row here is registered
+ * only if `airohub_model_reviews` carries `status = 'approved'` for its
+ * catalog id. Absence of a review row means pending, so publishing writes
+ * nothing to the verdict table — there is exactly one source of truth and no
+ * second failure path at publish time.
  *
  * **The gate fails closed.** If the reviews query fails while the registry
  * query succeeds, this registers ZERO uploads and warns once. Failing open

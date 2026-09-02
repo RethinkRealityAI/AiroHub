@@ -6,6 +6,10 @@
  * errors and failed requests are reported so a visually-fine-but-broken page
  * still fails loudly, same as shoot-ui.mjs.
  *
+ * The page is behind the admin password now, so the session probe is stubbed
+ * "signed in" before the first navigation — otherwise every shot here would be
+ * a photograph of the login card.
+ *
  *   BASE=http://127.0.0.1:4173 node scripts/preview/shoot-review.mjs
  */
 import { chromium } from 'playwright';
@@ -74,6 +78,35 @@ async function open(spec, label) {
     if (/fonts\.(googleapis|gstatic)\.com/.test(url)) return;
     problems.push(`[${label}] request failed: ${url.slice(0, 140)}`);
   });
+
+  // The admin gate. OPTIONS is answered first everywhere: a preflight handed a
+  // JSON body counts as a failed request, which this harness reports.
+  const answer = (route, body, status = 200) =>
+    route.request().method() === 'OPTIONS'
+      ? route.fulfill({ status: 204 })
+      : route.fulfill({
+          status,
+          headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+          body: JSON.stringify(body),
+        });
+  await page.route('**/api/admin/auth/session', (route) =>
+    answer(route, { authenticated: true, expiresAt: Date.now() + 3600000 })
+  );
+  await page.route('**/api/admin/auth/logout', (route) => answer(route, { ok: true }));
+  await page.route('**/api/flags', (route) =>
+    answer(route, {
+      ui: {
+        aiPanel: false,
+        padMode: false,
+        stamps: true,
+        showcase: true,
+        uploads: true,
+        feedbackButton: true,
+      },
+      notice: '',
+    })
+  );
+
   return { context, page };
 }
 
