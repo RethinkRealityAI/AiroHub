@@ -62,18 +62,29 @@ const UTC_ISO = 'YYYY-MM-DD"T"HH24:MI:SS"Z"';
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/**
+ * A query number, or `null` when the parameter is absent or not a number.
+ * `Number(null)` is 0, so reading the parameter straight into `Number` would
+ * turn "no limit given" into the smallest allowed limit.
+ */
+function readNumber(url: URL, name: string): number | null {
+  const param = url.searchParams.get(name);
+  if (param === null || param.trim() === '') return null;
+  const raw = Number(param);
+  return Number.isFinite(raw) ? Math.trunc(raw) : null;
+}
+
 function readDays(url: URL, allowed: readonly number[] | null, fallback: number): number {
-  const raw = Number(url.searchParams.get('days'));
-  if (!Number.isFinite(raw)) return fallback;
-  const days = Math.trunc(raw);
+  const days = readNumber(url, 'days');
+  if (days === null) return fallback;
   if (allowed) return allowed.includes(days) ? days : fallback;
   return Math.min(MAX_DAYS, Math.max(1, days));
 }
 
 function readLimit(url: URL): number {
-  const raw = Number(url.searchParams.get('limit'));
-  if (!Number.isFinite(raw)) return DEFAULT_LIST_LIMIT;
-  return Math.min(LIST_LIMIT_MAX, Math.max(1, Math.trunc(raw)));
+  const limit = readNumber(url, 'limit');
+  if (limit === null) return DEFAULT_LIST_LIMIT;
+  return Math.min(LIST_LIMIT_MAX, Math.max(1, limit));
 }
 
 /** `YYYY-MM-DD` for each of the last `days` UTC days, oldest first. */
@@ -310,11 +321,17 @@ async function listFeedback(status: string, limit: number) {
 /* ---------------------------------------------------------------- settings */
 
 async function readSettings(): Promise<SettingRow[]> {
-  return safeQuery<SettingRow[]>(
-    async () => await getDb().sql<SettingRow>`select key, value from settings`,
-    [],
-    'settings.read'
-  );
+  return safeQuery<SettingRow[]>(readSettingsStrict, [], 'settings.read');
+}
+
+/**
+ * The same read without the soft landing. A write merges the patch onto what
+ * is stored, so a read that quietly answered "nothing is stored" would make
+ * that write persist the defaults over every setting the patch did not name.
+ * Here a failed read has to fail the request.
+ */
+async function readSettingsStrict(): Promise<SettingRow[]> {
+  return await getDb().sql<SettingRow>`select key, value from settings`;
 }
 
 /* ------------------------------------------------------------------- entry */
@@ -443,7 +460,7 @@ export default async (request: Request, context: Context): Promise<Response> => 
         // back the MERGED value. Writing the raw patch would let a partial `ui`
         // object erase the flags it did not mention, and would store whatever
         // types the caller sent.
-        const current = await readSettings();
+        const current = await readSettingsStrict();
         const merged: Flags = mergeFlags([
           ...current,
           ...supplied.map((key) => ({ key, value: patch[key] })),

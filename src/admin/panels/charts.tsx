@@ -477,7 +477,8 @@ export function Meter({
   max: number;
   caption?: string;
 }) {
-  const ratio = max > 0 ? Math.min(1, value / max) : 0;
+  // A cap of zero is "nothing allowed": any use at all fills the bar.
+  const ratio = max > 0 ? Math.min(1, value / max) : value > 0 ? 1 : 0;
   const [fill, track] =
     ratio >= 0.9
       ? [VIZ.emphasis, '#960000']
@@ -489,7 +490,7 @@ export function Meter({
       <div className="flex items-baseline justify-between gap-3">
         <span className="font-mono text-[15px] font-bold text-white/90">
           {formatCompact(value)}
-          <span className="text-white/35"> / {max > 0 ? formatCompact(max) : '∞'}</span>
+          <span className="text-white/35"> / {formatCompact(max)}</span>
         </span>
         <span className="font-mono text-[11px] tabular-nums text-white/45">
           {Math.round(ratio * 100)}%

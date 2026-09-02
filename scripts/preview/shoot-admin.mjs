@@ -92,10 +92,13 @@ const FEEDBACK = [
 
 const ERRORS = OVERVIEW.recent.filter((row) => row.name === 'client.error');
 
+// The server's real shape: the flags ride inside an envelope.
 const SETTINGS = {
-  ui: { aiPanel: false, padMode: false, stamps: true, showcase: true, uploads: true, feedbackButton: true },
-  notice: '',
-  ai: { dailyCap: 500 },
+  flags: {
+    ui: { aiPanel: false, padMode: false, stamps: true, showcase: true, uploads: true, feedbackButton: true },
+    notice: '',
+    ai: { dailyCap: 500 },
+  },
 };
 
 const PUBLIC_FLAGS = { ui: SETTINGS.ui, notice: '' };
@@ -168,9 +171,13 @@ async function open(label, viewport, mobile, { signedIn = true } = {}) {
   page.on('requestfailed', (req) => {
     const url = req.url();
     if (url.includes('favicon')) return;
+    // Chromium reports every HEAD fetch as aborted once the (bodiless)
+    // response lands, even though the promise resolves with the headers. The
+    // Models tab sizes each built-in file with exactly such a probe.
+    if (req.method() === 'HEAD' && req.failure()?.errorText === 'net::ERR_ABORTED') return;
     if (url.includes('supabase.co')) return;
     if (/fonts\.(googleapis|gstatic)\.com/.test(url)) return;
-    problems.push(`[${label}] request failed: ${url.slice(0, 140)}`);
+    problems.push(`[${label}] request failed: ${url.slice(0, 140)} (${req.failure()?.errorText ?? 'unknown'})`);
   });
 
   await stubAdminApi(page, signedIn);
@@ -199,6 +206,9 @@ for (const [suffix, viewport, mobile] of [
 
   for (const tab of ['Feedback', 'Models', 'Settings']) {
     await page.getByRole('tab', { name: tab }).click();
+    // The Models tab sizes every built-in file with a HEAD probe on mount;
+    // let those land before the next tab unmounts the section.
+    if (tab === 'Models') await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
     await page.waitForTimeout(tab === 'Models' ? 3000 : 1000);
     await shot(page, `admin-${tab.toLowerCase()}-${suffix}`);
   }

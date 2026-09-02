@@ -67,7 +67,8 @@ export const FeedbackSheet: React.FC<{
   }, [open]);
 
   const trimmed = message.trim();
-  const canSend = trimmed.length >= FEEDBACK_MIN && phase !== 'sending';
+  // Code points, to agree with the server's floor (an emoji is one, not two).
+  const canSend = [...trimmed].length >= FEEDBACK_MIN && phase !== 'sending';
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();

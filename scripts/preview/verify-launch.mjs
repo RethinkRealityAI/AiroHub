@@ -211,10 +211,13 @@ const FEEDBACK_ROWS = [
   },
 ];
 
+// The server's real shape: the flags ride inside an envelope.
 const SETTINGS = {
-  ui: { ...FLAGS_OFF.ui },
-  notice: '',
-  ai: { dailyCap: 500 },
+  flags: {
+    ui: { ...FLAGS_OFF.ui },
+    notice: '',
+    ai: { dailyCap: 500 },
+  },
 };
 
 /* ------------------------------------------------------------------
@@ -500,7 +503,8 @@ await step('admin gate', async () => {
 
   await page.goto(`${BASE}/admin`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-testid="admin-login"]', { timeout: 30000 });
-  check('admin: signed out shows the login card', true, '');
+  const loginCards = await page.locator('[data-testid="admin-login"]').count();
+  check('admin: signed out shows the login card', loginCards === 1, `cards=${loginCards}`);
   await page.screenshot({ path: `${SHOTS}/launch-admin-login.png` });
 
   const dashboardBefore = await page.locator('[data-testid="admin-overview"]').count();

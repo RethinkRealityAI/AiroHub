@@ -83,7 +83,9 @@ export function BudgetField({
         onChange={(e) => {
           setText(e.target.value);
           const n = Number(e.target.value);
-          if (Number.isFinite(n) && n > 0) onCommit(n);
+          // Zero is a real setting ("spend nothing today"); only blanks and
+          // negatives stay uncommitted.
+          if (Number.isFinite(n) && n >= 0) onCommit(n);
         }}
         className="w-full rounded-xl border border-white/12 bg-white/[0.06] px-3 py-2 font-mono text-[12px] text-white focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
       />

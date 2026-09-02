@@ -79,7 +79,10 @@ unreviewed geometry into live rooms. Full contract and behaviour notes in
 
 `/admin` and `/admin/review` sit behind a shared password, and the gate is the API
 endpoints rather than the route — reaching the URL only gets you a login card, because
-every request for data is refused without a valid admin session cookie.
+every request for analytics, feedback or settings is refused without a valid admin
+session cookie. The one exception, for now, is the model library and the review
+verdicts on those pages: they still talk to Supabase with the public anon key. Moving
+them behind the same cookie is the planned follow-up.
 
 ---
 

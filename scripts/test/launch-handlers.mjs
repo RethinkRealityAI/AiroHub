@@ -52,7 +52,7 @@ export const dbStub = {
   queries: [],
   /** When true, every query rejects — a sleeping or unreachable database. */
   fail: false,
-  /** [{ match: RegExp, rows: [] }], first match wins. */
+  /** [{ match: RegExp, rows: [] | Error }], first match wins; an Error rejects. */
   handlers: [],
   reset() {
     this.queries.length = 0;
@@ -83,7 +83,9 @@ const sql = (strings, ...params) => {
   const text = tagged(strings, params);
   dbStub.queries.push({ text, params });
   if (dbStub.fail) return Promise.reject(new Error('stub: database unavailable'));
-  return Promise.resolve(dbStub.rowsFor(text));
+  const rows = dbStub.rowsFor(text);
+  if (rows instanceof Error) return Promise.reject(rows);
+  return Promise.resolve(rows);
 };
 sql.unsafe = () => Promise.resolve([]);
 sql.raw = (value) => value;
@@ -533,6 +535,39 @@ let sessionCookie = null;
   );
   check('C a patch with no known keys is 400', rejected.status === 400, `status=${rejected.status}`);
 
+  // A settings read that fails must fail the WRITE, not merge the patch onto
+  // "nothing stored" and persist the defaults over every unnamed setting.
+  dbStub.reset();
+  dbStub.answer(/select key, value from settings/, new Error('stub: read failed'));
+  const blind = await adminData(
+    post('/api/admin/data/settings', { flags: { ui: { aiPanel: true } } }),
+    makeContext({ params: { view: 'settings' }, cookies: { airo_admin: sessionCookie } })
+  );
+  check(
+    'C a settings write whose read failed is a 503 with nothing written',
+    blind.status === 503 && dbStub.matching(/insert into settings/).length === 0,
+    `status=${blind.status} upserts=${dbStub.matching(/insert into settings/).length}`
+  );
+
+  // The list limit: absent means the default page, not the smallest page.
+  const feedbackCtx = () =>
+    makeContext({ params: { view: 'feedback' }, cookies: { airo_admin: sessionCookie } });
+  const limitOf = () => dbStub.matching(/from feedback where/).at(-1)?.params.at(-1);
+  dbStub.reset();
+  await adminData(get('/api/admin/data/feedback'), feedbackCtx());
+  const absent = limitOf();
+  await adminData(get('/api/admin/data/feedback?limit=abc'), feedbackCtx());
+  const junk = limitOf();
+  await adminData(get('/api/admin/data/feedback?limit=5'), feedbackCtx());
+  const five = limitOf();
+  await adminData(get('/api/admin/data/feedback?limit=9999'), feedbackCtx());
+  const capped = limitOf();
+  check(
+    'C the feedback list limit defaults to a full page and clamps at the cap',
+    absent === 50 && junk === 50 && five === 5 && capped === 200,
+    `absent=${absent} junk=${junk} five=${five} capped=${capped}`
+  );
+
   const unknownView = await adminData(
     get('/api/admin/data/nope'),
     makeContext({ params: { view: 'nope' }, cookies: { airo_admin: sessionCookie } })
@@ -831,6 +866,23 @@ let sessionCookie = null;
     'G an unreadable counter fails closed, not open',
     closed.status === 200 && closedBody.degraded === 'disabled',
     `degraded=${closedBody.degraded} — with no readable flags the default already hides the panel`
+  );
+
+  // The case above is settled by the flag gate before the counter is ever
+  // consulted. This one is the branch the promise is really about: the panel
+  // is ON, the flags read fine, and only the counter is unreadable.
+  dbStub.reset();
+  dbStub.answer(/from settings/, [{ key: 'ui', value: { aiPanel: true } }]);
+  dbStub.answer(/insert into ai_usage/, new Error('stub: counter unavailable'));
+  const closedOn = await ai(
+    post('/api/ai/graffiti-tag', { prompt: 'x' }),
+    makeContext({ params: { route: 'graffiti-tag' } })
+  );
+  const closedOnBody = await closedOn.json();
+  check(
+    'G with the panel on, an unreadable counter still fails closed',
+    closedOn.status === 200 && closedOnBody.degraded === 'cap' && genaiStub.calls === 0,
+    `degraded=${closedOnBody.degraded} gemini calls=${genaiStub.calls}`
   );
 
   // Input bounds.

@@ -19,7 +19,7 @@ import { Activity, Globe, Loader2, MonitorSmartphone, RefreshCw, Route, Share2 }
 import { GlassPanel, Segmented, type SegmentOption } from '../../ui/Glass';
 import type { Flags, OverviewResponse, Ranked } from '../../api/contracts';
 import { DEFAULT_FLAGS } from '../../api/contracts';
-import { adminGet, isDatabaseAsleep } from '../api';
+import { adminGet, flagsOf, isDatabaseAsleep } from '../api';
 import { SectionHeader } from './primitives';
 import {
   BarList,
@@ -85,7 +85,7 @@ export default function OverviewPanel() {
       // rather than blanking the tile.
       const [overview, settings] = await Promise.all([
         adminGet<OverviewResponse>('overview', { days }),
-        adminGet<Partial<Flags>>('settings').catch(() => null),
+        adminGet('settings').then(flagsOf<Partial<Flags>>).catch(() => null),
       ]);
       setData(overview);
       const dailyCap = settings?.ai?.dailyCap;

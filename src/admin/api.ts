@@ -219,6 +219,18 @@ export async function adminPost<T>(view: AdminView, body: unknown): Promise<T> {
 }
 
 /**
+ * The settings endpoint answers `{ flags: {...} }`; older fixtures and a
+ * hand-written stub may hand back the bare object. Either way, the caller
+ * gets the flags or `null`, never the envelope.
+ */
+export function flagsOf<T extends object>(payload: unknown): T | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const wrapped = (payload as Record<string, unknown>).flags;
+  if (wrapped && typeof wrapped === 'object') return wrapped as T;
+  return payload as T;
+}
+
+/**
  * Pulls a row array out of whatever envelope the endpoint used.
  *
  * The list endpoints are written by another pair of hands in the same release;

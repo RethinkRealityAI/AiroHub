@@ -40,7 +40,7 @@ import {
   type OverviewResponse,
   type UiFlags,
 } from '../../api/contracts';
-import { adminGet, adminPost, isDatabaseAsleep, rowsOf } from '../api';
+import { adminGet, adminPost, flagsOf, isDatabaseAsleep, rowsOf } from '../api';
 import { BudgetField, SectionHeader } from './primitives';
 import { Meter, formatCompact, relativeTime } from './charts';
 
@@ -148,7 +148,7 @@ export default function FlagsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const merged = mergeFlags(await adminGet<Partial<Flags>>('settings'));
+      const merged = mergeFlags(flagsOf<Partial<Flags>>(await adminGet('settings')));
       setFlags(merged);
       setSaved(merged);
       announceCap(merged.ai.dailyCap);

@@ -46,8 +46,28 @@ const KIND_STYLE: Record<FeedbackKind, { label: string; color: string; icon: Rea
   bug: { label: 'Bug', color: '#FF4D1C', icon: <Bug size={11} /> },
 };
 
+/** The `counts` the list endpoint sends alongside its page, or null. */
+function countsOf(payload: unknown): Record<FeedbackStatus, number> | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const counts = (payload as { counts?: unknown }).counts;
+  if (!counts || typeof counts !== 'object') return null;
+  const read = (key: FeedbackStatus) => {
+    const value = (counts as Record<string, unknown>)[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+  const tally = { new: read('new'), read: read('read'), resolved: read('resolved') };
+  if (tally.new === null || tally.read === null || tally.resolved === null) return null;
+  return tally as Record<FeedbackStatus, number>;
+}
+
 export default function FeedbackPanel() {
   const [rows, setRows] = useState<FeedbackRow[] | null>(null);
+  /**
+   * Per-status totals as the server counted them. The list is one page, so
+   * counting the rows in hand would understate the inbox the moment it grows
+   * past a page — the filter track has to say how many there really are.
+   */
+  const [serverCounts, setServerCounts] = useState<Record<FeedbackStatus, number> | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ message: string; asleep: boolean } | null>(null);
@@ -60,7 +80,9 @@ export default function FeedbackPanel() {
     setLoading(true);
     setError(null);
     try {
-      setRows(rowsOf<FeedbackRow>(await adminGet('feedback')));
+      const payload = await adminGet<unknown>('feedback', { limit: 200 });
+      setRows(rowsOf<FeedbackRow>(payload));
+      setServerCounts(countsOf(payload));
     } catch (err) {
       setError({
         message: err instanceof Error ? err.message : 'Could not load the feedback.',
@@ -76,6 +98,12 @@ export default function FeedbackPanel() {
   }, [load]);
 
   const counts = useMemo(() => {
+    if (serverCounts) {
+      return {
+        all: serverCounts.new + serverCounts.read + serverCounts.resolved,
+        ...serverCounts,
+      };
+    }
     const all = rows ?? [];
     return {
       all: all.length,
@@ -83,7 +111,7 @@ export default function FeedbackPanel() {
       read: all.filter((row) => row.status === 'read').length,
       resolved: all.filter((row) => row.status === 'resolved').length,
     };
-  }, [rows]);
+  }, [rows, serverCounts]);
 
   const visible = useMemo(
     () => (rows ?? []).filter((row) => filter === 'all' || row.status === filter),
@@ -105,6 +133,20 @@ export default function FeedbackPanel() {
           ...(change.status ? { status: change.status } : {}),
           ...(change.admin_note !== undefined ? { adminNote: change.admin_note } : {}),
         });
+        // Keep the server's totals honest without another round trip: one
+        // message moved from one bucket to another.
+        const moved = change.status && change.status !== before.status ? change.status : null;
+        if (moved) {
+          setServerCounts((current) =>
+            current
+              ? {
+                  ...current,
+                  [before.status]: Math.max(0, current[before.status] - 1),
+                  [moved]: current[moved] + 1,
+                }
+              : current
+          );
+        }
         if (change.admin_note !== undefined) {
           setSavedNoteId(row.id);
           setTimeout(() => setSavedNoteId((id) => (id === row.id ? null : id)), 1800);

@@ -218,7 +218,10 @@ export function validateFeedback(body: unknown): FeedbackValidation {
   }
 
   const message = typeof body.message === 'string' ? body.message.trim() : '';
-  if (message.length < FEEDBACK_MIN) {
+  // The column's check counts characters; `.length` counts UTF-16 units, so
+  // two emoji would pass here and fail there. Count code points for the floor.
+  // The ceiling is safe as is: units >= characters, so it only ever errs strict.
+  if ([...message].length < FEEDBACK_MIN) {
     return { error: `message must be at least ${FEEDBACK_MIN} characters.` };
   }
   if (message.length > FEEDBACK_MAX) {
