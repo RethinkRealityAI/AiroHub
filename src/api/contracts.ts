@@ -77,6 +77,7 @@ export type EventName =
   | 'controller.mode'
   | 'paint.first'
   | 'object.change'
+  | 'atmosphere.change'
   | 'stamp.place'
   | 'invite.open'
   | 'invite.copy'
@@ -99,6 +100,7 @@ export const EVENT_NAMES: readonly EventName[] = [
   'controller.mode',
   'paint.first',
   'object.change',
+  'atmosphere.change',
   'stamp.place',
   'invite.open',
   'invite.copy',
