@@ -25,7 +25,9 @@ export const FeedbackButton: React.FC<{
   variant?: 'floating' | 'inline';
   roomId?: string;
   className?: string;
-}> = ({ variant = 'floating', roomId, className = '' }) => {
+  /** Overrides the placement's default diameter, to match a neighbouring cluster. */
+  size?: number;
+}> = ({ variant = 'floating', roomId, className = '', size }) => {
   const flags = useFlags();
   const [open, setOpen] = useState(false);
 
@@ -38,7 +40,7 @@ export const FeedbackButton: React.FC<{
       <GlassIconButton
         // Inline sits in the phone's 32px header cluster; floating owns its
         // corner and gets the standard touch target.
-        size={floating ? 44 : 32}
+        size={size ?? (floating ? 44 : 32)}
         onClick={() => {
           setOpen(true);
           track('feedback.open', { variant }, roomId);
@@ -47,7 +49,7 @@ export const FeedbackButton: React.FC<{
         title="Send feedback"
         className={`${floating ? 'fixed bottom-6 right-6 z-40' : ''} ${className}`}
       >
-        <MessageSquare size={floating ? 17 : 13} className="text-[var(--color-airo-aqua)]" />
+        <MessageSquare size={(size ?? (floating ? 44 : 32)) >= 38 ? 15 : 13} className="text-[var(--color-airo-aqua)]" />
       </GlassIconButton>
 
       <FeedbackSheet open={open} onClose={() => setOpen(false)} roomId={roomId} />

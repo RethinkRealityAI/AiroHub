@@ -102,12 +102,25 @@ for (const spec of VIEWPORTS) {
     await shot(page, `studio-${spec.name}`);
 
     if (spec.name === 'desktop') {
-      // Object picker — the canvas-switching UI.
+      // Wide displays carry the object library on the right rail rather than
+      // behind a header trigger; the crew tab and the stamp tray are the two
+      // states of that layout a reviewer cannot see in the default shot.
+      await page.getByRole('tab', { name: 'Crew' }).click().catch(() => {});
+      await page.waitForTimeout(700);
+      await shot(page, 'studio-crew');
+      await page.getByRole('tab', { name: 'Objects' }).click().catch(() => {});
+      await page.keyboard.press('s').catch(() => {});
+      await page.waitForTimeout(900);
+      await shot(page, 'studio-stamps');
+      await page.keyboard.press('s').catch(() => {});
+      await page.waitForTimeout(400);
+    }
+    if (spec.name === 'tablet') {
+      // Compact layouts still switch objects through the header trigger.
       await page.locator('header button:has(svg.lucide-chevron-down)').first().click().catch(() => {});
       await page.waitForTimeout(900);
       await shot(page, 'studio-objects');
       await page.keyboard.press('Escape').catch(() => {});
-      await page.locator('body').click({ position: { x: 60, y: 500 } }).catch(() => {});
       await page.waitForTimeout(500);
     }
     await context.close();

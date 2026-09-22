@@ -1,11 +1,22 @@
 /**
  * The studio screen.
  *
- * Full-bleed 3D stage with floating glass control islands over it. The old
- * layout put a solid navigation bar above the canvas and scattered controls
- * into four corners; everything now sits in three deliberate zones — a top
- * command bar, a left view island, and a bottom dock — so the object itself
- * stays the focus.
+ * Full-bleed 3D stage under a chosen atmosphere (a gradient sky or a flat
+ * colour), with the controls on floating glass furniture that never boxes the
+ * object in. Two furniture sets share one component:
+ *
+ *   - Wide displays (`RAILS_QUERY`): collapsible instrument cards either side
+ *     of the stage. Left: the tool in your hand (a live 3D render of the can,
+ *     brush or stencil, size, colours, tool tiles) and the stage (view tiles,
+ *     zoom, orbit). Right: the canvas library and the crew, with the surface
+ *     finish pinned under the list. Save and showcase sit in the header; what
+ *     the pointer does and undo / redo / replay / clear sit in one toolbar
+ *     pill under the model.
+ *   - Everything else: the compact top bar, a left view island and the bottom
+ *     dock, which is what phones and tablets have always had.
+ *
+ * Only the active set is mounted (see `useMediaQuery`), so the stamp tray, the
+ * colour well and every keyboard target exist exactly once.
  */
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useParams } from 'react-router-dom';
@@ -17,8 +28,9 @@ import {
   Volume2, VolumeX, Download, Trash2, Sparkles, Maximize, Minimize, AlertTriangle,
   RefreshCw, Wand2, Palette, Eye, Check, Upload, Users, Layers,
   Copy, ExternalLink, MousePointer, Hand, SprayCan, Brush, Loader2,
-  Wifi, WifiOff, Undo2, Redo2, History, Video, HelpCircle,
-  Stamp as StampIcon, Clapperboard, Megaphone, X,
+  WifiOff, Undo2, Redo2, History, Video, HelpCircle,
+  Stamp as StampIcon, Clapperboard, Megaphone, X, Orbit, RotateCcw, Box,
+  Square, RectangleHorizontal, ArrowDownToLine,
 } from 'lucide-react';
 
 import { PaintSurface, CANVAS_RES } from '../paint/PaintSurface';
@@ -47,8 +59,16 @@ import { Finish } from '../scene/PaintTarget';
 import { ObjectTrigger, ObjectPickerSheet } from '../ui/ObjectPicker';
 import { GlassPanel, GlassPill, GlassIconButton, Segmented, Sheet } from '../ui/Glass';
 import { WelcomeGuide } from './WelcomeGuide';
-import { ColorWell } from '../ui/ColorWell';
-import { OBJECT_BY_ID } from '../paint/objectCatalog';
+import { ColorWell, PALETTE } from '../ui/ColorWell';
+import { StudioBackdrop } from '../ui/studio/StudioBackdrop';
+import { RailCard } from '../ui/studio/RailCard';
+import { ToolPreview } from '../ui/studio/ToolPreview';
+import { OrbitReadout, ZoomSlider } from '../ui/studio/StageControls';
+import { ObjectRows, CrewRows } from '../ui/studio/RailLists';
+import { useMediaQuery, RAILS_QUERY } from '../ui/studio/useMediaQuery';
+import { AtmospherePicker } from '../ui/studio/AtmospherePicker';
+import { Atmosphere, atmosphereVars, loadAtmosphere, saveAtmosphere } from '../ui/studio/atmospheres';
+import { OBJECT_BY_ID, PAINTABLE_OBJECTS } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { prefetchModels } from '../paint/modelRegistry';
 import { AiroConnection, SLOT_COLORS, isRealtimeConfigured } from '../net/realtime';
@@ -349,6 +369,36 @@ const StencilPreview: React.FC<{ asset: StampAsset; tint: string; size?: number 
   </span>
 );
 
+/** The swatches on the spray-can card. The full palette lives in the well. */
+const QUICK_COLORS = ['Flame', 'Ember', 'Lime', 'Aqua', 'Violet', 'Magenta']
+  .map((name) => PALETTE.find((swatch) => swatch.name === name)?.hex)
+  .filter((hex): hex is string => Boolean(hex));
+
+/** Camera presets shared by the rail card and the compact view island. */
+const VIEW_PRESETS = [
+  { label: 'Front', az: 0, pol: Math.PI / 2, icon: Square },
+  { label: '3/4', az: 0.7, pol: Math.PI / 2.25, icon: Box },
+  { label: 'Side', az: Math.PI / 2, pol: Math.PI / 2, icon: RectangleHorizontal },
+  { label: 'Top', az: 0, pol: 0.32, icon: ArrowDownToLine },
+];
+
+type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline';
+
+/** Built-in canvases, for the library card's badge. */
+const OBJECT_COUNT = PAINTABLE_OBJECTS.filter((object) => object.id !== 'custom3d').length;
+
+/** Coloured dot for the status pill: green and pulsing while the room is live. */
+const StatusDot: React.FC<{ connection: ConnectionState }> = ({ connection }) =>
+  connection === 'connected' ? (
+    <span className="studio-pulse h-2 w-2 shrink-0 rounded-full bg-emerald-400" />
+  ) : connection === 'reconnecting' ? (
+    <RefreshCw size={11} className="shrink-0 animate-spin text-amber-400" />
+  ) : connection === 'connecting' ? (
+    <Loader2 size={11} className="shrink-0 animate-spin text-white/70" />
+  ) : (
+    <WifiOff size={11} className="shrink-0 text-fuchsia-300" />
+  );
+
 const HOST_ID = 'host-local';
 
 /**
@@ -460,9 +510,17 @@ export default function CanvasView() {
   const [muted, setMuted] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [autoRotate, setAutoRotate] = useState(false);
-  const [connection, setConnection] = useState<
-    'connecting' | 'connected' | 'reconnecting' | 'offline'
-  >('connecting');
+  const [connection, setConnection] = useState<ConnectionState>('connecting');
+  /** Wide displays get the floating rails; everything else the dock. */
+  const rails = useMediaQuery(RAILS_QUERY);
+  const [railTab, setRailTab] = useState<'objects' | 'crew'>('objects');
+  /** The sky behind the stage, and the accent the furniture takes from it. */
+  const [atmosphere, setAtmosphere] = useState<Atmosphere>(() => loadAtmosphere());
+  const changeAtmosphere = (next: Atmosphere) => {
+    setAtmosphere(next);
+    saveAtmosphere(next);
+    track('atmosphere.change', { atmosphere: next.id }, roomId);
+  };
 
   const [objectSheet, setObjectSheet] = useState(false);
   /** Players whose gestures are allowed to rotate the studio camera. */
@@ -1304,6 +1362,59 @@ export default function CanvasView() {
 
   const remotePlayers = players.filter((p) => !p.isHost);
   const activeObject = OBJECT_BY_ID.get(objectId);
+  const activeLabel =
+    objectId === 'custom3d' ? customInfo?.name || 'Custom model' : activeObject?.label || 'Model';
+  const statusLabel =
+    connection === 'connected'
+      ? remotePlayers.length
+        ? `${remotePlayers.length} phone${remotePlayers.length === 1 ? '' : 's'} live`
+        : 'Live · waiting for phones'
+      : connection === 'reconnecting'
+        ? 'Reconnecting…'
+        : connection === 'connecting'
+          ? 'Connecting…'
+          : 'Solo mode';
+
+  const toggleCameraSync = (playerId: string) => {
+    setCameraSyncIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(playerId)) next.delete(playerId);
+      else next.add(playerId);
+      return next;
+    });
+    sounds.playClick(1.1);
+  };
+
+  /**
+   * The stamp shelf, built once and docked above whichever bottom furniture is
+   * on screen: the mode pill on wide displays, the dock everywhere else.
+   */
+  const stampTray = (
+    <StampTray
+      key="stamp-tray"
+      library={stampLibrary}
+      selectedId={selectedStamp?.id ?? null}
+      color={hostColor}
+      rotationDeg={stampRotationDeg}
+      randomise={stampRandomise}
+      busy={stampBusy}
+      error={stampError}
+      onSelect={(asset) => {
+        setSelectedStamp(asset);
+        setStampError(null);
+        sounds.playClick(1.3);
+      }}
+      onUpload={handleStampUpload}
+      onRemoveUpload={(asset) => {
+        updateLibrary((library) => removeUpload(library, asset.id));
+        if (selectedStamp?.id === asset.id) setSelectedStamp(BUILTIN_STAMPS[0]);
+        sounds.playClick(0.9);
+      }}
+      onRotate={(deg) => setStampRotationDeg(((deg % 360) + 360) % 360)}
+      onToggleRandom={() => setStampRandomise((v) => !v)}
+      onClose={() => setStageMode('paint')}
+    />
+  );
   /** What an AI stencil would be stamped in right now. */
   const activeAiTint = aiTint || hostColor;
 
@@ -1317,7 +1428,11 @@ export default function CanvasView() {
   );
 
   return (
-    <div className="h-screen w-screen overflow-hidden stage-vignette text-white relative select-none">
+    <div
+      className="studio-theme h-screen w-screen overflow-hidden text-white relative select-none"
+      style={atmosphereVars(atmosphere) as React.CSSProperties}
+    >
+      <StudioBackdrop atmosphere={atmosphere} />
       {/* ---------------------------- 3D stage ---------------------------- */}
       <Canvas
         dpr={[1, 2]}
@@ -1367,38 +1482,75 @@ export default function CanvasView() {
             transition={{ type: 'spring', stiffness: 320, damping: 32 }}
             className="absolute top-0 inset-x-0 z-30 p-3 md:p-4 flex items-center gap-2 md:gap-3 safe-top"
           >
-            <div className="flex items-center gap-2.5 shrink-0">
-              <div className="w-9 h-9 rounded-[13px] bg-gradient-to-tr from-[#FF4D1C] to-[#FFB020] shadow-[0_0_22px_rgba(255,77,28,0.45)] grid place-items-center">
+            {/* Brand + live status */}
+            <div className="flex items-center gap-2.5 shrink-0 min-w-0">
+              <div className="w-9 h-9 rounded-[13px] bg-gradient-to-tr from-[#FF4D1C] to-[#FFB020] shadow-[0_0_22px_rgba(255,77,28,0.35)] grid place-items-center shrink-0">
                 <SprayCan size={17} className="text-white drop-shadow" />
               </div>
-              <div className="hidden sm:block leading-none">
-                <div className="text-[15px] font-bold tracking-tight">AiroHub</div>
-                <div className="text-[9px] font-mono text-white/40 mt-0.5">ROOM {roomId}</div>
-              </div>
+              {rails ? (
+                <div className="flex items-center gap-2">
+                  <GlassPill className="!py-1.5 !pl-2.5 !pr-3 !gap-2">
+                    <StatusDot connection={connection} />
+                    <span className="mono-caps text-[9px] text-white/80 whitespace-nowrap">{statusLabel}</span>
+                  </GlassPill>
+                  <AnimatePresence>
+                    {objectLoading && (
+                      <motion.div
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -8 }}
+                        className="glass glass-sheen rounded-full pl-2.5 pr-3 py-1.5 flex items-center gap-2"
+                      >
+                        <Loader2 size={11} className="animate-spin text-fuchsia-200" />
+                        <span className="mono-caps text-[9px] text-white/70 whitespace-nowrap">
+                          Loading {activeLabel}
+                        </span>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              ) : (
+                <div className="hidden sm:block leading-none">
+                  <div className="text-[15px] font-bold tracking-tight">AiroHub</div>
+                  <div className="text-[9px] font-mono text-white/40 mt-0.5">ROOM {roomId}</div>
+                </div>
+              )}
             </div>
 
+            {/* Centre: wordmark on wide displays, the object switcher elsewhere. */}
             <div className="flex-1 flex justify-center min-w-0 overflow-hidden px-1">
-              <ObjectTrigger
-                objectId={objectId}
-                customName={customInfo?.name}
-                onClick={() => {
-                  setObjectSheet(true);
-                  sounds.playClick(1.2);
-                }}
-              />
+              {rails ? (
+                <div className="text-center leading-none pointer-events-none">
+                  <div className="text-[13px] font-bold tracking-[0.42em] pl-[0.42em] text-white/92">AIROHUB</div>
+                  <div className="mono-caps mt-1.5 text-[8.5px] text-white/40 tracking-[0.3em] pl-[0.3em]">
+                    Room {roomId}
+                  </div>
+                </div>
+              ) : (
+                <ObjectTrigger
+                  objectId={objectId}
+                  customName={customInfo?.name}
+                  onClick={() => {
+                    setObjectSheet(true);
+                    sounds.playClick(1.2);
+                  }}
+                />
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              {rails && <AtmospherePicker value={atmosphere} onChange={changeAtmosphere} placement="down" />}
+
               <button
                 onClick={() => {
                   setInviteSheet(true);
                   track('invite.open', undefined, roomId);
                 }}
                 className="tap glass glass-sheen splat-btn-2 rounded-full pl-2 pr-3 py-1.5 flex items-center gap-2"
-                style={{ '--paint': 'rgba(34,211,238,0.34)' } as React.CSSProperties}
+                style={{ '--paint': 'rgba(192,132,252,0.34)' } as React.CSSProperties}
                 title="Invite players"
               >
-                <Users size={14} className="text-[var(--color-airo-aqua)]" />
+                <Users size={14} className="text-fuchsia-200" />
                 <div className="flex -space-x-1.5">
                   {[1, 2, 3, 4].map((slot) => {
                     const player = remotePlayers.find((p) => p.slot === slot);
@@ -1407,7 +1559,7 @@ export default function CanvasView() {
                       <span
                         key={slot}
                         className={`w-4 h-4 rounded-full border-2 ${
-                          syncOn ? 'border-[var(--color-airo-aqua)]' : 'border-black/50'
+                          syncOn ? 'border-fuchsia-300' : 'border-black/50'
                         } ${player?.isPainting ? 'airo-breathe' : ''}`}
                         style={{ background: player ? player.color : 'rgba(255,255,255,0.14)' }}
                       />
@@ -1424,7 +1576,7 @@ export default function CanvasView() {
                 title="How it works"
                 size={38}
               >
-                <HelpCircle size={15} className="text-[var(--color-airo-aqua)]" />
+                <HelpCircle size={15} className="text-fuchsia-200" />
               </GlassIconButton>
               <span className="hidden md:contents">
               {flags.ui.aiPanel && (
@@ -1447,7 +1599,7 @@ export default function CanvasView() {
                 title={muted ? 'Unmute' : 'Mute'}
                 size={38}
               >
-                {muted ? <VolumeX size={15} /> : <Volume2 size={15} className="text-[var(--color-airo-flame)]" />}
+                {muted ? <VolumeX size={15} /> : <Volume2 size={15} className="text-[var(--color-airo-ember)]" />}
               </GlassIconButton>
               </span>
               <span className="hidden sm:contents">
@@ -1455,6 +1607,28 @@ export default function CanvasView() {
                 <Maximize size={15} />
               </GlassIconButton>
               </span>
+              {rails && <FeedbackButton variant="inline" roomId={roomId} size={38} />}
+              {rails && (
+                <>
+                  <span className="mx-0.5 h-6 w-px bg-white/15" />
+                  {flags.ui.showcase && (
+                    <GlassIconButton
+                      onClick={() => setShowcaseOpen(true)}
+                      title="Showcase — record a turntable video of your piece"
+                      size={38}
+                    >
+                      <Clapperboard size={15} className="text-white/85" />
+                    </GlassIconButton>
+                  )}
+                  <button
+                    onClick={saveSnapshot}
+                    className="tap studio-cta rounded-full pl-3.5 pr-4 py-2.5 text-[11px] font-bold tracking-wide flex items-center gap-1.5"
+                  >
+                    <Download size={14} />
+                    <span>Save</span>
+                  </button>
+                </>
+              )}
             </div>
           </motion.header>
         )}
@@ -1501,314 +1675,621 @@ export default function CanvasView() {
         </GlassIconButton>
       )}
 
-      {/* --------------------------- left view island --------------------------- */}
-      <AnimatePresence>
-        {!fullscreen && (
-          <motion.div
-            initial={{ x: -80, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: -80, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.05 }}
-            className="absolute left-3 md:left-4 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-2"
-          >
-            <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
-              {[
-                { label: 'Front', az: 0, pol: Math.PI / 2 },
-                { label: '3/4', az: 0.7, pol: Math.PI / 2.25 },
-                { label: 'Side', az: Math.PI / 2, pol: Math.PI / 2 },
-                { label: 'Top', az: 0, pol: 0.32 },
-              ].map((view) => (
-                <button
-                  key={view.label}
-                  onClick={() => setCameraAngle(view.az, view.pol)}
-                  className="tap w-[52px] py-1.5 rounded-[15px] text-[10px] font-semibold text-white/75 hover:text-white hover:bg-white/12"
-                >
-                  {view.label}
-                </button>
-              ))}
-              <div className="h-px bg-white/12 mx-2 my-0.5" />
-              <button
-                onClick={() => setAutoRotate((v) => !v)}
-                className={`tap w-[52px] py-1.5 rounded-[15px] grid place-items-center ${
-                  autoRotate ? 'splat-chip text-black' : 'text-white/70 hover:bg-white/12'
-                }`}
-                style={autoRotate ? ({ '--paint': '#22D3EE' } as React.CSSProperties) : undefined}
-                title="Auto-rotate"
-                aria-pressed={autoRotate}
+      {/* ============================ wide displays ============================ */}
+      {/* Two floating rails either side of the stage and one toolbar pill under
+          the model. Every card names what it controls — the tool in your hand,
+          the stage the object stands on, the canvas itself — so nothing has to
+          be decoded from an icon. */}
+      {rails && (
+        <AnimatePresence>
+          {!fullscreen && (
+            <React.Fragment key="rails">
+              {/* ------------------------------ left rail ------------------------------ */}
+              <motion.aside
+                initial={{ x: -60, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -60, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 32, delay: 0.05 }}
+                className="absolute left-5 top-[78px] bottom-5 z-30 w-[272px] flex flex-col gap-3 overflow-y-auto no-scrollbar"
               >
-                <RefreshCw size={14} className={autoRotate ? 'animate-spin' : ''} />
-              </button>
-            </GlassPanel>
+                <RailCard
+                  title={stageMode === 'stamp' ? 'Stencil' : hostTool === 'brush' ? 'Brush' : 'Spray Can'}
+                  badge={
+                    stageMode === 'stamp'
+                      ? selectedStamp?.label ?? 'Stamp'
+                      : hostTool === 'brush'
+                        ? 'Soft bristle'
+                        : 'Fat cap'
+                  }
+                  storageKey="tool"
+                >
+                  <ToolPreview
+                    tool={stageMode === 'stamp' ? 'stamp' : hostTool}
+                    color={hostColor}
+                    stamp={selectedStamp}
+                  />
 
-            {/* The stage-mode island. The active mode wears a spray splat
-                rather than a solid chip, so the one piece of state on the left
-                rail matches the dock's paint-stroke toggles. */}
-            <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
-              {(
-                [
-                  {
-                    mode: 'paint',
-                    icon: <MousePointer size={14} />,
-                    title: 'Paint with pointer',
-                    paint: '#FF4D1C',
-                    ink: 'text-white',
-                  },
-                  {
-                    mode: 'stamp',
-                    icon: <StampIcon size={14} />,
-                    title: 'Place stamps (S)',
-                    paint: '#FFB020',
-                    ink: 'text-black',
-                  },
-                  {
-                    mode: 'orbit',
-                    icon: <Hand size={14} />,
-                    title: 'Orbit camera (O)',
-                    paint: '#A78BFA',
-                    ink: 'text-white',
-                  },
-                ] as const
-              )
-                .filter((entry) => entry.mode !== 'stamp' || flags.ui.stamps)
-                .map((entry) => {
-                  const active = stageMode === entry.mode;
-                  return (
+                  {/* Size: one slider, labelled for what it changes. */}
+                  <div className="mt-3.5 flex items-center gap-2">
+                    <span className="mono-caps w-9 shrink-0 text-[8.5px] text-white/45">
+                      {stageMode === 'stamp' ? 'Size' : hostTool === 'brush' ? 'Width' : 'Nozzle'}
+                    </span>
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={2}
+                      step={0.05}
+                      value={hostSize}
+                      onChange={(e) => setHostSize(Number(e.target.value))}
+                      className="airo-slider flex-1 min-w-0"
+                      aria-label="Tool size"
+                    />
+                    <span className="mono-caps w-8 shrink-0 text-right text-[8.5px] tabular-nums text-white/60">
+                      {Math.round(hostSize * 100)}%
+                    </span>
+                  </div>
+
+                  {/* Quick colours plus the full well. */}
+                  <div className="mt-3.5 flex items-center justify-center gap-2">
+                    {QUICK_COLORS.map((hex) => {
+                      const selected = hex.toLowerCase() === hostColor.toLowerCase();
+                      return (
+                        <button
+                          key={hex}
+                          type="button"
+                          onClick={() => {
+                            handleHostColor(hex);
+                            sounds.playClick(1.4);
+                          }}
+                          aria-label={`Paint colour ${hex}`}
+                          aria-pressed={selected}
+                          className={`tap relative grid h-7 w-7 place-items-center rounded-full transition-transform ${
+                            selected ? 'scale-110' : 'hover:scale-105'
+                          }`}
+                          style={{
+                            background: hex,
+                            boxShadow: selected
+                              ? `0 0 0 2px var(--studio-ink), 0 0 0 3.5px rgba(255,255,255,0.9), 0 8px 20px -6px ${hex}`
+                              : `inset 0 1px 0 rgba(255,255,255,0.35), 0 6px 14px -8px ${hex}`,
+                          }}
+                        >
+                          {selected && <span className="h-2 w-2 rounded-full bg-white/90" />}
+                        </button>
+                      );
+                    })}
+                    <ColorWell color={hostColor} onChange={handleHostColor} size={30} />
+                  </div>
+                  <div className="mono-caps mt-2 text-center text-[8.5px] text-white/45">
+                    Paint colour <span className="mx-1 text-white/25">•</span> {hostColor.toUpperCase()}
+                  </div>
+
+                  {/* Tool tiles. */}
+                  <div
+                    className="mt-3.5 grid gap-2.5"
+                    style={{ gridTemplateColumns: `repeat(${flags.ui.stamps ? 3 : 2}, minmax(0, 1fr))` }}
+                  >
+                    {(
+                      [
+                        {
+                          id: 'spray' as const,
+                          label: 'Spray',
+                          icon: <SprayCan size={19} />,
+                          tile: `linear-gradient(150deg, ${atmosphere.deep}, ${atmosphere.accent})`,
+                          glow: `${atmosphere.accent}d9`,
+                          title: 'Spray can (B toggles)',
+                        },
+                        {
+                          id: 'brush' as const,
+                          label: 'Brush',
+                          icon: <Brush size={19} />,
+                          tile: `linear-gradient(150deg, ${atmosphere.accent}, ${atmosphere.hot})`,
+                          glow: `${atmosphere.hot}d9`,
+                          title: 'Brush (B toggles)',
+                        },
+                        {
+                          id: 'stamp' as const,
+                          label: 'Stamp',
+                          icon: <StampIcon size={19} />,
+                          tile: `linear-gradient(150deg, ${atmosphere.hot}, ${atmosphere.accent})`,
+                          glow: `${atmosphere.hot}d9`,
+                          title: 'Place stamps (S)',
+                        },
+                      ] as const
+                    )
+                      .filter((tile) => tile.id !== 'stamp' || flags.ui.stamps)
+                      .map((tile) => {
+                        const active =
+                          tile.id === 'stamp' ? stageMode === 'stamp' : stageMode !== 'stamp' && hostTool === tile.id;
+                        return (
+                          <button
+                            key={tile.id}
+                            type="button"
+                            title={tile.title}
+                            aria-pressed={active}
+                            onClick={() => {
+                              sounds.playClick(1.2);
+                              if (tile.id === 'stamp') {
+                                setStageMode('stamp');
+                                return;
+                              }
+                              setHostTool(tile.id);
+                              if (stageMode !== 'paint') setStageMode('paint');
+                            }}
+                            className="tap tool-tile"
+                            style={{ '--tile': tile.tile, '--tile-glow': tile.glow } as React.CSSProperties}
+                          >
+                            {tile.icon}
+                            <span>{tile.label}</span>
+                          </button>
+                        );
+                      })}
+                  </div>
+                </RailCard>
+
+                <RailCard title="Stage" aside={<OrbitReadout orbitRef={orbitRef} />} storageKey="stage">
+                  {/* Where the camera stands. */}
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {VIEW_PRESETS.map((view) => {
+                      const Icon = view.icon;
+                      return (
+                        <button
+                          key={view.label}
+                          type="button"
+                          onClick={() => {
+                            setAutoRotate(false);
+                            setCameraAngle(view.az, view.pol);
+                          }}
+                          title={`${view.label} view`}
+                          className="tap flex flex-col items-center gap-1.5 rounded-2xl border border-white/12 bg-white/[0.05] py-2.5 text-white/70 hover:bg-white/[0.12] hover:text-white"
+                        >
+                          <Icon size={15} />
+                          <span className="mono-caps text-[8px]">{view.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-3">
+                    <ZoomSlider orbitRef={orbitRef} onUserZoom={() => setAutoRotate(false)} />
+                  </div>
+
+                  <div className="mt-3 flex items-center gap-2">
                     <button
-                      key={entry.mode}
+                      type="button"
                       onClick={() => {
-                        setStageMode(entry.mode);
-                        sounds.playClick(1.2);
+                        setAutoRotate((v) => !v);
+                        sounds.playClick(1.1);
                       }}
-                      className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
-                        active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
+                      aria-pressed={autoRotate}
+                      title="Slowly spin the stage"
+                      className={`tap flex flex-1 items-center justify-center gap-2 rounded-full border py-2 ${
+                        autoRotate
+                          ? 'border-white/30 bg-[color-mix(in_srgb,var(--studio-accent)_28%,transparent)] text-white'
+                          : 'border-white/12 bg-white/[0.05] text-white/70 hover:bg-white/[0.12] hover:text-white'
                       }`}
-                      style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
-                      title={entry.title}
-                      aria-pressed={active}
                     >
-                      {entry.icon}
+                      <Orbit size={13} className={autoRotate ? 'studio-spin' : ''} />
+                      <span className="mono-caps text-[8.5px]">{autoRotate ? 'Orbiting' : '360° Orbit'}</span>
                     </button>
-                  );
-                })}
-            </GlassPanel>
-          </motion.div>
-        )}
-      </AnimatePresence>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoRotate(false);
+                        setCameraAngle(0, Math.PI / 2);
+                      }}
+                      title="Reset the view"
+                      className="tap flex items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.05] px-3 py-2 text-white/70 hover:bg-white/[0.12] hover:text-white"
+                    >
+                      <RotateCcw size={13} />
+                      <span className="mono-caps text-[8.5px]">Reset</span>
+                    </button>
+                  </div>
+                </RailCard>
+              </motion.aside>
 
-      {/* --------------------------- right feedback rail --------------------------- */}
-      {/* The left island's mirror image. Feedback belongs on the studio screen
-          — it is where a session actually goes wrong — but a fixed corner
-          button would sit under the bottom dock, so it rides the free middle
-          of the right edge and leaves with the rest of the furniture in
-          fullscreen. */}
-      <AnimatePresence>
-        {!fullscreen && (
-          <motion.div
-            initial={{ x: 80, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            exit={{ x: 80, opacity: 0 }}
-            className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 z-30"
-          >
-            <FeedbackButton variant="inline" roomId={roomId} />
-          </motion.div>
-        )}
-      </AnimatePresence>
+              {/* ------------------------------ right rail ------------------------------ */}
+              <motion.aside
+                initial={{ x: 60, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 60, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 32, delay: 0.08 }}
+                className="absolute right-5 top-[78px] bottom-5 z-30 w-[272px] flex flex-col gap-3"
+              >
+                <RailCard
+                  title={railTab === 'objects' ? 'Canvas' : 'Crew'}
+                  badge={railTab === 'objects' ? `${OBJECT_COUNT} models` : `${remotePlayers.length}/4 phones`}
+                  grow
+                  storageKey="canvas"
+                  footer={
+                    railTab === 'objects' ? (
+                      <div className="flex items-center gap-2 border-t border-white/10 pt-3">
+                        <span className="mono-caps shrink-0 text-[8.5px] text-white/45">Surface</span>
+                        <Segmented
+                          layoutId="rail-finish"
+                          size="sm"
+                          className="flex-1"
+                          value={finish}
+                          onChange={(value) => {
+                            setFinish(value);
+                            sounds.playClick(1.1);
+                          }}
+                          options={[
+                            { value: 'original', label: 'Textured', accent: atmosphere.accent },
+                            { value: 'primer', label: 'Primer', accent: atmosphere.hot },
+                          ]}
+                        />
+                      </div>
+                    ) : undefined
+                  }
+                >
+                  <Segmented<'objects' | 'crew'>
+                    layoutId="rail-tabs"
+                    size="sm"
+                    className="mb-3 shrink-0"
+                    value={railTab}
+                    onChange={(tab) => {
+                      setRailTab(tab);
+                      sounds.playClick(1.1);
+                    }}
+                    options={[
+                      { value: 'objects', label: 'Objects', icon: <Box size={11} />, accent: atmosphere.accent },
+                      {
+                        value: 'crew',
+                        label: remotePlayers.length ? `Crew · ${remotePlayers.length}` : 'Crew',
+                        icon: <Users size={11} />,
+                        accent: atmosphere.hot,
+                      },
+                    ]}
+                  />
+                  <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar -mx-2 px-2 pb-1">
+                    {railTab === 'objects' ? (
+                      <ObjectRows
+                        objectId={objectId}
+                        loading={objectLoading}
+                        onSelect={changeObject}
+                        onUpload={flags.ui.uploads ? () => setUploadSheet(true) : undefined}
+                        customName={customInfo?.name}
+                      />
+                    ) : (
+                      <CrewRows
+                        players={remotePlayers}
+                        cameraSyncIds={cameraSyncIds}
+                        onToggleCameraSync={toggleCameraSync}
+                        onInvite={() => {
+                          setInviteSheet(true);
+                          track('invite.open', undefined, roomId);
+                        }}
+                        controllerUrl={controllerUrl}
+                        roomId={roomId}
+                        copied={copied}
+                        onCopyLink={copyLink}
+                      />
+                    )}
+                  </div>
+                </RailCard>
+              </motion.aside>
 
-      {/* ------------------------------ bottom dock ------------------------------ */}
-      <AnimatePresence>
-        {!fullscreen && (
-          <motion.div
-            initial={{ y: 90, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: 90, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.08 }}
-            className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex flex-col items-center gap-2 safe-bottom pointer-events-none"
+              {/* ------------------------------ toolbar pill ------------------------------ */}
+              {/* What the pointer does on the stage, and what to do about the
+                  last thing it did. */}
+              <motion.div
+                initial={{ y: 60, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 60, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 32, delay: 0.1 }}
+                className="absolute bottom-0 left-[312px] right-[312px] z-30 pb-5 flex flex-col items-center gap-2 pointer-events-none"
+              >
+                <AnimatePresence>{stageMode === 'stamp' && stampTray}</AnimatePresence>
+                <GlassPanel
+                  radius="rounded-full"
+                  className="pointer-events-auto flex items-center gap-1.5 px-1.5 py-1.5"
+                  liquid
+                >
+                  <Segmented<'paint' | 'stamp' | 'orbit'>
+                    layoutId="stage-mode"
+                    className="!bg-transparent !border-0 !shadow-none !backdrop-blur-none !p-0"
+                    value={stageMode}
+                    onChange={(mode) => {
+                      setStageMode(mode);
+                      sounds.playClick(1.2);
+                    }}
+                    options={[
+                      { value: 'paint', label: 'Paint', icon: <MousePointer size={13} />, accent: atmosphere.deep },
+                      ...(flags.ui.stamps
+                        ? [{ value: 'stamp' as const, label: 'Stamp', icon: <StampIcon size={13} />, accent: atmosphere.hot }]
+                        : []),
+                      { value: 'orbit', label: 'Orbit', icon: <Hand size={13} />, accent: '#0ea5e9' },
+                    ]}
+                  />
+                  <span className="mx-0.5 h-5 w-px bg-white/15" />
+                  <GlassIconButton size={34} onClick={undoLast} title="Undo last stroke (Ctrl+Z)" className="!shadow-none">
+                    <Undo2 size={14} />
+                  </GlassIconButton>
+                  <GlassIconButton
+                    size={34}
+                    onClick={redoLast}
+                    title="Redo undone stroke (Ctrl+Shift+Z)"
+                    className="!shadow-none"
+                  >
+                    <Redo2 size={14} />
+                  </GlassIconButton>
+                  <span className="mx-0.5 h-5 w-px bg-white/15" />
+                  <GlassIconButton
+                    size={34}
+                    onClick={replayArtwork}
+                    disabled={replaying}
+                    title="Replay the artwork painting itself"
+                    className="!shadow-none"
+                  >
+                    <History size={14} className={replaying ? 'animate-spin' : ''} />
+                  </GlassIconButton>
+                  <GlassIconButton size={34} onClick={clearCanvas} title="Clear all paint" className="!shadow-none">
+                    <Trash2 size={14} />
+                  </GlassIconButton>
+                </GlassPanel>
+              </motion.div>
+            </React.Fragment>
+          )}
+        </AnimatePresence>
+      )}
+      {/* ============================ compact displays ============================ */}
+      {!rails && (
+        <>
+          {/* --------------------------- left view island --------------------------- */}
+          <AnimatePresence>
+            {!fullscreen && (
+              <motion.div
+                initial={{ x: -80, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: -80, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.05 }}
+                className="absolute left-3 md:left-4 top-1/2 -translate-y-1/2 z-30 flex flex-col gap-2"
+              >
+                <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
+                  {VIEW_PRESETS.map((view) => (
+                    <button
+                      key={view.label}
+                      onClick={() => setCameraAngle(view.az, view.pol)}
+                      className="tap w-[52px] py-1.5 rounded-[15px] text-[10px] font-semibold text-white/75 hover:text-white hover:bg-white/12"
+                    >
+                      {view.label}
+                    </button>
+                  ))}
+                  <div className="h-px bg-white/12 mx-2 my-0.5" />
+                  <button
+                    onClick={() => setAutoRotate((v) => !v)}
+                    className={`tap w-[52px] py-1.5 rounded-[15px] grid place-items-center ${
+                      autoRotate ? 'splat-chip text-white' : 'text-white/70 hover:bg-white/12'
+                    }`}
+                    style={autoRotate ? ({ '--paint': '#a855f7' } as React.CSSProperties) : undefined}
+                    title="Auto-rotate"
+                    aria-pressed={autoRotate}
+                  >
+                    <RefreshCw size={14} className={autoRotate ? 'animate-spin' : ''} />
+                  </button>
+                  <div className="grid place-items-center pb-0.5">
+                    <AtmospherePicker value={atmosphere} onChange={changeAtmosphere} placement="right" size={34} />
+                  </div>
+                </GlassPanel>
+
+                {/* The stage-mode island. The active mode wears a spray splat
+                    rather than a solid chip, so the one piece of state on the left
+                    rail matches the dock's paint-stroke toggles. */}
+                <GlassPanel radius="rounded-[22px]" className="p-1.5 flex flex-col gap-1">
+                  {(
+                    [
+                      {
+                        mode: 'paint',
+                        icon: <MousePointer size={14} />,
+                        title: 'Paint with pointer',
+                        paint: '#7c3aed',
+                        ink: 'text-white',
+                      },
+                      {
+                        mode: 'stamp',
+                        icon: <StampIcon size={14} />,
+                        title: 'Place stamps (S)',
+                        paint: '#e0409a',
+                        ink: 'text-white',
+                      },
+                      {
+                        mode: 'orbit',
+                        icon: <Hand size={14} />,
+                        title: 'Orbit camera (O)',
+                        paint: '#22D3EE',
+                        ink: 'text-black',
+                      },
+                    ] as const
+                  )
+                    .filter((entry) => entry.mode !== 'stamp' || flags.ui.stamps)
+                    .map((entry) => {
+                      const active = stageMode === entry.mode;
+                      return (
+                        <button
+                          key={entry.mode}
+                          onClick={() => {
+                            setStageMode(entry.mode);
+                            sounds.playClick(1.2);
+                          }}
+                          className={`tap w-[52px] py-2 rounded-[15px] grid place-items-center ${
+                            active ? `splat-chip ${entry.ink}` : 'text-white/70 hover:bg-white/12'
+                          }`}
+                          style={active ? ({ '--paint': entry.paint } as React.CSSProperties) : undefined}
+                          title={entry.title}
+                          aria-pressed={active}
+                        >
+                          {entry.icon}
+                        </button>
+                      );
+                    })}
+                </GlassPanel>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* --------------------------- right feedback rail --------------------------- */}
+          <AnimatePresence>
+            {!fullscreen && (
+              <motion.div
+                initial={{ x: 80, opacity: 0 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 80, opacity: 0 }}
+                className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 z-30"
+              >
+                <FeedbackButton variant="inline" roomId={roomId} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* ------------------------------ bottom dock ------------------------------ */}
+          <AnimatePresence>
+            {!fullscreen && (
+              <motion.div
+                initial={{ y: 90, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: 90, opacity: 0 }}
+                transition={{ type: 'spring', stiffness: 320, damping: 32, delay: 0.08 }}
+                className="absolute bottom-0 inset-x-0 z-30 p-3 md:p-4 flex flex-col items-center gap-2 safe-bottom pointer-events-none"
+              >
+                {/* The stamp shelf docks directly above the bar so it can never
+                    cover it, and stays non-modal so the next tap reaches the
+                    model rather than a backdrop. */}
+                <AnimatePresence>{stageMode === 'stamp' && stampTray}</AnimatePresence>
+
+                <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,1120px)] pointer-events-auto">
+                  {/* Row 1 on phones: tool + colour. */}
+                  <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                    <Segmented<'spray' | 'brush' | 'stamp'>
+                      layoutId="host-tool"
+                      paint
+                      className="flex-1 md:flex-none"
+                      value={stageMode === 'stamp' ? 'stamp' : hostTool}
+                      onChange={(value) => {
+                        sounds.playClick(1.2);
+                        if (value === 'stamp') {
+                          setStageMode('stamp');
+                          return;
+                        }
+                        setHostTool(value);
+                        if (stageMode !== 'paint') setStageMode('paint');
+                      }}
+                      options={[
+                        { value: 'spray' as const, label: 'Spray', icon: <SprayCan size={13} />, accent: '#7c3aed' },
+                        { value: 'brush' as const, label: 'Brush', icon: <Brush size={13} />, accent: '#c026d3' },
+                        { value: 'stamp' as const, label: 'Stamp', icon: <StampIcon size={13} />, accent: '#ec4899' },
+                      ].filter((option) => option.value !== 'stamp' || flags.ui.stamps)}
+                    />
+                    <ColorWell color={hostColor} onChange={handleHostColor} />
+                  </div>
+
+                  {/* Row 2 on phones: size + finish. */}
+                  <div className="flex items-center gap-2 w-full md:w-auto md:contents">
+                    <div className="flex items-center gap-2 px-1 md:px-2 flex-1 md:flex-none md:min-w-[130px]">
+                      <span className="mono-caps text-[8.5px] text-white/40 shrink-0">Size</span>
+                      <input
+                        type="range"
+                        min={0.4}
+                        max={2}
+                        step={0.05}
+                        value={hostSize}
+                        onChange={(e) => setHostSize(Number(e.target.value))}
+                        className="airo-slider flex-1"
+                        aria-label="Tool size"
+                      />
+                    </div>
+
+                    <div className="w-px h-7 bg-white/12 hidden md:block" />
+
+                    <Segmented
+                      layoutId="host-finish"
+                      size="sm"
+                      paint
+                      value={finish}
+                      onChange={(value) => {
+                        setFinish(value);
+                        sounds.playClick(1.1);
+                      }}
+                      options={[
+                        { value: 'original', label: 'Textured', accent: '#8b5cf6' },
+                        { value: 'primer', label: 'Primer', accent: '#f472b6' },
+                      ]}
+                    />
+                  </div>
+
+                  <div className="w-px h-7 bg-white/12 hidden md:block" />
+
+                  <div className="flex items-center justify-center gap-2 w-full md:w-auto md:contents">
+                    <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
+                      <Undo2 size={15} />
+                    </GlassIconButton>
+                    <GlassIconButton onClick={redoLast} title="Redo undone stroke (Ctrl+Shift+Z)" size={38}>
+                      <Redo2 size={15} />
+                    </GlassIconButton>
+                    <GlassIconButton
+                      onClick={replayArtwork}
+                      title="Replay the artwork painting itself"
+                      size={38}
+                      disabled={replaying}
+                    >
+                      <History size={15} className={replaying ? 'animate-spin text-fuchsia-200' : ''} />
+                    </GlassIconButton>
+                    <GlassIconButton onClick={() => sounds.playCanRattle()} title="Shake can" size={38}>
+                      <Sparkles size={15} className="text-[var(--color-airo-ember)]" />
+                    </GlassIconButton>
+                    <GlassIconButton onClick={clearCanvas} title="Clear paint" size={38}>
+                      <Trash2 size={15} />
+                    </GlassIconButton>
+                    {flags.ui.showcase && (
+                      <GlassIconButton
+                        onClick={() => setShowcaseOpen(true)}
+                        title="Showcase — record a turntable video of your piece"
+                        size={38}
+                      >
+                        <Clapperboard size={15} className="text-fuchsia-200" />
+                      </GlassIconButton>
+                    )}
+                    <button
+                      onClick={saveSnapshot}
+                      className="tap studio-cta rounded-full px-4 py-2 text-[11px] font-bold tracking-wide flex items-center gap-1.5"
+                    >
+                      <Download size={14} />
+                      <span>Save</span>
+                    </button>
+                  </div>
+                </GlassPanel>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* --------------------------- status readouts --------------------------- */}
+          {/* On phones the stamp shelf occupies the space these pills sit in, so
+              they stand down until it closes. */}
+          <div
+            className={`absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex-col items-end gap-2 pointer-events-none ${
+              stageMode === 'stamp' ? 'hidden md:flex' : 'flex'
+            }`}
           >
-            {/* The stamp shelf docks directly above the bar so it can never
-                cover it, and stays non-modal so the next tap reaches the
-                model rather than a backdrop. */}
             <AnimatePresence>
-              {stageMode === 'stamp' && (
-                <StampTray
-                  key="stamp-tray"
-                  library={stampLibrary}
-                  selectedId={selectedStamp?.id ?? null}
-                  color={hostColor}
-                  rotationDeg={stampRotationDeg}
-                  randomise={stampRandomise}
-                  busy={stampBusy}
-                  error={stampError}
-                  onSelect={(asset) => {
-                    setSelectedStamp(asset);
-                    setStampError(null);
-                    sounds.playClick(1.3);
-                  }}
-                  onUpload={handleStampUpload}
-                  onRemoveUpload={(asset) => {
-                    updateLibrary((library) => removeUpload(library, asset.id));
-                    if (selectedStamp?.id === asset.id) setSelectedStamp(BUILTIN_STAMPS[0]);
-                    sounds.playClick(0.9);
-                  }}
-                  onRotate={(deg) => setStampRotationDeg(((deg % 360) + 360) % 360)}
-                  onToggleRandom={() => setStampRandomise((v) => !v)}
-                  onClose={() => setStageMode('paint')}
-                />
+              {objectLoading && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold"
+                >
+                  <Loader2 size={12} className="animate-spin" />
+                  <span>Loading {activeLabel}…</span>
+                </motion.div>
               )}
             </AnimatePresence>
 
-            {/* Wide enough that the third tool segment does not push the save
-                button onto a second row on a laptop display. */}
-            <GlassPanel className="px-3 py-2.5 flex items-center gap-2 md:gap-3 flex-wrap justify-center w-full md:w-auto max-w-[min(100%,1120px)] pointer-events-auto">
-              {/* Row 1 on phones: tool + colour. */}
-              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
-                <Segmented<'spray' | 'brush' | 'stamp'>
-                  layoutId="host-tool"
-                  paint
-                  className="flex-1 md:flex-none"
-                  value={stageMode === 'stamp' ? 'stamp' : hostTool}
-                  onChange={(value) => {
-                    sounds.playClick(1.2);
-                    if (value === 'stamp') {
-                      setStageMode('stamp');
-                      return;
-                    }
-                    setHostTool(value);
-                    if (stageMode !== 'paint') setStageMode('paint');
-                  }}
-                  options={[
-                    { value: 'spray' as const, label: 'Spray', icon: <SprayCan size={13} />, accent: '#FF4D1C' },
-                    { value: 'brush' as const, label: 'Brush', icon: <Brush size={13} />, accent: '#22D3EE' },
-                    { value: 'stamp' as const, label: 'Stamp', icon: <StampIcon size={13} />, accent: '#FFB020' },
-                  ].filter((option) => option.value !== 'stamp' || flags.ui.stamps)}
-                />
-                <ColorWell color={hostColor} onChange={handleHostColor} />
-              </div>
-
-              {/* Row 2 on phones: size + finish. */}
-              <div className="flex items-center gap-2 w-full md:w-auto md:contents">
-                <div className="flex items-center gap-2 px-1 md:px-2 flex-1 md:flex-none md:min-w-[130px]">
-                  <span className="label-caps text-white/40 shrink-0">Size</span>
-                  <input
-                    type="range"
-                    min={0.4}
-                    max={2}
-                    step={0.05}
-                    value={hostSize}
-                    onChange={(e) => setHostSize(Number(e.target.value))}
-                    className="airo-slider flex-1"
-                    aria-label="Tool size"
-                  />
-                </div>
-
-                <div className="w-px h-7 bg-white/12 hidden md:block" />
-
-                <Segmented
-                  layoutId="host-finish"
-                  size="sm"
-                  paint
-                  value={finish}
-                  onChange={(value) => {
-                    setFinish(value);
-                    sounds.playClick(1.1);
-                  }}
-                  options={[
-                    { value: 'original', label: 'Textured', accent: '#22D3EE' },
-                    { value: 'primer', label: 'Primer', accent: '#A78BFA' },
-                  ]}
-                />
-              </div>
-
-              <div className="w-px h-7 bg-white/12 hidden md:block" />
-
-              <div className="flex items-center justify-center gap-2 w-full md:w-auto md:contents">
-              <GlassIconButton onClick={undoLast} title="Undo last stroke (Ctrl+Z)" size={38}>
-                <Undo2 size={15} />
-              </GlassIconButton>
-              <GlassIconButton onClick={redoLast} title="Redo undone stroke (Ctrl+Shift+Z)" size={38}>
-                <Redo2 size={15} />
-              </GlassIconButton>
-              <GlassIconButton
-                onClick={replayArtwork}
-                title="Replay the artwork painting itself"
-                size={38}
-                disabled={replaying}
-              >
-                <History size={15} className={replaying ? 'animate-spin text-[var(--color-airo-aqua)]' : ''} />
-              </GlassIconButton>
-              <GlassIconButton onClick={() => sounds.playCanRattle()} title="Shake can" size={38}>
-                <Sparkles size={15} className="text-[var(--color-airo-ember)]" />
-              </GlassIconButton>
-              <GlassIconButton onClick={clearCanvas} title="Clear paint" size={38}>
-                <Trash2 size={15} />
-              </GlassIconButton>
-              {flags.ui.showcase && (
-                <GlassIconButton
-                  onClick={() => setShowcaseOpen(true)}
-                  title="Showcase — record a turntable video of your piece"
-                  size={38}
-                >
-                  <Clapperboard size={15} className="text-[var(--color-airo-aqua)]" />
-                </GlassIconButton>
-              )}
-              <button
-                onClick={saveSnapshot}
-                className="tap rounded-full px-4 py-2 bg-gradient-to-r from-[#FF4D1C] to-[#FF7A34] text-white text-[11px] font-bold tracking-wide flex items-center gap-1.5 shadow-[0_8px_24px_-6px_rgba(255,77,28,0.75)]"
-              >
-                <Download size={14} />
-                <span>Save</span>
-              </button>
-              </div>
-            </GlassPanel>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* --------------------------- status readouts --------------------------- */}
-      {/* On phones the stamp shelf occupies the space these pills sit in, so
-          they stand down until it closes. */}
-      <div
-        className={`absolute right-3 md:right-4 bottom-48 md:bottom-28 z-20 flex-col items-end gap-2 pointer-events-none ${
-          stageMode === 'stamp' ? 'hidden md:flex' : 'flex'
-        }`}
-      >
-        <AnimatePresence>
-          {objectLoading && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 8 }}
-              className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold"
-            >
-              <Loader2 size={12} className="animate-spin" />
-              <span>Loading {activeObject?.label ?? 'model'}…</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        <div className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-medium text-white/70">
-          {connection === 'connected' ? (
-            <>
-              <Wifi size={12} className="text-emerald-400" />
-              <span>{remotePlayers.length} phone{remotePlayers.length === 1 ? '' : 's'} connected</span>
-            </>
-          ) : connection === 'reconnecting' ? (
-            <>
-              <RefreshCw size={12} className="animate-spin text-amber-400" />
-              <span className="text-amber-300">Reconnecting…</span>
-            </>
-          ) : connection === 'connecting' ? (
-            <>
-              <Loader2 size={12} className="animate-spin" />
-              <span>Connecting…</span>
-            </>
-          ) : (
-            <>
-              <WifiOff size={12} className="text-amber-400" />
-              <span>Solo mode</span>
-            </>
-          )}
-        </div>
-      </div>
+            <div className="glass glass-sheen rounded-full px-3 py-1.5 flex items-center gap-2 text-[10px] font-medium text-white/70">
+              <StatusDot connection={connection} />
+              <span className={connection === 'reconnecting' ? 'text-amber-300' : ''}>{statusLabel}</span>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* -------------------------------- sheets -------------------------------- */}
 
@@ -1882,15 +2363,7 @@ export default function CanvasView() {
                 </span>
                 {player && (
                   <button
-                    onClick={() => {
-                      setCameraSyncIds((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(player.id)) next.delete(player.id);
-                        else next.add(player.id);
-                        return next;
-                      });
-                      sounds.playClick(1.1);
-                    }}
+                    onClick={() => toggleCameraSync(player.id)}
                     title={
                       syncOn
                         ? 'This player is steering the studio camera — click to stop'

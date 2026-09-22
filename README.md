@@ -18,6 +18,26 @@ Three routes, all client-side:
 | `/canvas/:roomId`  | The studio. Full 3D stage, orbit, object picker, AI copilot            |
 | `/controller/:roomId` | The phone controller. Aim, paint or pad                            |
 
+### The studio screen
+
+On wide displays the studio is an instrument panel of collapsible glass cards.
+Left: the **tool card** shows the can, brush or stencil you are holding as a live
+3D render (tap it to shake), with size, quick colours and the tool tiles; the
+**stage card** has view tiles, a zoom slider, auto-orbit and a live azimuth /
+elevation readout. Right: the **canvas card** lists every model and the crew of
+phones, with the surface finish pinned under the list. Save and showcase live in
+the header; what the pointer does and undo / redo / replay / clear share one
+toolbar pill under the model. Below 1280px the same screen falls back to the
+compact top bar, view island and bottom dock, so phones and tablets keep the
+layout they had. The two furniture sets are rendered exclusively
+(`src/ui/studio/useMediaQuery.ts`), never hidden with CSS.
+
+The sky behind the stage is an **atmosphere** (`src/ui/studio/atmospheres.ts`):
+six gradient presets in the spray-paint palette, six solid colours, a custom solid
+and a crossfade between them. The glass tint, tiles and buttons take their accent
+from the chosen atmosphere, and the choice is remembered per browser. Only the
+studio screen changes; phones keep their own look.
+
 ### Painting model
 
 Every player paints into one shared 2048² canvas. That canvas is **composited over each
