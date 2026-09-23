@@ -567,7 +567,7 @@ export default function HowItWorks() {
               n: '01',
               accent: '#FF4D1C',
               head: 'Open a studio',
-              body: 'Hit Create a Studio on a laptop or TV. You get a six-character room code and a big QR code on screen.',
+              body: 'Hit Launch Studio on a laptop or TV. The room opens with a big QR code (and a six-character room code) on screen.',
               shot: 'landing',
               alt: 'The AiroHub landing page with a large 3D spray can following the pointer and fresh paint on the wall behind it.',
             },
