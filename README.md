@@ -167,6 +167,20 @@ flick and switch to its coarse precision curve mid-letter. The phone learns its 
 interval and spaces bunched readings at no less than 70% of it (check K in the aim
 suite: 1.10% of the stage off course on raw stamps, 0.12% de-bunched).
 
+Fine control is tuned against a tremor model (check L: 8-12 Hz physiological
+tremor plus sensor noise). The hold-tightening only squashes movement below 3°/s, so a
+careful nudge moves the aim in proportion instead of hitting a dead zone (a 4°/s nudge
+used to deliver 57% of its travel, 350 ms late; now 95%, 133 ms). The orientation
+low-pass stays partly closed up to 100°/s, so tremor no longer rides into careful strokes
+(2.5 px down to 1.0 px), while flicks still pass raw.
+
+On the studio side, each player's floating can rides the **aim ray** (camera to paint
+point, `src/scene/toolPlacement.ts`) rather than hovering off the hit triangle's normal.
+The normal hung the can on a 1-unit lever: at the side of a skateboard truck it shoved the
+can backwards against the stroke (it looked stuck, then jumped), and lumpy geometry came
+out as jitter. On the ray the nozzle tracks the aim on screen and edges only change its
+depth, which glides (`npm run test:placement`).
+
 The **landing page** does not use the tracker. There the phone is in your hand, screen
 toward you, and you tilt it like a spirit level, which the tracker (built for a phone
 pointed at a TV, roll-blind by design) cannot follow. `src/utils/tiltAim.ts` aims from
@@ -175,7 +189,7 @@ a held tilt holds, landscape works, and a One-Euro filter keeps it steady
 (`npm run test:tilt`).
 
 ```bash
-npm test   # includes 12 aim, 10 tilt and 2 writing-precision checks
+npm test   # includes 13 aim, 10 tilt, 2 writing-precision and 2 tool-placement checks
 ```
 
 ---

@@ -219,20 +219,36 @@ export class AimTracker {
   /** EMA bandwidth of the movement-speed estimate (Hz). */
   private static RATE_EMA_HZ = 2.5;
   /** Below this speed, deltas are quadratically "tightened" toward zero — the
-   *  last shimmer of a held aim vanishes without any hold lag. */
-  private static TIGHTEN_RATE = 6 * DEG2RAD;
+   *  last shimmer of a held aim vanishes without any hold lag.
+   *
+   *  3°/s, not 6: at 6 the squash also swallowed real fine work. A careful
+   *  4°/s nudge delivered 45% of its travel (and a 12°/s one 83%), so the
+   *  response was non-linear exactly where fine control lives: nudge, nothing;
+   *  nudge harder, a jump. The noise-cancelling rate estimate keeps a held
+   *  aim well under 3°/s, so holding stays sub-pixel (checks D and L in
+   *  scripts/test/aim-regression.mjs). */
+  private static TIGHTEN_RATE = 3 * DEG2RAD;
   /** Orientation low-pass band: CUT_LO Hz when holding still (≤ RATE_LO),
-   *  opening to CUT_HI Hz (effectively raw) at RATE_HI and above. */
+   *  opening to CUT_HI Hz (effectively raw) at RATE_HI and above.
+   *
+   *  CUT_LO 0.9 Hz (was 0.35): at 0.35 Hz a slow stroke trailed the hand by
+   *  ~350 ms; now ~100 ms, with a held aim still sub-pixel (check D). The
+   *  tightening above does the last of the hold work. RATE_HI 100°/s (was 50): the
+   *  band used to be wide open by careful-stroke speeds (12-25°/s), passing
+   *  the 8-12 Hz physiological tremor straight into the line you spray;
+   *  keeping it partly closed up to real flicks roughly halves that jitter
+   *  for ~30 ms more lag at those speeds. */
   private static RATE_LO = 6 * DEG2RAD;
-  private static RATE_HI = 50 * DEG2RAD;
-  private static CUT_LO = 0.35;
-  private static CUT_HI = 25;
+  private static RATE_HI = 100 * DEG2RAD;
+  private static CUT_LO = 0.9;
+  private static CUT_HI = 20;
   /** Precision curve: slow deliberate rotations get a finer ratio, fast
-   *  flicks a coarser one, so small shapes and full reach coexist. */
+   *  flicks a coarser one, so small shapes and full reach coexist. 0.7 / 1.35
+   *  (was 0.85 / 1.3): careful strokes about 18% finer, flicks unchanged. */
   private static ACCEL_LO = 25 * DEG2RAD;
   private static ACCEL_HI = 210 * DEG2RAD;
-  private static SCALE_LO = 0.85;
-  private static SCALE_HI = 1.3;
+  private static SCALE_LO = 0.7;
+  private static SCALE_HI = 1.35;
   private static PRESS_SUPPRESS_MS = 120;
   private static RELEASE_SUPPRESS_MS = 80;
 

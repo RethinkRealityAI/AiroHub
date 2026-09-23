@@ -22,6 +22,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { createToolRigSync, loadToolRig, ToolRig } from './toolRig';
 import { NameTag } from './NameTag';
+import { createToolPlacement, stepToolPlacement } from './toolPlacement';
 import { PlayerState } from '../types';
 
 export interface PlayerToolProps {
@@ -99,18 +100,19 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
       guideQuat: new THREE.Quaternion(),
       axis: new THREE.Vector3(),
       camHoriz: new THREE.Vector3(),
+      camPos: new THREE.Vector3(),
     }),
     []
   );
   /**
-   * The surface normal, filtered. Hit normals come from single triangles, so
-   * sweeping across a curved model makes them step from facet to facet; the
-   * tool hovers a full unit off the surface along that normal, which turned
-   * every step into a visible hop of the can. Filtering the normal (not the
-   * contact point) keeps the paint exact and the can smooth.
+   * The surface normal, filtered, used only for the reticle's tilt and a
+   * gentle lean of the can. Hit normals come from single triangles, and the
+   * generated models are lumpy, so the raw normal steps from facet to facet.
    */
   const smoothNormal = useRef(new THREE.Vector3(0, 0, 1));
   const hadSurface = useRef(false);
+  /** Aim-ray placement state (see toolPlacement.ts). */
+  const placement = useRef(createToolPlacement());
 
   useEffect(() => {
     if (rigsRef.current[tool]) return;
@@ -159,47 +161,49 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
     s.camHoriz.normalize();
 
     const hasSurface = Boolean(surfacePoint && surfaceNormal);
+    camera.getWorldPosition(s.camPos);
     if (hasSurface) {
       s.normal.set(surfaceNormal![0], surfaceNormal![1], surfaceNormal![2]).normalize();
       const n = smoothNormal.current;
       if (!hadSurface.current) n.copy(s.normal);
-      // Fast enough to add no visible lag to the can (it already eases its
-      // position), slow enough to swallow facet-to-facet steps.
-      else n.lerp(s.normal, 1 - Math.exp(-30 * delta));
+      else n.lerp(s.normal, 1 - Math.exp(-12 * delta));
       // Opposite normals can cancel to nothing mid-blend; take the new one.
       if (n.lengthSq() < 1e-4) n.copy(s.normal);
       n.normalize();
       s.normal.copy(n);
       s.surface.set(surfacePoint![0], surfacePoint![1], surfacePoint![2]);
-      s.targetPos.copy(s.surface).addScaledVector(s.normal, hover);
-
-      // Face the wall: horizontal component of the inverse normal; when the
-      // surface is horizontal (painting a top), fall back to the camera view.
-      s.face.set(-s.normal.x, 0, -s.normal.z);
-      if (s.face.lengthSq() < 0.04) s.face.copy(s.camHoriz);
-      s.face.normalize();
-
-      // Mostly world-upright, tipped slightly away from the surface so the
-      // body clears it — and naturally upright when spraying downward.
-      s.up.copy(WORLD_UP).addScaledVector(s.normal, 0.28).normalize();
+      s.targetPos.copy(s.surface);
     } else {
-      // Floating off-model on the camera plane.
+      // Off the model: the aim's point on the camera-facing plane.
       s.targetPos.set(position[0], position[1], position[2]);
-      s.face.copy(s.camHoriz);
-      s.up.copy(WORLD_UP);
     }
-
     hadSurface.current = hasSurface;
+
+    // On the aim ray, backed off the surface by the hover distance; depth
+    // eases on its own so humps and edges are glides, never sideways hops.
+    stepToolPlacement(
+      placement.current,
+      s.camPos,
+      s.targetPos,
+      hasSurface ? hover : 0,
+      delta,
+      currentPos.current
+    );
+    const aimDir = placement.current.dir;
+
+    // Facing: along the aim, flattened to the horizontal, so the can points
+    // where it sprays; the camera's heading when looking straight down.
+    s.face.set(aimDir.x, 0, aimDir.z);
+    if (s.face.lengthSq() < 0.04) s.face.copy(s.camHoriz);
+    s.face.normalize();
+    // Upright, with a slight lean off the (filtered) surface so painting the
+    // top of an object tips the can over it naturally.
+    s.up.copy(WORLD_UP);
+    if (hasSurface) s.up.addScaledVector(s.normal, 0.28).normalize();
 
     s.matrix.lookAt(s.zero, s.face, s.up);
     s.targetQuat.setFromRotationMatrix(s.matrix);
-
-    // Frame-rate independent smoothing; snap on big jumps (object switches).
-    const posBlend = 1 - Math.exp(-26 * delta);
-    const rotBlend = 1 - Math.exp(-20 * delta);
-    if (currentPos.current.distanceTo(s.targetPos) > 5) currentPos.current.copy(s.targetPos);
-    else currentPos.current.lerp(s.targetPos, posBlend);
-    currentQuat.current.slerp(s.targetQuat, rotBlend);
+    currentQuat.current.slerp(s.targetQuat, 1 - Math.exp(-14 * delta));
 
     group.position.copy(currentPos.current);
     group.quaternion.copy(currentQuat.current);
