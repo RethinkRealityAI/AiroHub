@@ -11,12 +11,15 @@
  * cloud centred on the tool.
  */
 import React, { useEffect, useMemo, useRef } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { PlayerState } from '../types';
+import { FOOTPRINT_SPRAY } from './PlayerTool';
 
 const POOL = 1400;
 const SPAWN_PER_SECOND = 320;
+/** Mean speed along the spray axis, world units per second. */
+const FORWARD_SPEED = 5.9;
 
 interface Particle {
   life: number;
@@ -29,6 +32,7 @@ interface Particle {
 
 export const SprayMist: React.FC<{ players: PlayerState[] }> = ({ players }) => {
   const meshRef = useRef<THREE.InstancedMesh>(null);
+  const camera = useThree((state) => state.camera);
   const dummy = useMemo(() => new THREE.Object3D(), []);
 
   const particles = useMemo<Particle[]>(
@@ -96,15 +100,20 @@ export const SprayMist: React.FC<{ players: PlayerState[] }> = ({ players }) => 
         const player = spraying[n % spraying.length];
         const p = particles[index];
 
-        scratch.origin.set(player.worldPos[0], player.worldPos[1], player.worldPos[2]);
+        // From the can's nozzle to where the paint lands. `worldPos` is the
+        // contact point itself, so spawning there (as this used to) put the
+        // mist on the surface, flying off along a fixed axis.
+        const from = player.toolTip ?? player.worldPos;
+        scratch.origin.set(from[0], from[1], from[2]);
         if (player.surfacePoint) {
           scratch.dir
             .set(player.surfacePoint[0], player.surfacePoint[1], player.surfacePoint[2])
             .sub(scratch.origin);
         } else {
-          scratch.dir.set(0, 0, -1);
+          scratch.dir.set(0, 0, 0);
         }
-        if (scratch.dir.lengthSq() < 1e-6) scratch.dir.set(0, 0, -1);
+        const reach = scratch.dir.length();
+        if (reach < 1e-3) camera.getWorldDirection(scratch.dir);
         scratch.dir.normalize();
 
         // Orthonormal basis around the spray axis for the cone spread.
@@ -114,18 +123,26 @@ export const SprayMist: React.FC<{ players: PlayerState[] }> = ({ players }) => 
         scratch.up.crossVectors(scratch.dir, scratch.right).normalize();
 
         const angle = Math.random() * Math.PI * 2;
+        // The fan widens with the nozzle size, matching the paint footprint.
+        const fan = THREE.MathUtils.clamp(player.sizeMultiplier ?? 1, 0.3, 2.5);
         // sqrt keeps the cone cross-section evenly filled rather than centre-heavy.
-        const radius = Math.sqrt(Math.random()) * 0.75;
+        // Sized so the cone meets the surface at the painted footprint (the
+        // same radius PlayerTool rings): lateral / forward speed = radius / reach.
+        const cone = reach > 0.2 ? (FOOTPRINT_SPRAY * fan * FORWARD_SPEED) / reach : 0.75 * fan;
+        const radius = Math.sqrt(Math.random()) * Math.min(cone, 4.5);
         scratch.spread
           .copy(scratch.right)
           .multiplyScalar(Math.cos(angle) * radius)
           .addScaledVector(scratch.up, Math.sin(angle) * radius);
 
         p.position.copy(scratch.origin).addScaledVector(scratch.dir, 0.12);
-        p.velocity.copy(scratch.dir).multiplyScalar(5.2 + Math.random() * 1.6).add(scratch.spread);
+        p.velocity
+          .copy(scratch.dir)
+          .multiplyScalar(FORWARD_SPEED + (Math.random() - 0.5) * 1.6)
+          .add(scratch.spread);
         p.maxLife = 0.34 + Math.random() * 0.22;
         p.life = p.maxLife;
-        p.scale = 0.05 + Math.random() * 0.11;
+        p.scale = (0.05 + Math.random() * 0.11) * (0.75 + 0.25 * fan);
         p.color.set(player.color);
       }
     }

@@ -67,9 +67,13 @@ class SoundEngine {
   }
 
   /**
-   * Continuous pressurized aerosol spray hiss
+   * Continuous pressurized aerosol spray hiss.
+   *
+   * `nozzle` is the tool size multiplier: a skinny cap hisses high and thin,
+   * a fat cap lower and fuller, which is how real caps sound and a second cue
+   * (besides the footprint) that the size changed.
    */
-  public startSpray(pressure = 1.0) {
+  public startSpray(pressure = 1.0, nozzle = 1) {
     if (this.isMuted || this.isSprayActive) return;
     this.init();
     if (!this.ctx || !this.noiseBuffer) return;
@@ -83,13 +87,14 @@ class SoundEngine {
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(4600, now);
+    const cap = Math.min(Math.max(nozzle, 0.4), 2);
+    filter.frequency.setValueAtTime(4600 * (1.25 - 0.25 * cap), now);
     filter.Q.setValueAtTime(1.1, now);
 
     const gain = this.ctx.createGain();
     gain.gain.setValueAtTime(0.001, now);
     gain.gain.exponentialRampToValueAtTime(
-      0.35 * Math.min(Math.max(pressure, 0.2), 1.2),
+      0.35 * Math.min(Math.max(pressure, 0.2), 1.2) * (0.85 + 0.15 * cap),
       now + 0.05
     );
 

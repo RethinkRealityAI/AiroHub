@@ -369,6 +369,18 @@ const StencilPreview: React.FC<{ asset: StampAsset; tint: string; size?: number 
   </span>
 );
 
+/**
+ * Graffiti names for the nozzle a size corresponds to. Real cans take
+ * swappable caps from a hairline "skinny" to a wide "fat", so the tool card
+ * names the cap rather than showing a percentage alone.
+ */
+function capName(size: number): string {
+  if (size <= 0.65) return 'Skinny cap';
+  if (size < 1.35) return 'Standard cap';
+  if (size < 1.75) return 'Fat cap';
+  return 'Super fat';
+}
+
 /** The swatches on the spray-can card. The full palette lives in the well. */
 const QUICK_COLORS = ['Flame', 'Ember', 'Lime', 'Aqua', 'Violet', 'Magenta']
   .map((name) => PALETTE.find((swatch) => swatch.name === name)?.hex)
@@ -783,17 +795,22 @@ export default function CanvasView() {
         const host = prev.find((p) => p.isHost) ?? makeHost(hostColor);
         const next: PlayerState[] = [host];
         for (const entry of roster) {
-          const existing = prev.find((p) => p.id === entry.id);
+          // Existing records are updated in place, never copied: the frame
+          // loop and the packet handlers hold this exact object, and a copy
+          // would drop whatever they write between this render and the ref
+          // catching up (a stroke starting, a size change).
+          const existing =
+            prev.find((p) => p.id === entry.id) ??
+            playersRef.current.find((p) => p.id === entry.id);
           next.push(
             existing
-              ? {
-                  ...existing,
+              ? Object.assign(existing, {
                   slot: entry.slot,
                   name: entry.name,
                   color: entry.color,
-                  mode: entry.mode,
+                  mode: entry.mode ?? existing.mode,
                   tool: entry.tool ?? existing.tool,
-                }
+                })
               : {
                   id: entry.id,
                   slot: entry.slot,
@@ -818,7 +835,10 @@ export default function CanvasView() {
         const now = Date.now();
         for (const p of prev) {
           if (p.isHost || next.some((n) => n.id === p.id)) continue;
-          if (now - p.lastActive < PROVISIONAL_GRACE_MS) next.push({ ...p, slot: next.length });
+          if (now - p.lastActive < PROVISIONAL_GRACE_MS) {
+            p.slot = next.length;
+            next.push(p);
+          }
         }
         return next;
       });
@@ -853,14 +873,18 @@ export default function CanvasView() {
       player.isPainting = painting;
       player.mode = 'motion';
       if (painting) {
-        if (player.tool === 'spray') sounds.startSpray(1);
+        if (player.tool === 'spray') sounds.startSpray(1, player.sizeMultiplier ?? 1);
         else sounds.startBrush();
       } else {
         sounds.stopSpray();
         sounds.stopBrush();
       }
-      // Mirror into state so the roster badges reflect who is painting.
-      setPlayers((prev) => prev.map((p) => (p.id === playerId ? { ...p, isPainting: painting } : p)));
+      // Re-render so the roster badges reflect who is painting. The record is
+      // mutated above and kept, never copied: a copy made here would replace
+      // the live object a render later, and whatever the next packets wrote
+      // into the old one in between (a trigger press, a size, a colour) was
+      // silently dropped.
+      setPlayers((prev) => [...prev]);
     });
 
     // Phones painting by touch resolve their own surface raycasts and send the
@@ -964,20 +988,16 @@ export default function CanvasView() {
     });
 
     conn.on('settings', ({ playerId, color, tool, size, playerName }) => {
-      ensurePlayer(playerId, { name: playerName, tool, color });
-      setPlayers((prev) =>
-        prev.map((p) =>
-          p.id === playerId
-            ? {
-                ...p,
-                color: color ?? p.color,
-                tool: tool ?? p.tool,
-                sizeMultiplier: size ?? p.sizeMultiplier,
-                name: playerName ?? p.name,
-              }
-            : p
-        )
-      );
+      const player = ensurePlayer(playerId, { name: playerName, tool, color });
+      if (!player) return;
+      // In place, for the same reason as the action handler: the frame loop
+      // reads this exact object, so a size change lands on the next frame,
+      // mid-stroke included.
+      if (typeof color === 'string' && color) player.color = color;
+      if (tool === 'spray' || tool === 'brush') player.tool = tool;
+      if (typeof size === 'number' && Number.isFinite(size)) player.sizeMultiplier = size;
+      if (typeof playerName === 'string' && playerName) player.name = playerName;
+      setPlayers((prev) => [...prev]);
     });
 
     conn.on('clear-canvas', () => {
@@ -1053,8 +1073,8 @@ export default function CanvasView() {
   /* ------------------------------ effects ------------------------------ */
 
   useEffect(() => {
-    // Warm the two most likely next objects so switching feels instant.
-    prefetchModels(['tool-spraycan', 'tool-brush'], null);
+    // The can is built in code; only the brush model is worth warming.
+    prefetchModels(['tool-brush'], null);
   }, []);
 
   const undoRef = useRef<() => void>(() => {});
@@ -1116,7 +1136,9 @@ export default function CanvasView() {
 
   const handleHostColor = (hex: string) => {
     setHostColor(hex);
-    setPlayers((prev) => prev.map((p) => (p.isHost ? { ...p, color: hex } : p)));
+    const host = playersRef.current.find((p) => p.isHost);
+    if (host) host.color = hex;
+    setPlayers((prev) => [...prev]);
   };
 
   const clearCanvas = () => {
@@ -1699,7 +1721,7 @@ export default function CanvasView() {
                       ? selectedStamp?.label ?? 'Stamp'
                       : hostTool === 'brush'
                         ? 'Soft bristle'
-                        : 'Fat cap'
+                        : capName(hostSize)
                   }
                   storageKey="tool"
                 >

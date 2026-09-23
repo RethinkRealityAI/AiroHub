@@ -53,8 +53,25 @@ const BRUSH_DAB_WORLD_RADIUS = 0.075;
 const PATH_STEP_PX = 4;
 /** Hard cap on path samples per frame so a teleporting cursor can't stall. */
 const MAX_STEPS_PER_FRAME = 36;
-/** Rays per spray path sample; the brush uses a fixed 3-dab ribbon instead. */
+/** Rays per spray path sample at size 1; the brush uses a 3-dab ribbon. */
 const SPRAY_RAYS_PER_STEP = 14;
+/** Ceiling on rays per sample, so a huge nozzle cannot stall the frame. */
+const SPRAY_MAX_RAYS_PER_STEP = 30;
+/** Largest single grain, in texture pixels. */
+const SPRAY_DOT_MAX_PX = 20;
+/**
+ * The soft body of the spray: a few wide, faint dabs near the centre of the
+ * cone under the grains. Grains alone read as a dotted line with speckle
+ * round it; real aerosol has a soft solid core that builds up where you
+ * linger. Each core dab is still anchored to its own raycast and capped in
+ * size (the brush already lays dabs this big), so it cannot smear across a
+ * UV island edge the way one cone-sized disc would.
+ */
+const SPRAY_CORE_DABS = 3;
+const SPRAY_CORE_SPREAD = 0.28; // fraction of the cone radius the core dabs land within
+const SPRAY_CORE_RADIUS = 0.34; // core dab radius as a fraction of the cone radius
+const SPRAY_CORE_OPACITY = 0.1;
+const SPRAY_CORE_MAX_PX = 26;
 
 /** Drip tuning. */
 const DRIP_HOLD_BEFORE_MS = 420;
@@ -116,7 +133,7 @@ export class SurfacePainter {
   }
 
   begin(config: PainterStrokeConfig) {
-    this.config = config;
+    this.config = { ...config };
     this.active = true;
     this.lastNdc = null;
     this.holdMs = 0;
@@ -133,6 +150,15 @@ export class SurfacePainter {
 
   get isActive() {
     return this.active;
+  }
+
+  /**
+   * Follows a size change in the middle of a stroke. Without it the size was
+   * sampled once at `begin`, so moving the slider (or the phone's) while
+   * spraying did nothing until the trigger was released.
+   */
+  setSize(size: number) {
+    if (Number.isFinite(size) && size > 0) this.config.size = size;
   }
 
   /** Clears cached texel densities — call when the target object changes. */
@@ -161,7 +187,10 @@ export class SurfacePainter {
     }
 
     const viewportH = Math.max(this.getViewportHeight(), 1);
-    const stepNdcSize = (PATH_STEP_PX / viewportH) * 2;
+    // A wide fan overlaps itself heavily at a 4 px step; stepping a little
+    // further keeps the raycast budget in line with the extra grains below.
+    const stepPx = PATH_STEP_PX * Math.sqrt(Math.max(1, this.config.size));
+    const stepNdcSize = (stepPx / viewportH) * 2;
 
     if (!this.lastNdc) {
       this.lastNdc = new THREE.Vector2(ndcX, ndcY);
@@ -298,13 +327,24 @@ export class SurfacePainter {
     }
 
     // Spray: a scattered cone of grains, dense in the middle, wispy outside.
+    //
+    // Coverage has to hold as the cone grows. Grains used to be capped at a
+    // radius the default size already reached, so a bigger nozzle scattered
+    // the same fourteen grains over four times the area: the wide fan came
+    // out so faint it read as no change at all. Above size 1 there are now
+    // proportionally more grains, each sqrt(size) larger, which keeps the
+    // coverage per area constant (rays x grain area / cone area) while the
+    // footprint really does widen.
     const screenRadiusPx = SPRAY_WORLD_RADIUS * size * fovScale;
     const ndcRadiusY = (screenRadiusPx / viewportH) * 2;
     const ndcRadiusX = ndcRadiusY / aspect;
+    const grow = Math.max(1, size);
+    const rays = Math.min(Math.round(SPRAY_RAYS_PER_STEP * grow), SPRAY_MAX_RAYS_PER_STEP);
+    const grainSize = size <= 1 ? size : Math.sqrt(size) * Math.sqrt((SPRAY_RAYS_PER_STEP * grow) / rays);
 
-    for (let i = 0; i < SPRAY_RAYS_PER_STEP; i++) {
+    for (let i = 0; i < rays; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const rand = i === 0 ? 0 : Math.pow(Math.random(), 1.6);
+      const rand = i === 0 ? 0 : Math.pow(Math.random(), 1.35);
       const hit =
         i === 0
           ? central
@@ -313,11 +353,28 @@ export class SurfacePainter {
 
       const scale = this.texelsPerWorldUnit(hit);
       const r = THREE.MathUtils.clamp(
-        SPRAY_DOT_WORLD_RADIUS * size * scale * (0.7 + Math.random() * 0.8),
+        SPRAY_DOT_WORLD_RADIUS * grainSize * scale * (0.7 + Math.random() * 0.8),
         0.8,
-        9
+        SPRAY_DOT_MAX_PX
       );
       out.push({ u: hit.uv.x, v: hit.uv.y, r, o: (1 - rand * 0.55) * (0.32 + Math.random() * 0.3) });
+    }
+
+    for (let i = 0; i < SPRAY_CORE_DABS; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const rand = Math.sqrt(Math.random()) * SPRAY_CORE_SPREAD;
+      const hit = this.cast(
+        ndcX + Math.cos(angle) * rand * ndcRadiusX,
+        ndcY + Math.sin(angle) * rand * ndcRadiusY
+      );
+      if (!hit || !hit.uv) continue;
+      const scale = this.texelsPerWorldUnit(hit);
+      const r = THREE.MathUtils.clamp(
+        SPRAY_WORLD_RADIUS * SPRAY_CORE_RADIUS * size * scale,
+        1,
+        SPRAY_CORE_MAX_PX
+      );
+      out.push({ u: hit.uv.x, v: hit.uv.y, r, o: SPRAY_CORE_OPACITY });
     }
   }
 

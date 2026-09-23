@@ -1,7 +1,7 @@
 /**
  * The handheld tool — the phone *is* the spray can.
  *
- * Renders the same generated can/brush models the studio uses, floating on the
+ * Renders the same can and brush the studio uses, floating on the
  * controller screen and rotating live with the phone's motion sensors. Tilt
  * the phone and the can tilts; pull the trigger and the can recoils, the mist
  * pours from the nozzle, and the aim ring lights up; shake the phone and it
@@ -11,7 +11,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadToolRig, ToolRig } from './toolRig';
+import { createToolRigSync, loadToolRig, ToolRig } from './toolRig';
 
 const PARTICLES = 260;
 
@@ -32,11 +32,9 @@ const BASE_LEAN = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.16, 0, 
 const POSTURE_X = { spray: Math.PI / 2, brush: Math.PI / 2 } as const;
 
 /**
- * Spin about the can's own vertical axis. The generated can model bakes
- * nozzle-orifice detail on several sides, so no spin can hide it entirely
- * (screenshot-verified sweep); zero avoids dragging the texture seam into
- * view. The *spray direction* cues — mist and halo — always point into the
- * screen regardless.
+ * Spin about the tool's own vertical axis. The can's orifice already faces
+ * into the screen, toward the studio, with the label's wordmark toward you,
+ * the way you hold a real can; the mist and halo point the same way.
  */
 const SPIN_Z = { spray: 0, brush: 0 } as const;
 
@@ -51,6 +49,8 @@ const BASE_Y = { spray: 1.25, brush: 1.05 } as const;
 interface HandheldToolProps {
   tool: 'spray' | 'brush';
   color: string;
+  /** Nozzle size multiplier: widens the mist fan and the aim halo. */
+  size?: number;
   pressed: boolean;
   shaking: boolean;
   /** Live device rotation relative to the calibration pose. */
@@ -60,14 +60,29 @@ interface HandheldToolProps {
 export const HandheldTool: React.FC<HandheldToolProps> = ({
   tool,
   color,
+  size = 1,
   pressed,
   shaking,
   getOrientation,
 }) => {
+  const fan = THREE.MathUtils.clamp(size, 0.3, 2.5);
   const groupRef = useRef<THREE.Group>(null);
   const recoilRef = useRef<THREE.Group>(null);
   const particlesRef = useRef<THREE.InstancedMesh>(null);
-  const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>({});
+  // The can is built in code and ready on the first frame; the brush loads.
+  const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>(() => {
+    const spray = createToolRigSync('spray', color);
+    return spray ? { spray } : {};
+  });
+  const rigsRef = useRef(rigs);
+  rigsRef.current = rigs;
+  useEffect(() => () => {
+    for (const rig of Object.values(rigsRef.current)) rig?.dispose?.();
+  }, []);
+  // The can wears the paint colour, like a real can's cap.
+  useEffect(() => {
+    rigs.spray?.setColor?.(color);
+  }, [rigs.spray, color]);
 
   const deviceQuat = useMemo(() => new THREE.Quaternion(), []);
   const displayQuat = useRef(new THREE.Quaternion());
@@ -89,6 +104,7 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
   const spawnDebt = useRef(0);
 
   useEffect(() => {
+    if (rigsRef.current[tool]) return;
     let cancelled = false;
     loadToolRig(tool)
       .then((rig) => {
@@ -133,6 +149,9 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
     }
     group.position.set(shakeX, idleY + shakeY + BASE_Y[tool], 0);
 
+    // The actuator sinks under the finger while the trigger is held.
+    rigsRef.current.spray?.setPressed?.(pressed && tool === 'spray' ? 1 : 0);
+
     // Trigger recoil: the can dips slightly into the grip when pressed.
     const recoil = recoilRef.current;
     if (recoil) {
@@ -164,17 +183,13 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
           if (index === undefined) break;
           const p = particles.current[index];
           p.pos.copy(nozzleWorld);
-          const spread = 0.55;
-          p.vel
-            .copy(sprayDir)
-            .multiplyScalar(4.2 + Math.random() * 1.6)
-            .add(
-              new THREE.Vector3(
-                (Math.random() - 0.5) * spread,
-                (Math.random() - 0.5) * spread,
-                (Math.random() - 0.5) * spread
-              )
-            );
+          const spread = 0.55 * fan;
+          // Jitter added component-wise: a Vector3 per particle here was
+          // ~190 allocations a second of garbage on the phone.
+          p.vel.copy(sprayDir).multiplyScalar(4.2 + Math.random() * 1.6);
+          p.vel.x += (Math.random() - 0.5) * spread;
+          p.vel.y += (Math.random() - 0.5) * spread;
+          p.vel.z += (Math.random() - 0.5) * spread;
           p.maxLife = 0.24 + Math.random() * 0.2;
           p.life = p.maxLife;
           p.scale = 0.035 + Math.random() * 0.075;
@@ -226,23 +241,28 @@ export const HandheldTool: React.FC<HandheldToolProps> = ({
               )}
             </group>
 
-            {/* Player-colour band around the body, matching the studio view.
-                The brush handle is far thinner than the can, so its band is a
-                slim grip ring rather than a can collar. */}
-            <mesh position={[0, 0, tool === 'spray' ? 0.55 : 0.72]}>
-              <torusGeometry args={tool === 'spray' ? [0.24, 0.05, 12, 28] : [0.09, 0.028, 12, 28]} />
-              <meshStandardMaterial
-                color={color}
-                emissive={color}
-                emissiveIntensity={pressed ? 1.1 : 0.5}
-                roughness={0.3}
-              />
-            </mesh>
+            {/* Paint-colour grip ring on the brush, matching the studio view.
+                The can needs none: its body is lacquered in the colour. */}
+            {tool === 'brush' && (
+              <mesh position={[0, 0, 0.72]}>
+                <torusGeometry args={[0.09, 0.028, 12, 28]} />
+                <meshStandardMaterial
+                  color={color}
+                  emissive={color}
+                  emissiveIntensity={pressed ? 1.1 : 0.5}
+                  roughness={0.3}
+                />
+              </mesh>
+            )}
           </group>
 
           {/* Aim halo just behind the nozzle, tilted into the screen — it
               hints at where the aerosol goes, and lights up while painting. */}
-          <mesh position={[0, 0.14, -0.34]} rotation={[-Math.PI / 2.6, 0, 0]}>
+          <mesh
+            position={[0, 0.14, -0.34]}
+            rotation={[-Math.PI / 2.6, 0, 0]}
+            scale={0.7 + 0.3 * fan}
+          >
             <ringGeometry args={[0.12, 0.16, 26]} />
             <meshBasicMaterial
               color={color}

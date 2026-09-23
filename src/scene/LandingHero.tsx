@@ -1,8 +1,9 @@
 /**
  * Landing hero — the spray can you get to play with before ever joining a room.
  *
- * A full-viewport R3F scene built around one commanding object: the real
- * spray-can model, scaled to own roughly half the stage. It floats over a
+ * A full-viewport R3F scene built around one commanding object: the app's
+ * spray can (built in code, so it is on stage from the first frame, with no
+ * download and no stand-in), scaled to own roughly half the stage. It floats over a
  * paintable backdrop, follows the pointer on a critically-damped spring, banks
  * into its own velocity, and sprays while it moves — an additive particle cone
  * out of the nozzle plus soft paint splats stamped into a CanvasTexture on the
@@ -23,7 +24,8 @@
  *                 live splats and gravity drips
  *   motes         slow additive dust drifting through the volume
  *   halo          soft paint-coloured bloom behind the can
- *   can           rigged GLB with a fresnel rim injected into its materials
+ *   can           procedural can, lacquered in the live paint colour, with a
+ *                 fresnel rim injected into its materials
  *   mist          instanced additive puffs, pooled and capped
  *
  * Deliberately self-contained: no CDN environment maps (StudioEnvironment is
@@ -35,10 +37,10 @@
  * and motes are fixed-size pools; every vector, colour and matrix used per
  * frame is created once in a useMemo scratch block.
  */
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadToolRig } from './toolRig';
+import { createSprayCanRig } from './toolRig';
 import { AimTracker } from '../utils/motion';
 import { StudioEnvironment } from './StudioEnvironment';
 
@@ -260,20 +262,29 @@ interface RimUniforms {
 }
 
 /**
- * Gives the loaded rig its hero finish: private copies of every material (the
- * GLB cache is shared with the studio, so the originals must not be touched)
- * carrying a fresnel rim term injected straight into MeshStandardMaterial's
- * fragment shader. The rim is what turns a white aerosol can into a neon
- * object without adding a single extra draw call or light.
+ * Gives the rig its hero finish: private copies of every material (the can's
+ * metal and label materials are shared with every other can in the app, so
+ * the originals must not be touched) carrying a fresnel rim term injected
+ * straight into MeshStandardMaterial's fragment shader. The rim is what turns
+ * the can into a neon object without adding a single extra draw call or light.
+ * `copies` maps each original to its copy, so callers can find the copies of
+ * the paint-coloured parts.
  */
-function applyHeroSkin(root: THREE.Object3D, rim: RimUniforms): THREE.MeshStandardMaterial[] {
+function applyHeroSkin(
+  root: THREE.Object3D,
+  rim: RimUniforms
+): { owned: THREE.MeshStandardMaterial[]; copies: Map<THREE.Material, THREE.MeshStandardMaterial> } {
   const owned: THREE.MeshStandardMaterial[] = [];
+  const copies = new Map<THREE.Material, THREE.MeshStandardMaterial>();
 
   const skin = (material: THREE.Material): THREE.Material => {
     const std = material as THREE.MeshStandardMaterial;
     if (!std.isMeshStandardMaterial) return material;
+    const existing = copies.get(material);
+    if (existing) return existing;
     const clone = std.clone();
-    clone.envMapIntensity = 1.45;
+    copies.set(material, clone);
+    clone.envMapIntensity = Math.max(clone.envMapIntensity, 1.3);
     clone.emissiveIntensity = 1;
     clone.onBeforeCompile = (shader) => {
       shader.uniforms.uRimColor = rim.uRimColor;
@@ -316,7 +327,7 @@ function applyHeroSkin(root: THREE.Object3D, rim: RimUniforms): THREE.MeshStanda
       : skin(mesh.material);
   });
 
-  return owned;
+  return { owned, copies };
 }
 
 interface Puff {
@@ -353,7 +364,6 @@ function HeroScene() {
   const puffMeshRef = useRef<THREE.InstancedMesh>(null);
   const motesRef = useRef<THREE.Points>(null);
 
-  const [rig, setRig] = useState<THREE.Group | null>(null);
 
   // ---- fresnel rim, shared by every material on the rig
   const rim = useMemo<RimUniforms>(
@@ -364,29 +374,29 @@ function HeroScene() {
     }),
     []
   );
-  const heroMats = useRef<THREE.MeshStandardMaterial[]>([]);
-
-  // ---- spray-can model (async; fallback stand-in until it lands / if it fails)
-  useEffect(() => {
-    let cancelled = false;
-    let mine: THREE.MeshStandardMaterial[] = [];
-    loadToolRig('spray')
-      .then(({ root }) => {
-        if (cancelled) return;
-        // The rig plants the nozzle tip at its origin with the body running
-        // along +Z; rotating X by +PI/2 stands it upright, nozzle on top.
-        root.rotation.x = Math.PI / 2;
-        mine = applyHeroSkin(root, rim);
-        heroMats.current = mine;
-        setRig(root);
-      })
-      .catch((err) => console.warn('[LandingHero] spray can failed to load, using stand-in', err));
-    return () => {
-      cancelled = true;
-      heroMats.current = [];
-      for (const material of mine) material.dispose();
-    };
+  // ---- the spray can. Built synchronously, so it is on stage in the first
+  // frame. The rig plants the nozzle tip at its origin with the body running
+  // along +Z; rotating X by +PI/2 stands it upright, nozzle on top.
+  const hero = useMemo(() => {
+    const rig = createSprayCanRig(PALETTE[0]);
+    rig.root.rotation.x = Math.PI / 2;
+    const { owned, copies } = applyHeroSkin(rig.root, rim);
+    // The copies of the lacquered body and the actuator: these take the
+    // colour currently being sprayed.
+    const tinted = (rig.ownMaterials ?? [])
+      .map((m) => copies.get(m))
+      .filter((m): m is THREE.MeshStandardMaterial => Boolean(m));
+    return { root: rig.root, owned, tinted, dispose: rig.dispose, setPressed: rig.setPressed };
   }, [rim]);
+  const heroMats = useRef<THREE.MeshStandardMaterial[]>(hero.owned);
+  heroMats.current = hero.owned;
+  useEffect(
+    () => () => {
+      for (const material of hero.owned) material.dispose();
+      hero.dispose?.();
+    },
+    [hero]
+  );
 
   // ---- splat texture (plain 2D canvas → CanvasTexture on the backdrop)
   const splat = useMemo(() => {
@@ -926,8 +936,12 @@ function HeroScene() {
     rim.uRimStrength.value = 0.55 + intensity * 0.85;
     for (const material of heroMats.current) {
       material.emissive.copy(scratch.tint);
-      material.emissiveIntensity = 0.05 + intensity * 0.16;
+      material.emissiveIntensity = 0.04 + intensity * 0.12;
     }
+    // The can is lacquered in the colour it is spraying, like a real one,
+    // and its actuator sinks while it sprays hard.
+    for (const material of hero.tinted) material.color.copy(scratch.tint);
+    hero.setPressed?.(THREE.MathUtils.smoothstep(intensity, BASE_INTENSITY, 0.9));
     if (haloRef.current) {
       const halo = haloRef.current;
       halo.position.set(canPos.current.x, canPos.current.y, canPos.current.z - 1.2);
@@ -1263,32 +1277,14 @@ function HeroScene() {
           top of it. */}
       <sprite ref={haloRef} material={haloMat} renderOrder={-1} />
 
-      {/* The spray can (or a stand-in until the GLB lands / if it never does).
-          The rig's origin is the nozzle with the body hanging below after the
-          upright rotation, so it is lifted by half its length to centre the
-          body on the group origin — tilts pivot around the can's middle.
-          Group scale is driven per-frame from the layout. */}
+      {/* The spray can. The rig's origin is the nozzle with the body hanging
+          below after the upright rotation, so it is lifted by half its length
+          to centre the body on the group origin — tilts pivot around the
+          can's middle. Group scale is driven per-frame from the layout. */}
       <group ref={canGroupRef} position={[2.5, 0, CAN_Z]}>
-        {rig ? (
-          <group position={[0, CAN_LENGTH / 2, 0]}>
-            <primitive object={rig} />
-          </group>
-        ) : (
-          <group>
-            <mesh position={[0, -0.12, 0]}>
-              <cylinderGeometry args={[0.24, 0.24, 1.1, 24]} />
-              <meshStandardMaterial color="#1d1d2a" roughness={0.32} metalness={0.65} />
-            </mesh>
-            <mesh position={[0, 0.5, 0]}>
-              <cylinderGeometry args={[0.15, 0.21, 0.14, 20]} />
-              <meshStandardMaterial color="#3a3a4c" roughness={0.4} metalness={0.5} />
-            </mesh>
-            <mesh position={[0, 0.62, 0]}>
-              <cylinderGeometry args={[0.05, 0.05, 0.12, 12]} />
-              <meshStandardMaterial color="#f4f4f7" roughness={0.5} />
-            </mesh>
-          </group>
-        )}
+        <group position={[0, CAN_LENGTH / 2, 0]}>
+          <primitive object={hero.root} />
+        </group>
 
         {/* Nozzle anchor: particle origin plus the muzzle flash. */}
         <group ref={nozzleRef} position={[0, CAN_LENGTH * 0.55, 0]}>

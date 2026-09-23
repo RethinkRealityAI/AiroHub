@@ -20,7 +20,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadToolRig, ToolRig } from './toolRig';
+import { createToolRigSync, loadToolRig, ToolRig } from './toolRig';
 import { NameTag } from './NameTag';
 import { PlayerState } from '../types';
 
@@ -42,6 +42,15 @@ const POSTURE_X = { spray: Math.PI / 2, brush: -0.92 } as const;
 
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 
+/**
+ * Footprint ring radius at size 1, in world units: where the visible body of
+ * a stroke lands. `SurfacePainter` scatters its faintest grains out to 0.55,
+ * but nearly all of the colour lands inside about 0.42, and the brush lays
+ * about 0.25 either side of the path. Both scale with the nozzle size.
+ */
+export const FOOTPRINT_SPRAY = 0.42;
+export const FOOTPRINT_BRUSH = 0.25;
+
 export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => {
   const { color, name: playerName, slot: playerSlot } = player;
   // The tool is tracked as state driven from the LIVE player object each
@@ -53,10 +62,26 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
 
   const groupRef = useRef<THREE.Group>(null);
   const reticleRef = useRef<THREE.Group>(null);
+  const footprintRef = useRef<THREE.Group>(null);
+  const footprintMat = useRef<THREE.MeshBasicMaterial>(null);
   const reticleMats = useRef<THREE.MeshBasicMaterial[]>([]);
   const guideRef = useRef<THREE.Mesh>(null);
   const guideMat = useRef<THREE.MeshBasicMaterial>(null);
-  const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>({});
+  // The can is built in code, so it is there on the very first frame; the
+  // brush still arrives from the model registry.
+  const [rigs, setRigs] = useState<Partial<Record<'spray' | 'brush', ToolRig>>>(() => {
+    const spray = createToolRigSync('spray', player.color);
+    return spray ? { spray } : {};
+  });
+  const rigsRef = useRef(rigs);
+  rigsRef.current = rigs;
+  useEffect(() => () => {
+    for (const rig of Object.values(rigsRef.current)) rig?.dispose?.();
+  }, []);
+  const appliedColor = useRef('');
+  const pressAmount = useRef(0);
+  /** The reticle eases toward the nozzle size rather than snapping. */
+  const reticleSize = useRef(player.sizeMultiplier ?? 1);
 
   const currentPos = useRef(new THREE.Vector3(...player.worldPos));
   const currentQuat = useRef(new THREE.Quaternion());
@@ -77,8 +102,18 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
     }),
     []
   );
+  /**
+   * The surface normal, filtered. Hit normals come from single triangles, so
+   * sweeping across a curved model makes them step from facet to facet; the
+   * tool hovers a full unit off the surface along that normal, which turned
+   * every step into a visible hop of the can. Filtering the normal (not the
+   * contact point) keeps the paint exact and the can smooth.
+   */
+  const smoothNormal = useRef(new THREE.Vector3(0, 0, 1));
+  const hadSurface = useRef(false);
 
   useEffect(() => {
+    if (rigsRef.current[tool]) return;
     let cancelled = false;
     loadToolRig(tool)
       .then((rig) => {
@@ -95,9 +130,27 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
     const group = groupRef.current;
     if (!group) return;
 
+    // The can wears the player's paint colour; only touch the material when
+    // the colour actually changes.
+    const rigNow = rigsRef.current[tool];
+    if (rigNow?.setColor && appliedColor.current !== player.color) {
+      rigNow.setColor(player.color);
+      appliedColor.current = player.color;
+    }
+    if (rigNow?.setPressed) {
+      const target = player.isPainting ? 1 : 0;
+      pressAmount.current += (target - pressAmount.current) * (1 - Math.exp(-30 * delta));
+      rigNow.setPressed(pressAmount.current);
+    }
+
     const { surfacePoint, surfaceNormal, worldPos: position, isPainting: active } = player;
     const s = scratch;
-    const hover = active ? HOVER[tool] : HOVER[tool] + 0.65;
+    // Ease the footprint toward the nozzle size rather than snapping.
+    const sizeTarget = THREE.MathUtils.clamp(player.sizeMultiplier ?? 1, 0.3, 2.5);
+    reticleSize.current += (sizeTarget - reticleSize.current) * (1 - Math.exp(-12 * delta));
+    // A wider fan is sprayed from further back, as it would be by hand.
+    const reach = tool === 'spray' ? 0.8 + 0.2 * reticleSize.current : 1;
+    const hover = (active ? HOVER[tool] : HOVER[tool] + 0.65) * reach;
 
     // Facing fallback: the camera's horizontal look direction.
     s.camHoriz.set(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -108,6 +161,13 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
     const hasSurface = Boolean(surfacePoint && surfaceNormal);
     if (hasSurface) {
       s.normal.set(surfaceNormal![0], surfaceNormal![1], surfaceNormal![2]).normalize();
+      const n = smoothNormal.current;
+      if (!hadSurface.current) n.copy(s.normal);
+      else n.lerp(s.normal, 1 - Math.exp(-14 * delta));
+      // Opposite normals can cancel to nothing mid-blend; take the new one.
+      if (n.lengthSq() < 1e-4) n.copy(s.normal);
+      n.normalize();
+      s.normal.copy(n);
       s.surface.set(surfacePoint![0], surfacePoint![1], surfacePoint![2]);
       s.targetPos.copy(s.surface).addScaledVector(s.normal, hover);
 
@@ -127,6 +187,8 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
       s.up.copy(WORLD_UP);
     }
 
+    hadSurface.current = hasSurface;
+
     s.matrix.lookAt(s.zero, s.face, s.up);
     s.targetQuat.setFromRotationMatrix(s.matrix);
 
@@ -139,6 +201,12 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
 
     group.position.copy(currentPos.current);
     group.quaternion.copy(currentQuat.current);
+    // Published for the mist, which has to leave the nozzle rather than the
+    // contact point. Written into one tuple per player, not reallocated.
+    const tip = (player.toolTip ??= [0, 0, 0]);
+    tip[0] = currentPos.current.x;
+    tip[1] = currentPos.current.y;
+    tip[2] = currentPos.current.z;
 
     /* ---------- surface reticle + guide line (world-anchored) ---------- */
 
@@ -153,6 +221,14 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
         const pulse = active ? 1 + Math.sin(performance.now() / 90) * 0.08 : 1;
         reticle.scale.setScalar(pulse * (active ? 0.92 : 1.12));
         for (const mat of reticleMats.current) mat.opacity = active ? 0.95 : 0.55;
+        // The footprint ring is the area the nozzle actually covers, so
+        // turning the size up visibly widens what you are about to paint.
+        const footprint = footprintRef.current;
+        if (footprint) {
+          const radius = (tool === 'spray' ? FOOTPRINT_SPRAY : FOOTPRINT_BRUSH) * reticleSize.current;
+          footprint.scale.setScalar(radius / pulse / (active ? 0.92 : 1.12));
+        }
+        if (footprintMat.current) footprintMat.current.opacity = active ? 0.5 : 0.3;
       }
     }
 
@@ -196,8 +272,9 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
             </mesh>
           )}
 
-          {/* Player-colour band around the body. */}
-          {rig && (
+          {/* Player-colour grip ring. The can is lacquered in the player's
+              colour already; the brush handle is not. */}
+          {rig && tool === 'brush' && (
             <mesh position={[0, 0, rig.length * 0.38]}>
               <torusGeometry args={[0.21, 0.05, 10, 24]} />
               <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.55} roughness={0.35} />
@@ -212,6 +289,30 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
 
       {/* --------------------- world-anchored aim guides --------------------- */}
       <group ref={reticleRef} visible={false}>
+        {/* Footprint: a unit ring plus a faint fill, scaled to the nozzle. */}
+        <group ref={footprintRef}>
+          <mesh>
+            <ringGeometry args={[0.95, 1, 48]} />
+            <meshBasicMaterial
+              ref={footprintMat}
+              color={color}
+              transparent
+              opacity={0.35}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+          <mesh>
+            <circleGeometry args={[0.95, 48]} />
+            <meshBasicMaterial
+              color={color}
+              transparent
+              opacity={0.07}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+        </group>
         <mesh>
           <ringGeometry args={[0.16, 0.2, 28]} />
           <meshBasicMaterial

@@ -14,7 +14,7 @@ Three routes, all client-side:
 
 | Route              | What it is                                                            |
 | ------------------ | --------------------------------------------------------------------- |
-| `/`                | Landing page — starts a room and shows the QR code to join it          |
+| `/`                | Landing page — one **Launch Studio** button; the studio opens with its QR |
 | `/canvas/:roomId`  | The studio. Full 3D stage, orbit, object picker, AI copilot            |
 | `/controller/:roomId` | The phone controller. Aim, paint or pad                            |
 
@@ -37,6 +37,30 @@ six gradient presets in the spray-paint palette, six solid colours, a custom sol
 and a crossfade between them. The glass tint, tiles and buttons take their accent
 from the chosen atmosphere, and the choice is remembered per browser. Only the
 studio screen changes; phones keep their own look.
+
+### The spray can
+
+The can is built in code (`src/scene/sprayCan.ts`), not downloaded: a lathe-profile
+body with rolled seams, a valve cup, an actuator with its orifice, and a printed label
+drawn once onto a canvas. It is on screen from the first frame everywhere it appears
+(landing hero, studio, tool card, phone), costs about 3k triangles, and its body and
+actuator are lacquered in the paint colour, so each painter's can on the stage is
+theirs at a glance. The actuator sinks while the trigger is held. Geometry, the label
+and the untinted materials are shared by every can; only the two tinted materials are
+per can. The brush is still the generated GLB.
+
+### Spray size
+
+The size slider (studio card, phone dock) drives everything the nozzle does: the cone
+`SurfacePainter` sprays into, the footprint ring on the model, the mist fan and the
+hiss (skinny caps hiss higher). Above 100% the painter adds proportionally more,
+larger grains so coverage per area holds as the fan widens, plus a soft core of a few
+wide faint dabs, each still anchored to its own raycast. Size changes apply mid-stroke.
+
+```bash
+npm run build && npx vite preview --port 4173 &
+node scripts/preview/verify-spray-size.mjs   # paints at 40/100/200% and measures the band
+```
 
 ### Painting model
 
@@ -65,7 +89,9 @@ Motion is sent at 30 Hz and interpolated to frame rate on the studio side.
 
 ## 3D models
 
-All sixteen models are generated with the [Meshy](https://meshy.ai) text-to-3D API and
+All sixteen models are generated with the [Meshy](https://meshy.ai) text-to-3D API
+(`tool-spraycan.glb` is kept for the contact sheet, but the app now builds its can in
+code — see above) and
 committed to `public/models/` as optimised GLBs (~6 MB for the whole set).
 
 ```bash
