@@ -54,7 +54,8 @@ import { StampStrip } from '../ui/StampSheet';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
-import { AimTracker, ShakeDetector } from '../utils/motion';
+import { AimTracker, ShakeDetector, sampleTime } from '../utils/motion';
+import type { SampleClock } from '../utils/motion';
 import { useFlags } from '../config/flags';
 import { track } from '../analytics/track';
 import { FeedbackButton } from '../feedback/FeedbackButton';
@@ -75,12 +76,14 @@ const MOTION_INTERVAL = 1000 / MOTION_HZ;
 function AimStage({
   tool,
   color,
+  size,
   pressed,
   shaking,
   trackerRef,
 }: {
   tool: 'spray' | 'brush';
   color: string;
+  size: number;
   pressed: boolean;
   shaking: boolean;
   trackerRef: React.MutableRefObject<AimTracker>;
@@ -100,6 +103,7 @@ function AimStage({
       <HandheldTool
         tool={tool}
         color={color}
+        size={size}
         pressed={pressed}
         shaking={shaking}
         getOrientation={getOrientation}
@@ -240,7 +244,7 @@ function PreviewStage({
       painter.begin({ tool: liveConfig.current.tool, size: liveConfig.current.size });
       onStamps([], 'start');
       navigator.vibrate?.(12);
-      if (liveConfig.current.tool === 'spray') sounds.startSpray(1);
+      if (liveConfig.current.tool === 'spray') sounds.startSpray(1, liveConfig.current.size);
       else sounds.startBrush();
     };
     const onMove = (event: PointerEvent) => {
@@ -461,6 +465,35 @@ export default function ControllerView() {
   const [tool, setTool] = useState<'spray' | 'brush'>('spray');
   const [color, setColor] = useState('#FF4D1C');
   const [toolSize, setToolSize] = useState(1);
+  /**
+   * Size changes, throttled. A slider drag fires a change per pixel, and each
+   * one used to be its own broadcast: dozens a second, sharing the channel's
+   * rate budget with the motion stream. At most one every 120 ms goes out,
+   * and the last value always does.
+   */
+  const sizeSend = useRef<{ at: number; timer: ReturnType<typeof setTimeout> | null; value: number }>({
+    at: 0,
+    timer: null,
+    value: 1,
+  });
+  const sendSize = useCallback((value: number) => {
+    const state = sizeSend.current;
+    state.value = value;
+    const flush = () => {
+      state.timer = null;
+      state.at = performance.now();
+      connectionRef.current?.emit('settings', { playerId: playerIdRef.current, size: state.value });
+    };
+    const wait = 120 - (performance.now() - state.at);
+    if (wait <= 0) flush();
+    else if (!state.timer) state.timer = setTimeout(flush, wait);
+  }, []);
+  useEffect(
+    () => () => {
+      if (sizeSend.current.timer) clearTimeout(sizeSend.current.timer);
+    },
+    []
+  );
   const [objectId, setObjectId] = useState<TargetObjectType>('skateboard');
   const objectIdRef = useRef(objectId);
   useEffect(() => {
@@ -524,6 +557,7 @@ export default function ControllerView() {
   }, []);
   const shakeDetector = useRef(new ShakeDetector());
   const lastMotionSend = useRef(0);
+  const sampleClock = useRef<SampleClock>({ last: -1, interval: 1000 / 60 });
   const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live mirrors read by sensor callbacks and the connection effect, both of
@@ -721,9 +755,9 @@ export default function ControllerView() {
     const { alpha, beta, gamma } = event;
     if (alpha === null || beta === null || gamma === null) return;
 
-    const sample = trackerRef.current.update(alpha, beta, gamma, performance.now());
-
     const now = performance.now();
+    const sample = trackerRef.current.update(alpha, beta, gamma, sampleTime(sampleClock.current, now));
+
     if (now - lastMotionSend.current < MOTION_INTERVAL) return;
     lastMotionSend.current = now;
 
@@ -923,7 +957,7 @@ export default function ControllerView() {
     trackerRef.current.notifyTriggerEdge(true, performance.now());
     setTriggerActive(true);
     navigator.vibrate?.(22);
-    if (live.current.tool === 'spray') sounds.startSpray(1);
+    if (live.current.tool === 'spray') sounds.startSpray(1, live.current.toolSize);
     else sounds.startBrush();
     connectionRef.current?.emit('action', {
       playerId: playerIdRef.current,
@@ -1204,6 +1238,7 @@ export default function ControllerView() {
                     <AimStage
                       tool={tool}
                       color={color}
+                      size={toolSize}
                       pressed={triggerActive}
                       shaking={shaking}
                       trackerRef={trackerRef}
@@ -1375,7 +1410,7 @@ export default function ControllerView() {
                     padLast.current = null;
                     handleStamps([], 'start');
                     navigator.vibrate?.(12);
-                    if (live.current.tool === 'spray') sounds.startSpray(1);
+                    if (live.current.tool === 'spray') sounds.startSpray(1, live.current.toolSize);
                     else sounds.startBrush();
                     const { u, v } = padCoords(e);
                     padStroke(u, v, true);
@@ -1458,7 +1493,7 @@ export default function ControllerView() {
               onChange={(e) => {
                 const value = Number(e.target.value);
                 setToolSize(value);
-                connectionRef.current?.emit('settings', { playerId: playerIdRef.current, size: value });
+                sendSize(value);
               }}
               className="airo-slider flex-1"
               aria-label="Tool size"

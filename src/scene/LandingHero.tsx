@@ -1,8 +1,9 @@
 /**
  * Landing hero — the spray can you get to play with before ever joining a room.
  *
- * A full-viewport R3F scene built around one commanding object: the real
- * spray-can model, scaled to own roughly half the stage. It floats over a
+ * A full-viewport R3F scene built around one commanding object: the app's
+ * spray can (built in code, so it is on stage from the first frame, with no
+ * download and no stand-in), scaled to own roughly half the stage. It floats over a
  * paintable backdrop, follows the pointer on a critically-damped spring, banks
  * into its own velocity, and sprays while it moves — an additive particle cone
  * out of the nozzle plus soft paint splats stamped into a CanvasTexture on the
@@ -23,7 +24,8 @@
  *                 live splats and gravity drips
  *   motes         slow additive dust drifting through the volume
  *   halo          soft paint-coloured bloom behind the can
- *   can           rigged GLB with a fresnel rim injected into its materials
+ *   can           procedural can, lacquered in the live paint colour, with a
+ *                 fresnel rim injected into its materials
  *   mist          instanced additive puffs, pooled and capped
  *
  * Deliberately self-contained: no CDN environment maps (StudioEnvironment is
@@ -35,11 +37,13 @@
  * and motes are fixed-size pools; every vector, colour and matrix used per
  * frame is created once in a useMemo scratch block.
  */
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { loadToolRig } from './toolRig';
-import { AimTracker } from '../utils/motion';
+import { createSprayCanRig } from './toolRig';
+import { TiltAim } from '../utils/tiltAim';
+import { sampleTime } from '../utils/motion';
+import type { SampleClock } from '../utils/motion';
 import { StudioEnvironment } from './StudioEnvironment';
 
 /** Splat colours, cycled slowly. Matches the app's controller palette. */
@@ -260,20 +264,29 @@ interface RimUniforms {
 }
 
 /**
- * Gives the loaded rig its hero finish: private copies of every material (the
- * GLB cache is shared with the studio, so the originals must not be touched)
- * carrying a fresnel rim term injected straight into MeshStandardMaterial's
- * fragment shader. The rim is what turns a white aerosol can into a neon
- * object without adding a single extra draw call or light.
+ * Gives the rig its hero finish: private copies of every material (the can's
+ * metal and label materials are shared with every other can in the app, so
+ * the originals must not be touched) carrying a fresnel rim term injected
+ * straight into MeshStandardMaterial's fragment shader. The rim is what turns
+ * the can into a neon object without adding a single extra draw call or light.
+ * `copies` maps each original to its copy, so callers can find the copies of
+ * the paint-coloured parts.
  */
-function applyHeroSkin(root: THREE.Object3D, rim: RimUniforms): THREE.MeshStandardMaterial[] {
+function applyHeroSkin(
+  root: THREE.Object3D,
+  rim: RimUniforms
+): { owned: THREE.MeshStandardMaterial[]; copies: Map<THREE.Material, THREE.MeshStandardMaterial> } {
   const owned: THREE.MeshStandardMaterial[] = [];
+  const copies = new Map<THREE.Material, THREE.MeshStandardMaterial>();
 
   const skin = (material: THREE.Material): THREE.Material => {
     const std = material as THREE.MeshStandardMaterial;
     if (!std.isMeshStandardMaterial) return material;
+    const existing = copies.get(material);
+    if (existing) return existing;
     const clone = std.clone();
-    clone.envMapIntensity = 1.45;
+    copies.set(material, clone);
+    clone.envMapIntensity = Math.max(clone.envMapIntensity, 1.3);
     clone.emissiveIntensity = 1;
     clone.onBeforeCompile = (shader) => {
       shader.uniforms.uRimColor = rim.uRimColor;
@@ -316,7 +329,7 @@ function applyHeroSkin(root: THREE.Object3D, rim: RimUniforms): THREE.MeshStanda
       : skin(mesh.material);
   });
 
-  return owned;
+  return { owned, copies };
 }
 
 interface Puff {
@@ -353,7 +366,6 @@ function HeroScene() {
   const puffMeshRef = useRef<THREE.InstancedMesh>(null);
   const motesRef = useRef<THREE.Points>(null);
 
-  const [rig, setRig] = useState<THREE.Group | null>(null);
 
   // ---- fresnel rim, shared by every material on the rig
   const rim = useMemo<RimUniforms>(
@@ -364,29 +376,29 @@ function HeroScene() {
     }),
     []
   );
-  const heroMats = useRef<THREE.MeshStandardMaterial[]>([]);
-
-  // ---- spray-can model (async; fallback stand-in until it lands / if it fails)
-  useEffect(() => {
-    let cancelled = false;
-    let mine: THREE.MeshStandardMaterial[] = [];
-    loadToolRig('spray')
-      .then(({ root }) => {
-        if (cancelled) return;
-        // The rig plants the nozzle tip at its origin with the body running
-        // along +Z; rotating X by +PI/2 stands it upright, nozzle on top.
-        root.rotation.x = Math.PI / 2;
-        mine = applyHeroSkin(root, rim);
-        heroMats.current = mine;
-        setRig(root);
-      })
-      .catch((err) => console.warn('[LandingHero] spray can failed to load, using stand-in', err));
-    return () => {
-      cancelled = true;
-      heroMats.current = [];
-      for (const material of mine) material.dispose();
-    };
+  // ---- the spray can. Built synchronously, so it is on stage in the first
+  // frame. The rig plants the nozzle tip at its origin with the body running
+  // along +Z; rotating X by +PI/2 stands it upright, nozzle on top.
+  const hero = useMemo(() => {
+    const rig = createSprayCanRig(PALETTE[0]);
+    rig.root.rotation.x = Math.PI / 2;
+    const { owned, copies } = applyHeroSkin(rig.root, rim);
+    // The copies of the lacquered body and the actuator: these take the
+    // colour currently being sprayed.
+    const tinted = (rig.ownMaterials ?? [])
+      .map((m) => copies.get(m))
+      .filter((m): m is THREE.MeshStandardMaterial => Boolean(m));
+    return { root: rig.root, owned, tinted, dispose: rig.dispose, setPressed: rig.setPressed };
   }, [rim]);
+  const heroMats = useRef<THREE.MeshStandardMaterial[]>(hero.owned);
+  heroMats.current = hero.owned;
+  useEffect(
+    () => () => {
+      for (const material of hero.owned) material.dispose();
+      hero.dispose?.();
+    },
+    [hero]
+  );
 
   // ---- splat texture (plain 2D canvas → CanvasTexture on the backdrop)
   const splat = useMemo(() => {
@@ -460,9 +472,9 @@ function HeroScene() {
    *
    *  · pointer and touch are ABSOLUTE — the canvas-relative position is the
    *    aim, so the spray always comes out of wherever the finger actually is.
-   *    Gyro is RELATIVE (a phone has no pointer): it integrates the tracker's
-   *    deltas onto whatever the last input left behind, which also re-bases it
-   *    on every touch instead of yanking the can back to its own origin;
+   *    Tilt is absolute around a neutral pose (see utils/tiltAim): hold a
+   *    tilt and the can stays there. The neutral is re-based whenever a touch
+   *    ends, so tilting carries on from wherever the finger left the aim;
    *  · mouse hover paints automatically as it moves (as before), and holding
    *    the button is a full trigger pull;
    *  · a finger on the stage IS the trigger — the can follows it, sprays the
@@ -470,9 +482,13 @@ function HeroScene() {
    *    is claimed with preventDefault so painting never scrolls the page.
    *    Touches that start on the copy or the glass card never reach the
    *    canvas element, so the page scrolls normally there;
-   *  · device rotation drives the can through the same AimTracker the real
-   *    controller uses — move the phone and it sprays automatically as it
-   *    sweeps. iOS gates orientation events behind a permission that must be
+   *  · tilting the phone steers the can like a spirit level: right edge down
+   *    moves it right, top edge down (tipping the phone away) moves it down,
+   *    and it sprays as it sweeps. This deliberately does NOT use the
+   *    controller's AimTracker: that models a phone pointed at a TV and
+   *    ignores roll by design, which on this page (phone in hand, screen
+   *    toward you) left side-to-side tilt dead and read pitch backwards.
+   *    iOS gates orientation events behind a permission that must be
    *    requested from a user gesture, so the first touch on the stage doubles
    *    as the opt-in; Android needs no permission and simply starts working.
    */
@@ -502,10 +518,9 @@ function HeroScene() {
     };
   }, []);
   const gyro = useRef({
-    tracker: null as AimTracker | null,
-    x: 0,
-    y: 0,
-    seeded: false,
+    tilt: null as TiltAim | null,
+    /** De-bunches event stamps when frames drop (see motion.ts sampleTime). */
+    clock: { last: -1, interval: 1000 / 60 } as SampleClock,
     permissionAsked: false,
   });
   useEffect(() => {
@@ -558,37 +573,39 @@ function HeroScene() {
     };
     const onTouchEnd = () => {
       pointerRef.current.pressed = false;
+      // Tilt picks up from where the finger left the aim.
+      const p = pointerRef.current;
+      gyro.current.tilt?.rebase(p.x, p.y);
     };
 
-    // Gyro aim, sharing the controller's tracker. Only meaningful deltas
-    // count as movement, so a phone at rest still settles into the idle
-    // drift instead of pinning the can wherever it last aimed. The deltas are
-    // integrated onto the current aim rather than replacing it: the tracker's
-    // normalised origin has nothing to do with where the finger last was, so
-    // an absolute mapping would teleport the can on the first sample after
-    // every touch. Its full 0..1 range now spans the whole clamped viewport.
+    // Tilt aim. Absolute around a neutral pose, so a held tilt holds the
+    // can; the neutral is captured on the first reading and re-based after
+    // every touch. A tilted or moving phone keeps the aim live, so the can
+    // only drifts back to its idle loop once the phone is back at neutral
+    // and still.
+    const screenAngle = () => {
+      const angle = (screen as any)?.orientation?.angle ?? (window as any).orientation ?? 0;
+      return typeof angle === 'number' ? angle : 0;
+    };
     const onOrientation = (e: DeviceOrientationEvent) => {
-      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      if (e.beta === null || e.gamma === null) return;
+      const p = pointerRef.current;
+      // A finger on the stage owns the aim.
+      if (p.pressed) return;
       const g = gyro.current;
-      if (!g.tracker) g.tracker = new AimTracker();
-      const sample = g.tracker.update(e.alpha, e.beta, e.gamma, performance.now());
-      const nx = sample.x * 2 - 1;
-      const ny = 1 - sample.y * 2;
-      const dx = nx - g.x;
-      const dy = ny - g.y;
-      g.x = nx;
-      g.y = ny;
-      if (!g.seeded) {
-        g.seeded = true;
-        return;
+      const now = performance.now();
+      if (!g.tilt) {
+        g.tilt = new TiltAim();
+        g.tilt.rebase(p.active ? p.x : 0, p.active ? p.y : 0);
       }
-      if (Math.hypot(dx, dy) > 0.004) {
-        const p = pointerRef.current;
-        p.x = THREE.MathUtils.clamp(p.x + dx, -1, 1);
-        p.y = THREE.MathUtils.clamp(p.y + dy, -1, 1);
-        p.active = true;
-        p.lastMoveMs = performance.now();
-      }
+      const sample = g.tilt.update(e.beta, e.gamma, sampleTime(g.clock, now), screenAngle());
+      const offNeutral = sample.fromNeutral > 0.12;
+      const moving = sample.speed > 4;
+      if (!p.active && !moving && !offNeutral) return; // untouched phone at rest
+      p.x = THREE.MathUtils.clamp(sample.x, -1, 1);
+      p.y = THREE.MathUtils.clamp(sample.y, -1, 1);
+      p.active = true;
+      if (moving || offNeutral) p.lastMoveMs = now;
     };
 
     window.addEventListener('pointermove', onPointer, { passive: true });
@@ -926,8 +943,12 @@ function HeroScene() {
     rim.uRimStrength.value = 0.55 + intensity * 0.85;
     for (const material of heroMats.current) {
       material.emissive.copy(scratch.tint);
-      material.emissiveIntensity = 0.05 + intensity * 0.16;
+      material.emissiveIntensity = 0.04 + intensity * 0.12;
     }
+    // The can is lacquered in the colour it is spraying, like a real one,
+    // and its actuator sinks while it sprays hard.
+    for (const material of hero.tinted) material.color.copy(scratch.tint);
+    hero.setPressed?.(THREE.MathUtils.smoothstep(intensity, BASE_INTENSITY, 0.9));
     if (haloRef.current) {
       const halo = haloRef.current;
       halo.position.set(canPos.current.x, canPos.current.y, canPos.current.z - 1.2);
@@ -1263,32 +1284,14 @@ function HeroScene() {
           top of it. */}
       <sprite ref={haloRef} material={haloMat} renderOrder={-1} />
 
-      {/* The spray can (or a stand-in until the GLB lands / if it never does).
-          The rig's origin is the nozzle with the body hanging below after the
-          upright rotation, so it is lifted by half its length to centre the
-          body on the group origin — tilts pivot around the can's middle.
-          Group scale is driven per-frame from the layout. */}
+      {/* The spray can. The rig's origin is the nozzle with the body hanging
+          below after the upright rotation, so it is lifted by half its length
+          to centre the body on the group origin — tilts pivot around the
+          can's middle. Group scale is driven per-frame from the layout. */}
       <group ref={canGroupRef} position={[2.5, 0, CAN_Z]}>
-        {rig ? (
-          <group position={[0, CAN_LENGTH / 2, 0]}>
-            <primitive object={rig} />
-          </group>
-        ) : (
-          <group>
-            <mesh position={[0, -0.12, 0]}>
-              <cylinderGeometry args={[0.24, 0.24, 1.1, 24]} />
-              <meshStandardMaterial color="#1d1d2a" roughness={0.32} metalness={0.65} />
-            </mesh>
-            <mesh position={[0, 0.5, 0]}>
-              <cylinderGeometry args={[0.15, 0.21, 0.14, 20]} />
-              <meshStandardMaterial color="#3a3a4c" roughness={0.4} metalness={0.5} />
-            </mesh>
-            <mesh position={[0, 0.62, 0]}>
-              <cylinderGeometry args={[0.05, 0.05, 0.12, 12]} />
-              <meshStandardMaterial color="#f4f4f7" roughness={0.5} />
-            </mesh>
-          </group>
-        )}
+        <group position={[0, CAN_LENGTH / 2, 0]}>
+          <primitive object={hero.root} />
+        </group>
 
         {/* Nozzle anchor: particle origin plus the muzzle flash. */}
         <group ref={nozzleRef} position={[0, CAN_LENGTH * 0.55, 0]}>

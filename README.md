@@ -14,7 +14,7 @@ Three routes, all client-side:
 
 | Route              | What it is                                                            |
 | ------------------ | --------------------------------------------------------------------- |
-| `/`                | Landing page — starts a room and shows the QR code to join it          |
+| `/`                | Landing page — one **Launch Studio** button; the studio opens with its QR |
 | `/canvas/:roomId`  | The studio. Full 3D stage, orbit, object picker, AI copilot            |
 | `/controller/:roomId` | The phone controller. Aim, paint or pad                            |
 
@@ -37,6 +37,38 @@ six gradient presets in the spray-paint palette, six solid colours, a custom sol
 and a crossfade between them. The glass tint, tiles and buttons take their accent
 from the chosen atmosphere, and the choice is remembered per browser. Only the
 studio screen changes; phones keep their own look.
+
+### The spray can
+
+The can is built in code (`src/scene/sprayCan.ts`), not downloaded: a lathe-profile
+body with rolled seams, a valve cup, an actuator with its orifice, and a printed label
+drawn once onto a canvas. It is on screen from the first frame everywhere it appears
+(landing hero, studio, tool card, phone), costs about 3k triangles, and its body and
+actuator are lacquered in the paint colour, so each painter's can on the stage is
+theirs at a glance. The actuator sinks while the trigger is held. Geometry, the label
+and the untinted materials are shared by every can; only the two tinted materials are
+per can. The brush is still the generated GLB.
+
+### Spray size
+
+The size slider (studio card, phone dock) drives everything the nozzle does: the cone
+`SurfacePainter` sprays into, the footprint ring on the model, the mist fan and the
+hiss (skinny caps hiss higher). At 100% and below the stroke is the tuned one people
+write their names with, unchanged. Above 100% the painter adds proportionally more,
+larger grains so coverage per area holds as the fan widens, and fades in a soft core of
+a few wide faint dabs, each still anchored to its own raycast. Size changes apply
+mid-stroke.
+
+`npm run test:writing` guards the default stroke: it replays handwriting through the
+studio's real jitter buffer and painter (deterministic, no GPU) and fails if the paint
+drifts off the line. A soft core laid under the default stroke once moved the paint's
+median distance from the line from 5.2 px to 8.3 px, which is the difference between
+writing your name and not.
+
+```bash
+npm run build && npx vite preview --port 4173 &
+node scripts/preview/verify-spray-size.mjs   # paints at 40/100/200% and measures the band
+```
 
 ### Painting model
 
@@ -65,7 +97,9 @@ Motion is sent at 30 Hz and interpolated to frame rate on the studio side.
 
 ## 3D models
 
-All sixteen models are generated with the [Meshy](https://meshy.ai) text-to-3D API and
+All sixteen models are generated with the [Meshy](https://meshy.ai) text-to-3D API
+(`tool-spraycan.glb` is kept for the contact sheet, but the app now builds its can in
+code — see above) and
 committed to `public/models/` as optimised GLBs (~6 MB for the whole set).
 
 ```bash
@@ -126,8 +160,36 @@ smooth curves under real network jitter.
 Shake detection requires several direction reversals in a window rather than a
 raw acceleration spike, so setting the phone down doesn't rattle the can.
 
+Sensor samples are **de-bunched** before they reach the tracker (`sampleTime` in
+`motion.ts`). Orientation events are stamped when the main thread handles them, so a
+dropped frame delivers readings microseconds apart; the tracker would read that as a
+flick and switch to its coarse precision curve mid-letter. The phone learns its sensor
+interval and spaces bunched readings at no less than 70% of it (check K in the aim
+suite: 1.10% of the stage off course on raw stamps, 0.12% de-bunched).
+
+Fine control is tuned against a tremor model (check L: 8-12 Hz physiological
+tremor plus sensor noise). The hold-tightening only squashes movement below 3°/s, so a
+careful nudge moves the aim in proportion instead of hitting a dead zone (a 4°/s nudge
+used to deliver 57% of its travel, 350 ms late; now 95%, 133 ms). The orientation
+low-pass stays partly closed up to 100°/s, so tremor no longer rides into careful strokes
+(2.5 px down to 1.0 px), while flicks still pass raw.
+
+On the studio side, each player's floating can rides the **aim ray** (camera to paint
+point, `src/scene/toolPlacement.ts`) rather than hovering off the hit triangle's normal.
+The normal hung the can on a 1-unit lever: at the side of a skateboard truck it shoved the
+can backwards against the stroke (it looked stuck, then jumped), and lumpy geometry came
+out as jitter. On the ray the nozzle tracks the aim on screen and edges only change its
+depth, which glides (`npm run test:placement`).
+
+The **landing page** does not use the tracker. There the phone is in your hand, screen
+toward you, and you tilt it like a spirit level, which the tracker (built for a phone
+pointed at a TV, roll-blind by design) cannot follow. `src/utils/tiltAim.ts` aims from
+gravity in screen axes instead: right edge down moves right, top edge down moves down,
+a held tilt holds, landscape works, and a One-Euro filter keeps it steady
+(`npm run test:tilt`).
+
 ```bash
-npm test   # 11 numeric regression checks over the whole tracking pipeline
+npm test   # includes 13 aim, 10 tilt, 2 writing-precision and 2 tool-placement checks
 ```
 
 ---

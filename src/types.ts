@@ -48,6 +48,12 @@ export interface PlayerState {
   pressure: number;
   /** Tool size multiplier, 0.4 - 2.0. */
   sizeMultiplier?: number;
+  /**
+   * Where the floating tool's nozzle is this frame, written by PlayerTool
+   * (studio-local, never sent). The mist leaves from here toward
+   * `surfacePoint`.
+   */
+  toolTip?: [number, number, number];
   lastActive: number;
   mode: 'motion' | 'projection';
   /** The local studio operator, who aims with the mouse rather than a phone. */

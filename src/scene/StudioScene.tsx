@@ -166,7 +166,7 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
       // first stroke's colour.
       strokeIds.current.set(host.id, `${host.id}#${++strokeSeq.current}`);
       getPainter(host.id).begin({ tool: host.tool, size: host.sizeMultiplier ?? 1 });
-      if (host.tool === 'spray') sounds.startSpray(1);
+      if (host.tool === 'spray') sounds.startSpray(1, host.sizeMultiplier ?? 1);
       else sounds.startBrush();
     };
 
@@ -245,6 +245,8 @@ export const StudioScene: React.FC<StudioSceneProps> = ({
         strokeIds.current.set(player.id, `${player.id}#${++strokeSeq.current}`);
       } else if (!painting && painter.isActive) {
         painter.end();
+      } else if (painting) {
+        painter.setSize(player.sizeMultiplier ?? 1);
       }
 
       const result = painter.frame(ndcX, ndcY, painting, delta);

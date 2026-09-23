@@ -3,11 +3,15 @@
  *
  * The whole viewport is a live 3D scene (LandingHero): an oversized spray can
  * that follows your pointer, sprays, and permanently tags the backdrop behind
- * the copy. The UI floats over it as a thin liquid-glass layer with exactly
- * two jobs, unchanged from before:
+ * the copy. The UI floats over it as a thin liquid-glass layer with one job:
  *
- *   Create a Studio  →  /canvas/:roomId    (fresh generated room code)
- *   Join with a code →  /controller/:code  (typed session code)
+ *   Launch Studio  →  /canvas/:roomId    (fresh generated room code)
+ *
+ * There is deliberately no code field here. Phones join from the QR the
+ * studio shows the moment it opens (the room code is printed there too), so a
+ * code on this page only asked visitors to read and remember something before
+ * they had a reason to. The three steps under the button say how joining
+ * works instead.
  *
  * Layout is deliberately two-mode rather than fluid. Below `lg` the page
  * stacks — headline at the top, glass card at the bottom, and the whole middle
@@ -20,14 +24,14 @@
  * the end of it); every element carrying one also has complete solid styling,
  * so the page still looks finished if those stencils fail to load.
  *
- * The Create action navigates with `state: { justCreated: true }` — the studio
+ * The Launch action navigates with `state: { justCreated: true }` — the studio
  * screen keys its first-run invite moment off that flag.
  */
-import React, { Suspense, lazy, useMemo, useState } from 'react';
+import React, { Suspense, lazy } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
-  SprayCan, ArrowRight, QrCode, Monitor, Smartphone, Users, Boxes, Radio, MousePointer2,
+  SprayCan, ArrowRight, QrCode, Monitor, Smartphone, Users, Boxes, Radio, MousePointer2, Sparkles,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { GlassPanel } from '../ui/Glass';
@@ -52,9 +56,6 @@ const LandingHero = lazy(() => import('../scene/LandingHero'));
  */
 const HERO_POSTER = '/ui/hero-poster.webp';
 
-/** Session codes: uppercase alphanumeric, 4-8 chars. */
-const CODE_RE = /^[A-Z0-9]{4,8}$/;
-
 const spring = { type: 'spring', stiffness: 260, damping: 30 } as const;
 /** Reveal easing for the headline wipe — fast out, long settle. */
 const wipe = [0.16, 1, 0.3, 1] as const;
@@ -69,30 +70,28 @@ const FEATURES: { icon: LucideIcon; label: string; accent: string }[] = [
   { icon: Radio, label: 'Live in the same room', accent: 'var(--color-airo-violet)' },
 ];
 
+/** How a session comes together, in the order people do it. */
+const STEPS: { icon: LucideIcon; label: string; short: string; accent: string }[] = [
+  { icon: Monitor, label: 'Open on a big screen', short: 'Big screen', accent: 'var(--color-airo-flame)' },
+  { icon: QrCode, label: 'Friends scan the QR', short: 'Scan the QR', accent: 'var(--color-airo-aqua)' },
+  { icon: Sparkles, label: 'Shake a phone & spray', short: 'Shake & spray', accent: 'var(--color-airo-violet)' },
+];
+
+/** Six-character room code: the studio prints it next to its QR. */
+function newRoomId(): string {
+  return Math.random().toString(36).slice(2, 8).toUpperCase().padEnd(6, 'X');
+}
+
 export default function Home() {
   const navigate = useNavigate();
-  const [joinCode, setJoinCode] = useState('');
-
-  // One room code per mount; regenerating on re-render would invalidate a
-  // code somebody has already read off the screen.
-  const roomId = useMemo(
-    () => Math.random().toString(36).slice(2, 8).toUpperCase(),
-    []
-  );
 
   // `justCreated` tells the studio this is a brand-new room, so it can open
-  // its invite moment instead of dropping the host straight onto an empty wall.
-  const createStudio = () => {
+  // its invite moment (QR and code front and centre) instead of dropping the
+  // host straight onto an empty wall.
+  const launchStudio = () => {
+    const roomId = newRoomId();
     track('studio.create', undefined, roomId);
     navigate(`/canvas/${roomId}`, { state: { justCreated: true } });
-  };
-
-  const joinValid = CODE_RE.test(joinCode);
-  const joinStudio = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!joinValid) return;
-    track('studio.join', undefined, joinCode);
-    navigate(`/controller/${joinCode}`);
   };
 
   return (
@@ -247,57 +246,43 @@ export default function Home() {
               } as React.CSSProperties}
             >
               <button
-                onClick={createStudio}
-                className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2.5 px-10 py-4.5 text-[15px] font-bold tracking-wide text-white"
+                onClick={launchStudio}
+                className="paint-btn paint-cta tap flex w-full items-center justify-center gap-2.5 px-10 py-4 text-[16px] font-bold tracking-wide text-white sm:py-5"
                 style={{ '--paint': CTA_PAINT } as React.CSSProperties}
               >
-                <SprayCan size={17} />
-                Create a Studio
-                <ArrowRight size={16} />
+                <SprayCan size={18} />
+                Launch Studio
+                <ArrowRight size={17} />
               </button>
 
-              <div className="mt-3.5 flex items-center justify-center gap-2.5">
-                <span className="label-caps text-white/30">Studio code</span>
-                <span className="font-mono text-[13px] font-bold tracking-[0.32em] text-white/65">
-                  {roomId}
-                </span>
-              </div>
-
-              <div className="my-4 flex items-center gap-3">
-                <span className="h-px flex-1 bg-white/12" />
-                <span className="label-caps text-white/35">or join with a code</span>
-                <span className="h-px flex-1 bg-white/12" />
-              </div>
-
-              <form onSubmit={joinStudio} className="flex gap-2">
-                <input
-                  value={joinCode}
-                  onChange={(e) =>
-                    setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))
-                  }
-                  placeholder="CODE"
-                  aria-label="Session code"
-                  maxLength={8}
-                  autoCapitalize="characters"
-                  autoCorrect="off"
-                  autoComplete="off"
-                  spellCheck={false}
-                  enterKeyHint="go"
-                  className="min-w-0 flex-1 rounded-2xl border border-white/15 bg-white/[0.07] px-4 py-3 font-mono text-sm uppercase tracking-[0.3em] text-white placeholder:tracking-[0.18em] placeholder:text-white/25 focus:border-[var(--color-airo-aqua)]/60 focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  disabled={!joinValid}
-                  className="tap rounded-2xl border border-[var(--color-airo-aqua)]/40 bg-[var(--color-airo-aqua)]/15 px-5 text-[12px] font-bold text-[var(--color-airo-aqua)] disabled:opacity-40"
-                >
-                  Join
-                </button>
-              </form>
-
-              <p className="mt-4 hidden items-center gap-2 text-[11px] text-white/40 sm:flex">
-                <QrCode size={13} className="shrink-0 text-[var(--color-airo-aqua)]" />
-                On a phone? Scan the studio's QR to jump straight in.
+              <p className="mt-2.5 text-center text-[12px] text-white/50 sm:mt-3">
+                Free, no sign-up. Friends join by QR.
               </p>
+
+              {/* Stacked phones get a flat row (icon beside label) so the card
+                  leaves the can room; wider screens get the tiled version. */}
+              <ol className="mt-3.5 grid grid-cols-3 gap-1.5 sm:mt-5 sm:gap-2" aria-label="How it works">
+                {STEPS.map(({ icon: Icon, label, short, accent }, i) => (
+                  <li
+                    key={label}
+                    className="flex items-center gap-1.5 rounded-2xl border border-white/8 bg-white/[0.035] px-2 py-2 text-left sm:flex-col sm:gap-2 sm:py-3 sm:text-center"
+                  >
+                    <span className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/[0.06] sm:h-8 sm:w-8">
+                      <Icon size={13} style={{ color: accent }} />
+                      <span
+                        aria-hidden
+                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-black/70 font-mono text-[9px] font-bold text-white/70 sm:inline-flex"
+                      >
+                        {i + 1}
+                      </span>
+                    </span>
+                    <span className="text-[10.5px] font-semibold leading-tight text-white/70 sm:leading-snug">
+                      <span className="sm:hidden">{short}</span>
+                      <span className="hidden sm:inline">{label}</span>
+                    </span>
+                  </li>
+                ))}
+              </ol>
             </GlassPanel>
           </motion.div>
         </main>

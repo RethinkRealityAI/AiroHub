@@ -299,6 +299,101 @@ const check = (name, pass, detail) => {
   );
 }
 
+/* K: a careful stroke survives dropped frames on the phone. When the phone
+   drops a frame, orientation readings arrive bunched microseconds apart; on
+   raw arrival stamps the speed estimate spikes and the precision curve jumps
+   to the flick ratio, which lands as a jerk. The controller de-bunches the
+   stamps (sampleTime) first; the stroke must then match clean delivery. */
+{
+  const stream = [...seq(1.6, (u) => RY(-8 * u)), ...seq(0.3, () => RY(-8))];
+  const clean = run(new M.AimTracker(), stream);
+  // Every 6th frame the main thread stalls ~50 ms and three readings land
+  // together, 0.2 ms apart.
+  const jankTimes = [];
+  let t = 1000;
+  for (let i = 0; i < stream.length; i++) {
+    const inBunch = i % 6;
+    if (inBunch < 3) t = 1000 + Math.floor(i / 6) * 6 * DT + 3 * DT + inBunch * 0.2;
+    else t = 1000 + i * DT;
+    jankTimes.push(t);
+  }
+  const feed = (useClock) => {
+    const tracker = new M.AimTracker();
+    const clock = { last: -1, interval: 1000 / 60 };
+    return stream.map((q, i) => {
+      const { alpha, beta, gamma } = eulerFromTool(q);
+      const at = useClock ? M.sampleTime(clock, jankTimes[i]) : jankTimes[i];
+      return tracker.update(alpha, beta, gamma, at);
+    });
+  };
+  const worst = (r) => Math.max(...r.map((s, i) => Math.abs(s.x - clean[i].x)));
+  const rawErr = worst(feed(false));
+  const fixedErr = worst(feed(true));
+  check(
+    'K careful stroke through dropped frames',
+    fixedErr < 0.006 && fixedErr < rawErr,
+    `max deviation from clean delivery: raw stamps=${(rawErr * 100).toFixed(2)}% de-bunched=${(fixedErr * 100).toFixed(2)}% of stage (limit 0.6%)`
+  );
+}
+
+/* L: fine control. A careful nudge must move the aim in proportion (no dead
+   zone under the hold-tightening) without trailing the hand, and the 8-12 Hz
+   physiological tremor must not ride into a careful stroke. Tremor is modelled
+   as 0.35° sinusoids at 9 and 10.3 Hz on yaw and pitch plus 0.08° sensor
+   noise; jitter is the RMS of the output against its own 9-sample moving
+   average, in pixels of a 1400 px stage. Before this was tuned: a 4°/s nudge
+   delivered 57% of its (precision-scaled) travel, 350 ms late, and a 12°/s
+   stroke carried 2.5 px of tremor. */
+{
+  const gauss = makeGauss(11);
+  const W = 1400;
+  const stroke = (speed, tremor) => {
+    const tracker = new M.AimTracker();
+    const out = [];
+    let t = 1000;
+    for (let i = 0; i < 2.5 * HZ + 30; i++) {
+      const time = i / HZ;
+      const yaw = -speed * Math.min(time, 2.5);
+      const pitch = 3 * Math.sin(Math.min(time, 2.5) * 1.3);
+      const q = RY(yaw + tremor * Math.sin(2 * Math.PI * 9 * time) + gauss() * 0.08).multiply(
+        RX(pitch + tremor * Math.sin(2 * Math.PI * 10.3 * time + 1) + gauss() * 0.08)
+      );
+      const { alpha, beta, gamma } = eulerFromTool(q);
+      out.push(tracker.update(alpha, beta, gamma, (t += DT)));
+    }
+    return out;
+  };
+  // Fine nudge: 4°/s for 2.5 s = 10°, i.e. 140 px at the stage's base gain,
+  // scaled by the precision curve's slow ratio. "Delivered" is against that,
+  // so it measures dead zone, not the chosen sensitivity.
+  const fine = stroke(4, 0);
+  const expectedPx = 140 * M.AimTracker.SCALE_LO;
+  const delivered = (Math.abs(fine[fine.length - 1].x - 0.5) * W) / expectedPx;
+  const midTarget = 0.5 + (fine[fine.length - 1].x - 0.5) * 0.6;
+  const reachIdx = fine.findIndex((s) => Math.abs(s.x - 0.5) >= Math.abs(midTarget - 0.5));
+  const lagMs = (reachIdx / HZ - 1.5) * 1000;
+  // Tremor through a careful 12°/s stroke.
+  const careful = stroke(12, 0.35);
+  let sum = 0;
+  let n = 0;
+  for (let i = 10; i < careful.length - 10; i++) {
+    let mx = 0;
+    let my = 0;
+    for (let j = -4; j <= 4; j++) {
+      mx += careful[i + j].x;
+      my += careful[i + j].y;
+    }
+    sum += ((careful[i].x - mx / 9) * W) ** 2 + ((careful[i].y - my / 9) * W) ** 2;
+    n++;
+  }
+  const jitter = Math.sqrt(sum / n);
+  check(
+    'L fine control',
+    delivered > 0.85 && lagMs < 150 && jitter < 1.8,
+    `4°/s nudge delivers ${(delivered * 100).toFixed(0)}% of its travel (limit >85%) at ${lagMs.toFixed(0)} ms lag (limit <150); tremor in a 12°/s stroke ${jitter.toFixed(2)} px (limit <1.8)`
+  );
+}
+
 fs.rmSync(outDir, { recursive: true, force: true });
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} aim regression checks passed`);

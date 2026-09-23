@@ -1,26 +1,42 @@
 /**
  * The tool card's hero: the tool you are holding, as the real 3D model.
  *
- * A small second WebGL canvas renders the same generated spray-can and brush
- * assets the studio floats over the stage, standing upright and drifting
+ * A small second WebGL canvas renders the same spray can and brush the
+ * studio floats over the stage, standing upright and drifting
  * gently, so a glance at the card tells you what you are painting with. In
  * stamp mode it shows the selected stencil as a floating plate in the paint
  * colour — literally what the next tap lays down. Tap the tool to shake it:
  * the can rattles and the model rocks.
  *
- * Cheap on purpose: a low DPR cap, one procedural environment, and models that
- * come out of the shared registry cache (`loadToolRig` clones them).
+ * Cheap on purpose: a low DPR cap, one procedural environment, a can built in
+ * code (so it is there on the first frame, lacquered in the paint colour) and
+ * a brush from the shared registry cache.
  */
-import React, { Suspense, useEffect, useRef, useState } from 'react';
-import { Canvas, useFrame, useLoader } from '@react-three/fiber';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber';
 import { PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
-import { loadToolRig, ToolRig, TOOL_RIGS } from '../../scene/toolRig';
+import { createToolRigSync, loadToolRig, ToolRig, TOOL_RIGS } from '../../scene/toolRig';
 import { StudioEnvironment } from '../../scene/StudioEnvironment';
 import type { StampAsset } from '../../paint/stampAssets';
 import { sounds } from '../../utils/audio';
 
 export type PreviewTool = 'spray' | 'brush' | 'stamp';
+
+/**
+ * Drives the preview at a modest fixed rate instead of every display frame.
+ * This card sits beside the stage, where every frame goes to painting and to
+ * smoothing players' strokes; a second canvas rendering at full rate was
+ * competing for exactly that. A gentle drift reads the same at 24 fps.
+ */
+const PreviewClock: React.FC<{ fps: number }> = ({ fps }) => {
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    const id = window.setInterval(() => invalidate(), 1000 / fps);
+    return () => window.clearInterval(id);
+  }, [invalidate, fps]);
+  return null;
+};
 
 /** Shared drift + shake, applied to whatever is on the turntable. */
 function useDrift(
@@ -47,22 +63,36 @@ function useDrift(
   });
 }
 
-const RiggedTool: React.FC<{ tool: 'spray' | 'brush'; shakeAt: React.MutableRefObject<number> }> = ({
-  tool,
-  shakeAt,
-}) => {
-  const [rig, setRig] = useState<ToolRig | null>(null);
+const RiggedTool: React.FC<{
+  tool: 'spray' | 'brush';
+  color: string;
+  shakeAt: React.MutableRefObject<number>;
+}> = ({ tool, color, shakeAt }) => {
+  // The can is built synchronously for the current tool (ready on the first
+  // frame); the brush arrives from the model cache.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const syncRig = useMemo(() => createToolRigSync(tool, color), [tool]);
+  useEffect(() => () => syncRig?.dispose?.(), [syncRig]);
+  const [loadedRig, setLoadedRig] = useState<ToolRig | null>(null);
+  const rig = syncRig ?? loadedRig;
   const group = useRef<THREE.Group>(null);
   useDrift(group, shakeAt, 0.45, tool === 'brush' ? 0.3 : 0.12);
 
   useEffect(() => {
+    if (syncRig) return;
     let live = true;
-    setRig(null);
-    loadToolRig(tool).then((r) => live && setRig(r)).catch(() => undefined);
+    setLoadedRig(null);
+    loadToolRig(tool)
+      .then((r) => live && setLoadedRig(r))
+      .catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [tool]);
+  }, [tool, syncRig]);
+
+  useEffect(() => {
+    rig?.setColor?.(color);
+  }, [rig, color]);
 
   const length = TOOL_RIGS[tool].length;
   // Stand the rig upright with the business end on top and the body centred
@@ -150,7 +180,9 @@ export const ToolPreview: React.FC<{
         gl={{ antialias: true, alpha: true, powerPreference: 'low-power' }}
         className="!absolute inset-0"
         style={{ pointerEvents: 'none' }}
+        frameloop="demand"
       >
+        <PreviewClock fps={24} />
         <PerspectiveCamera makeDefault position={[0, 0.15, 4.4]} fov={32} near={0.1} far={50} />
         <ambientLight intensity={0.45} />
         <directionalLight position={[3, 5, 4]} intensity={1.6} />
@@ -160,7 +192,7 @@ export const ToolPreview: React.FC<{
           {tool === 'stamp' && stamp ? (
             <StencilPlate key={stamp.id} asset={stamp} tint={color} shakeAt={shakeAt} />
           ) : (
-            <RiggedTool tool={tool === 'stamp' ? 'spray' : tool} shakeAt={shakeAt} />
+            <RiggedTool tool={tool === 'stamp' ? 'spray' : tool} color={color} shakeAt={shakeAt} />
           )}
         </Suspense>
       </Canvas>

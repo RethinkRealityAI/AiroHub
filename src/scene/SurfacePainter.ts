@@ -53,8 +53,36 @@ const BRUSH_DAB_WORLD_RADIUS = 0.075;
 const PATH_STEP_PX = 4;
 /** Hard cap on path samples per frame so a teleporting cursor can't stall. */
 const MAX_STEPS_PER_FRAME = 36;
-/** Rays per spray path sample; the brush uses a fixed 3-dab ribbon instead. */
+/** Rays per spray path sample at size 1; the brush uses a 3-dab ribbon. */
 const SPRAY_RAYS_PER_STEP = 14;
+/** Ceiling on rays per sample, so a huge nozzle cannot stall the frame. */
+const SPRAY_MAX_RAYS_PER_STEP = 30;
+/**
+ * Largest single grain, in texture pixels, at size 1 and below. This cap is
+ * part of what keeps a default stroke tight enough to write with; fat caps
+ * raise it (see `depositAt`).
+ */
+const SPRAY_DOT_MAX_PX = 9;
+/** Ceiling on the grain cap for the fattest nozzle. */
+const SPRAY_DOT_MAX_PX_FAT = 20;
+/**
+ * The soft body of a fat cap: a few wide, faint dabs near the centre of the
+ * cone under the grains, so a wide fan reads as aerosol rather than as
+ * scattered dots. Each is anchored to its own raycast and capped in size (the
+ * brush already lays dabs this big), so it cannot smear across a UV island
+ * edge the way one cone-sized disc would.
+ *
+ * Fat caps only. It fades in from size 1 to 1.5 and is absent at size 1 and
+ * below: laid under a default stroke it pulled the paint's centre of mass
+ * well off the aim line (8.3 px from it against 5.2 px without, in
+ * scripts/test/writing-precision.mjs), which is the difference between
+ * writing your name with a phone and not.
+ */
+const SPRAY_CORE_DABS = 3;
+const SPRAY_CORE_SPREAD = 0.28; // fraction of the cone radius the core dabs land within
+const SPRAY_CORE_RADIUS = 0.34; // core dab radius as a fraction of the cone radius
+const SPRAY_CORE_OPACITY = 0.1;
+const SPRAY_CORE_MAX_PX = 26;
 
 /** Drip tuning. */
 const DRIP_HOLD_BEFORE_MS = 420;
@@ -116,7 +144,7 @@ export class SurfacePainter {
   }
 
   begin(config: PainterStrokeConfig) {
-    this.config = config;
+    this.config = { ...config };
     this.active = true;
     this.lastNdc = null;
     this.holdMs = 0;
@@ -133,6 +161,15 @@ export class SurfacePainter {
 
   get isActive() {
     return this.active;
+  }
+
+  /**
+   * Follows a size change in the middle of a stroke. Without it the size was
+   * sampled once at `begin`, so moving the slider (or the phone's) while
+   * spraying did nothing until the trigger was released.
+   */
+  setSize(size: number) {
+    if (Number.isFinite(size) && size > 0) this.config.size = size;
   }
 
   /** Clears cached texel densities — call when the target object changes. */
@@ -161,7 +198,10 @@ export class SurfacePainter {
     }
 
     const viewportH = Math.max(this.getViewportHeight(), 1);
-    const stepNdcSize = (PATH_STEP_PX / viewportH) * 2;
+    // A wide fan overlaps itself heavily at a 4 px step; stepping a little
+    // further keeps the raycast budget in line with the extra grains below.
+    const stepPx = PATH_STEP_PX * Math.sqrt(Math.max(1, this.config.size));
+    const stepNdcSize = (stepPx / viewportH) * 2;
 
     if (!this.lastNdc) {
       this.lastNdc = new THREE.Vector2(ndcX, ndcY);
@@ -298,13 +338,29 @@ export class SurfacePainter {
     }
 
     // Spray: a scattered cone of grains, dense in the middle, wispy outside.
+    //
+    // At size 1 and below this is exactly the tuned stroke people write
+    // with. Above it, coverage has to hold as the cone grows: grains are
+    // capped at a radius the default size already reaches, so a bigger nozzle
+    // used to scatter the same fourteen grains over four times the area and
+    // came out too faint to read as any change. Fat caps now get
+    // proportionally more grains, each sqrt(size) larger, which keeps the
+    // coverage per area constant (rays x grain area / cone area) while the
+    // footprint really does widen, plus a soft core (below).
     const screenRadiusPx = SPRAY_WORLD_RADIUS * size * fovScale;
     const ndcRadiusY = (screenRadiusPx / viewportH) * 2;
     const ndcRadiusX = ndcRadiusY / aspect;
+    const fat = THREE.MathUtils.clamp(size - 1, 0, 1); // 0 at size <= 1, 1 at size >= 2
+    const grow = Math.max(1, size);
+    const rays = Math.min(Math.round(SPRAY_RAYS_PER_STEP * grow), SPRAY_MAX_RAYS_PER_STEP);
+    const grainSize = size <= 1 ? size : Math.sqrt(size) * Math.sqrt((SPRAY_RAYS_PER_STEP * grow) / rays);
+    const grainMaxPx = SPRAY_DOT_MAX_PX + (SPRAY_DOT_MAX_PX_FAT - SPRAY_DOT_MAX_PX) * fat;
+    // Centre-weighted scatter; a fat cap spreads its grains a little more evenly.
+    const falloff = 1.6 - 0.25 * fat;
 
-    for (let i = 0; i < SPRAY_RAYS_PER_STEP; i++) {
+    for (let i = 0; i < rays; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const rand = i === 0 ? 0 : Math.pow(Math.random(), 1.6);
+      const rand = i === 0 ? 0 : Math.pow(Math.random(), falloff);
       const hit =
         i === 0
           ? central
@@ -313,11 +369,30 @@ export class SurfacePainter {
 
       const scale = this.texelsPerWorldUnit(hit);
       const r = THREE.MathUtils.clamp(
-        SPRAY_DOT_WORLD_RADIUS * size * scale * (0.7 + Math.random() * 0.8),
+        SPRAY_DOT_WORLD_RADIUS * grainSize * scale * (0.7 + Math.random() * 0.8),
         0.8,
-        9
+        grainMaxPx
       );
       out.push({ u: hit.uv.x, v: hit.uv.y, r, o: (1 - rand * 0.55) * (0.32 + Math.random() * 0.3) });
+    }
+
+    const coreOpacity = SPRAY_CORE_OPACITY * Math.min(1, fat * 2);
+    if (coreOpacity <= 0) return;
+    for (let i = 0; i < SPRAY_CORE_DABS; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const rand = Math.sqrt(Math.random()) * SPRAY_CORE_SPREAD;
+      const hit = this.cast(
+        ndcX + Math.cos(angle) * rand * ndcRadiusX,
+        ndcY + Math.sin(angle) * rand * ndcRadiusY
+      );
+      if (!hit || !hit.uv) continue;
+      const scale = this.texelsPerWorldUnit(hit);
+      const r = THREE.MathUtils.clamp(
+        SPRAY_WORLD_RADIUS * SPRAY_CORE_RADIUS * size * scale,
+        1,
+        SPRAY_CORE_MAX_PX
+      );
+      out.push({ u: hit.uv.x, v: hit.uv.y, r, o: coreOpacity });
     }
   }
 
