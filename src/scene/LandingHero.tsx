@@ -41,7 +41,9 @@ import React, { Suspense, useEffect, useMemo, useRef } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { createSprayCanRig } from './toolRig';
-import { AimTracker } from '../utils/motion';
+import { TiltAim } from '../utils/tiltAim';
+import { sampleTime } from '../utils/motion';
+import type { SampleClock } from '../utils/motion';
 import { StudioEnvironment } from './StudioEnvironment';
 
 /** Splat colours, cycled slowly. Matches the app's controller palette. */
@@ -470,9 +472,9 @@ function HeroScene() {
    *
    *  · pointer and touch are ABSOLUTE — the canvas-relative position is the
    *    aim, so the spray always comes out of wherever the finger actually is.
-   *    Gyro is RELATIVE (a phone has no pointer): it integrates the tracker's
-   *    deltas onto whatever the last input left behind, which also re-bases it
-   *    on every touch instead of yanking the can back to its own origin;
+   *    Tilt is absolute around a neutral pose (see utils/tiltAim): hold a
+   *    tilt and the can stays there. The neutral is re-based whenever a touch
+   *    ends, so tilting carries on from wherever the finger left the aim;
    *  · mouse hover paints automatically as it moves (as before), and holding
    *    the button is a full trigger pull;
    *  · a finger on the stage IS the trigger — the can follows it, sprays the
@@ -480,9 +482,13 @@ function HeroScene() {
    *    is claimed with preventDefault so painting never scrolls the page.
    *    Touches that start on the copy or the glass card never reach the
    *    canvas element, so the page scrolls normally there;
-   *  · device rotation drives the can through the same AimTracker the real
-   *    controller uses — move the phone and it sprays automatically as it
-   *    sweeps. iOS gates orientation events behind a permission that must be
+   *  · tilting the phone steers the can like a spirit level: right edge down
+   *    moves it right, top edge down (tipping the phone away) moves it down,
+   *    and it sprays as it sweeps. This deliberately does NOT use the
+   *    controller's AimTracker: that models a phone pointed at a TV and
+   *    ignores roll by design, which on this page (phone in hand, screen
+   *    toward you) left side-to-side tilt dead and read pitch backwards.
+   *    iOS gates orientation events behind a permission that must be
    *    requested from a user gesture, so the first touch on the stage doubles
    *    as the opt-in; Android needs no permission and simply starts working.
    */
@@ -512,10 +518,9 @@ function HeroScene() {
     };
   }, []);
   const gyro = useRef({
-    tracker: null as AimTracker | null,
-    x: 0,
-    y: 0,
-    seeded: false,
+    tilt: null as TiltAim | null,
+    /** De-bunches event stamps when frames drop (see motion.ts sampleTime). */
+    clock: { last: -1, interval: 1000 / 60 } as SampleClock,
     permissionAsked: false,
   });
   useEffect(() => {
@@ -568,37 +573,39 @@ function HeroScene() {
     };
     const onTouchEnd = () => {
       pointerRef.current.pressed = false;
+      // Tilt picks up from where the finger left the aim.
+      const p = pointerRef.current;
+      gyro.current.tilt?.rebase(p.x, p.y);
     };
 
-    // Gyro aim, sharing the controller's tracker. Only meaningful deltas
-    // count as movement, so a phone at rest still settles into the idle
-    // drift instead of pinning the can wherever it last aimed. The deltas are
-    // integrated onto the current aim rather than replacing it: the tracker's
-    // normalised origin has nothing to do with where the finger last was, so
-    // an absolute mapping would teleport the can on the first sample after
-    // every touch. Its full 0..1 range now spans the whole clamped viewport.
+    // Tilt aim. Absolute around a neutral pose, so a held tilt holds the
+    // can; the neutral is captured on the first reading and re-based after
+    // every touch. A tilted or moving phone keeps the aim live, so the can
+    // only drifts back to its idle loop once the phone is back at neutral
+    // and still.
+    const screenAngle = () => {
+      const angle = (screen as any)?.orientation?.angle ?? (window as any).orientation ?? 0;
+      return typeof angle === 'number' ? angle : 0;
+    };
     const onOrientation = (e: DeviceOrientationEvent) => {
-      if (e.alpha === null || e.beta === null || e.gamma === null) return;
+      if (e.beta === null || e.gamma === null) return;
+      const p = pointerRef.current;
+      // A finger on the stage owns the aim.
+      if (p.pressed) return;
       const g = gyro.current;
-      if (!g.tracker) g.tracker = new AimTracker();
-      const sample = g.tracker.update(e.alpha, e.beta, e.gamma, performance.now());
-      const nx = sample.x * 2 - 1;
-      const ny = 1 - sample.y * 2;
-      const dx = nx - g.x;
-      const dy = ny - g.y;
-      g.x = nx;
-      g.y = ny;
-      if (!g.seeded) {
-        g.seeded = true;
-        return;
+      const now = performance.now();
+      if (!g.tilt) {
+        g.tilt = new TiltAim();
+        g.tilt.rebase(p.active ? p.x : 0, p.active ? p.y : 0);
       }
-      if (Math.hypot(dx, dy) > 0.004) {
-        const p = pointerRef.current;
-        p.x = THREE.MathUtils.clamp(p.x + dx, -1, 1);
-        p.y = THREE.MathUtils.clamp(p.y + dy, -1, 1);
-        p.active = true;
-        p.lastMoveMs = performance.now();
-      }
+      const sample = g.tilt.update(e.beta, e.gamma, sampleTime(g.clock, now), screenAngle());
+      const offNeutral = sample.fromNeutral > 0.12;
+      const moving = sample.speed > 4;
+      if (!p.active && !moving && !offNeutral) return; // untouched phone at rest
+      p.x = THREE.MathUtils.clamp(sample.x, -1, 1);
+      p.y = THREE.MathUtils.clamp(sample.y, -1, 1);
+      p.active = true;
+      if (moving || offNeutral) p.lastMoveMs = now;
     };
 
     window.addEventListener('pointermove', onPointer, { passive: true });

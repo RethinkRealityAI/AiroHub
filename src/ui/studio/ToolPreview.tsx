@@ -13,7 +13,7 @@
  * a brush from the shared registry cache.
  */
 import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame, useLoader } from '@react-three/fiber';
+import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber';
 import { PerspectiveCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { createToolRigSync, loadToolRig, ToolRig, TOOL_RIGS } from '../../scene/toolRig';
@@ -22,6 +22,21 @@ import type { StampAsset } from '../../paint/stampAssets';
 import { sounds } from '../../utils/audio';
 
 export type PreviewTool = 'spray' | 'brush' | 'stamp';
+
+/**
+ * Drives the preview at a modest fixed rate instead of every display frame.
+ * This card sits beside the stage, where every frame goes to painting and to
+ * smoothing players' strokes; a second canvas rendering at full rate was
+ * competing for exactly that. A gentle drift reads the same at 24 fps.
+ */
+const PreviewClock: React.FC<{ fps: number }> = ({ fps }) => {
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    const id = window.setInterval(() => invalidate(), 1000 / fps);
+    return () => window.clearInterval(id);
+  }, [invalidate, fps]);
+  return null;
+};
 
 /** Shared drift + shake, applied to whatever is on the turntable. */
 function useDrift(
@@ -165,7 +180,9 @@ export const ToolPreview: React.FC<{
         gl={{ antialias: true, alpha: true, powerPreference: 'low-power' }}
         className="!absolute inset-0"
         style={{ pointerEvents: 'none' }}
+        frameloop="demand"
       >
+        <PreviewClock fps={24} />
         <PerspectiveCamera makeDefault position={[0, 0.15, 4.4]} fov={32} near={0.1} far={50} />
         <ambientLight intensity={0.45} />
         <directionalLight position={[3, 5, 4]} intensity={1.6} />

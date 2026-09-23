@@ -13,8 +13,9 @@
  *  4. a cross-stage drag carries the aim to the finger's endpoint and covers
  *     the travel between (a tight box reads as "nothing happened" on a phone);
  *  5. releasing the touch releases the trigger;
- *  6. synthetic deviceorientation (gyro) events steer the can and auto-spray
- *     while the device rotates — relative, since a phone has no pointer.
+ *  6. tilting the phone steers the can the way it is tilted: right edge down
+ *     moves it right, tipping the top away moves it down, a held tilt holds
+ *     the can there, and it sprays while it sweeps.
  *
  * Harness rules, each learned the hard way:
  *  · keep the render loop alive by awaiting rAF from inside the page. NEVER
@@ -224,7 +225,7 @@ const at = (probeState) => `aim=(${f(probeState.aimScreenX)}, ${f(probeState.aim
   const released = await probe(page);
   check('touch release lifts trigger', !released.pressed, `pressed=${released.pressed}`);
 
-  /* 6: gyro steers (relative) and auto-sprays */
+  /* 6: tilt steers the way the phone tilts, holds, and sprays */
   const fire = (alpha, beta, gamma) =>
     page.evaluate(
       ([a, b, g]) => {
@@ -234,31 +235,54 @@ const at = (probeState) => `aim=(${f(probeState.aimScreenX)}, ${f(probeState.aim
       },
       [alpha, beta, gamma]
     );
-  // settle a reference pose, then sweep alpha (world yaw) back and forth
-  for (let i = 0; i < 10; i++) {
-    await fire(0, 85, 0);
-    await tick(page, 30);
-  }
-  const gyroBefore = await probe(page);
-  // Sample mid-sweep: intensity naturally decays as the sine decelerates, so
-  // the honest metric is the peak while the device is actually rotating.
-  let gyroPeak = 0;
-  let gyroMaxDx = 0;
-  for (let i = 0; i <= 30; i++) {
-    await fire(Math.sin(i / 5) * 24, 85, 0);
-    await tick(page, 30);
-    if (i % 3 === 0) {
-      const s = await probe(page);
-      gyroPeak = Math.max(gyroPeak, s.intensity);
-      gyroMaxDx = Math.max(gyroMaxDx, Math.abs(s.aimScreenX - gyroBefore.aimScreenX));
+  /** Holds a pose (60 Hz of events) for `ms`, sampling spray intensity. */
+  const pose = async (beta, gamma, ms) => {
+    let peak = 0;
+    for (let t = 0; t < ms; t += 32) {
+      await fire(0, beta, gamma);
+      await tick(page, 32);
+      if (t % 160 === 0) peak = Math.max(peak, (await probe(page)).intensity);
     }
-  }
-  const gyroAfter = await probe(page);
+    return peak;
+  };
+  // Opposite tilts from a reading pose (screen ~55 deg up). Comparing the
+  // two sides of each axis proves direction and symmetry without depending
+  // on where the idle drift happened to leave the can.
+  await pose(55, 0, 600);
+  const sweepPeak = await pose(55, 9, 700); // right edge down
+  await settle(page);
+  const right = await probe(page);
+  await pose(55, -9, 900); // left edge down
+  await settle(page);
+  const left = await probe(page);
   check(
-    'gyro steers and sprays',
-    !gyroAfter.idle && gyroMaxDx > 0.04 && gyroPeak > 0.2,
-    `idle=${gyroAfter.idle} peak dx=${gyroMaxDx.toFixed(3)} peak intensity=${gyroPeak.toFixed(2)}`
+    'tilting right and left moves the can right and left',
+    right.aimScreenX - left.aimScreenX > 0.2 && Math.abs(right.aimScreenY - left.aimScreenY) < 0.06,
+    `right-left dx=${(right.aimScreenX - left.aimScreenX).toFixed(3)} dy=${(right.aimScreenY - left.aimScreenY).toFixed(3)}`
   );
+
+  await pose(65, 0, 900); // top edge raised
+  await settle(page);
+  const up = await probe(page);
+  await pose(45, 0, 900); // top edge tipped away
+  await settle(page);
+  const down = await probe(page);
+  check(
+    'tipping the top away moves the can down, raising it moves it up',
+    down.aimScreenY - up.aimScreenY > 0.2 && Math.abs(down.aimScreenX - up.aimScreenX) < 0.06,
+    `away-raised dy=${(down.aimScreenY - up.aimScreenY).toFixed(3)} (screen y grows downward) dx=${(down.aimScreenX - up.aimScreenX).toFixed(3)}`
+  );
+
+  // Held for longer than the idle window: the can must stay where the tilt
+  // put it rather than drifting back to its idle loop.
+  await pose(45, 0, 3200);
+  const heldTilt = await probe(page);
+  check(
+    'a held tilt holds the can',
+    !heldTilt.idle && Math.abs(heldTilt.aimScreenY - down.aimScreenY) < 0.04,
+    `idle=${heldTilt.idle} drift=${Math.abs(heldTilt.aimScreenY - down.aimScreenY).toFixed(3)}`
+  );
+  check('tilting sprays while it sweeps', sweepPeak > 0.2, `peak intensity=${sweepPeak.toFixed(2)}`);
 
   await page.screenshot({ path: path.join(SHOT_DIR, 'landing-touch-gyro.png') });
   await page.close();

@@ -163,7 +163,9 @@ export const PlayerTool: React.FC<PlayerToolProps> = ({ player, scale = 1 }) => 
       s.normal.set(surfaceNormal![0], surfaceNormal![1], surfaceNormal![2]).normalize();
       const n = smoothNormal.current;
       if (!hadSurface.current) n.copy(s.normal);
-      else n.lerp(s.normal, 1 - Math.exp(-14 * delta));
+      // Fast enough to add no visible lag to the can (it already eases its
+      // position), slow enough to swallow facet-to-facet steps.
+      else n.lerp(s.normal, 1 - Math.exp(-30 * delta));
       // Opposite normals can cancel to nothing mid-blend; take the new one.
       if (n.lengthSq() < 1e-4) n.copy(s.normal);
       n.normalize();

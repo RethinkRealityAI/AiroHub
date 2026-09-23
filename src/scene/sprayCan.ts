@@ -290,15 +290,17 @@ export interface SprayCanModel {
 export function createSprayCan(color: THREE.ColorRepresentation = '#FF4D1C'): SprayCanModel {
   const s = getShared();
 
-  // Gloss lacquer: a clear coat over a slightly metallic flake, which is what
-  // makes a real can catch a highlight down its whole length.
-  const lacquer = new THREE.MeshPhysicalMaterial({
+  // Gloss lacquer over a slightly metallic flake, which is what makes a real
+  // can catch a highlight down its whole length. Deliberately a standard
+  // material, not a clear-coated physical one: on the phone the can fills
+  // most of the screen, a clear coat adds a second specular lobe to every one
+  // of those pixels, and the frame time it costs is shared with the
+  // orientation events the aim is built from.
+  const lacquer = new THREE.MeshStandardMaterial({
     color,
-    metalness: 0.35,
-    roughness: 0.38,
-    clearcoat: 1,
-    clearcoatRoughness: 0.14,
-    envMapIntensity: 1.1,
+    metalness: 0.4,
+    roughness: 0.26,
+    envMapIntensity: 1.35,
   });
   const cap = new THREE.MeshStandardMaterial({ color, metalness: 0, roughness: 0.48 });
 

@@ -299,6 +299,43 @@ const check = (name, pass, detail) => {
   );
 }
 
+/* K: a careful stroke survives dropped frames on the phone. When the phone
+   drops a frame, orientation readings arrive bunched microseconds apart; on
+   raw arrival stamps the speed estimate spikes and the precision curve jumps
+   to the flick ratio, which lands as a jerk. The controller de-bunches the
+   stamps (sampleTime) first; the stroke must then match clean delivery. */
+{
+  const stream = [...seq(1.6, (u) => RY(-8 * u)), ...seq(0.3, () => RY(-8))];
+  const clean = run(new M.AimTracker(), stream);
+  // Every 6th frame the main thread stalls ~50 ms and three readings land
+  // together, 0.2 ms apart.
+  const jankTimes = [];
+  let t = 1000;
+  for (let i = 0; i < stream.length; i++) {
+    const inBunch = i % 6;
+    if (inBunch < 3) t = 1000 + Math.floor(i / 6) * 6 * DT + 3 * DT + inBunch * 0.2;
+    else t = 1000 + i * DT;
+    jankTimes.push(t);
+  }
+  const feed = (useClock) => {
+    const tracker = new M.AimTracker();
+    const clock = { last: -1, interval: 1000 / 60 };
+    return stream.map((q, i) => {
+      const { alpha, beta, gamma } = eulerFromTool(q);
+      const at = useClock ? M.sampleTime(clock, jankTimes[i]) : jankTimes[i];
+      return tracker.update(alpha, beta, gamma, at);
+    });
+  };
+  const worst = (r) => Math.max(...r.map((s, i) => Math.abs(s.x - clean[i].x)));
+  const rawErr = worst(feed(false));
+  const fixedErr = worst(feed(true));
+  check(
+    'K careful stroke through dropped frames',
+    fixedErr < 0.006 && fixedErr < rawErr,
+    `max deviation from clean delivery: raw stamps=${(rawErr * 100).toFixed(2)}% de-bunched=${(fixedErr * 100).toFixed(2)}% of stage (limit 0.6%)`
+  );
+}
+
 fs.rmSync(outDir, { recursive: true, force: true });
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} aim regression checks passed`);

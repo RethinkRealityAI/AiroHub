@@ -53,9 +53,17 @@ per can. The brush is still the generated GLB.
 
 The size slider (studio card, phone dock) drives everything the nozzle does: the cone
 `SurfacePainter` sprays into, the footprint ring on the model, the mist fan and the
-hiss (skinny caps hiss higher). Above 100% the painter adds proportionally more,
-larger grains so coverage per area holds as the fan widens, plus a soft core of a few
-wide faint dabs, each still anchored to its own raycast. Size changes apply mid-stroke.
+hiss (skinny caps hiss higher). At 100% and below the stroke is the tuned one people
+write their names with, unchanged. Above 100% the painter adds proportionally more,
+larger grains so coverage per area holds as the fan widens, and fades in a soft core of
+a few wide faint dabs, each still anchored to its own raycast. Size changes apply
+mid-stroke.
+
+`npm run test:writing` guards the default stroke: it replays handwriting through the
+studio's real jitter buffer and painter (deterministic, no GPU) and fails if the paint
+drifts off the line. A soft core laid under the default stroke once moved the paint's
+median distance from the line from 5.2 px to 8.3 px, which is the difference between
+writing your name and not.
 
 ```bash
 npm run build && npx vite preview --port 4173 &
@@ -152,8 +160,22 @@ smooth curves under real network jitter.
 Shake detection requires several direction reversals in a window rather than a
 raw acceleration spike, so setting the phone down doesn't rattle the can.
 
+Sensor samples are **de-bunched** before they reach the tracker (`sampleTime` in
+`motion.ts`). Orientation events are stamped when the main thread handles them, so a
+dropped frame delivers readings microseconds apart; the tracker would read that as a
+flick and switch to its coarse precision curve mid-letter. The phone learns its sensor
+interval and spaces bunched readings at no less than 70% of it (check K in the aim
+suite: 1.10% of the stage off course on raw stamps, 0.12% de-bunched).
+
+The **landing page** does not use the tracker. There the phone is in your hand, screen
+toward you, and you tilt it like a spirit level, which the tracker (built for a phone
+pointed at a TV, roll-blind by design) cannot follow. `src/utils/tiltAim.ts` aims from
+gravity in screen axes instead: right edge down moves right, top edge down moves down,
+a held tilt holds, landscape works, and a One-Euro filter keeps it steady
+(`npm run test:tilt`).
+
 ```bash
-npm test   # 11 numeric regression checks over the whole tracking pipeline
+npm test   # includes 12 aim, 10 tilt and 2 writing-precision checks
 ```
 
 ---

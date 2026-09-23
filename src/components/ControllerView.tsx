@@ -54,7 +54,8 @@ import { StampStrip } from '../ui/StampSheet';
 import { OBJECT_BY_ID } from '../paint/objectCatalog';
 import { ensureCustomModels } from '../paint/customModels';
 import { AiroConnection, isRealtimeConfigured } from '../net/realtime';
-import { AimTracker, ShakeDetector } from '../utils/motion';
+import { AimTracker, ShakeDetector, sampleTime } from '../utils/motion';
+import type { SampleClock } from '../utils/motion';
 import { useFlags } from '../config/flags';
 import { track } from '../analytics/track';
 import { FeedbackButton } from '../feedback/FeedbackButton';
@@ -556,6 +557,7 @@ export default function ControllerView() {
   }, []);
   const shakeDetector = useRef(new ShakeDetector());
   const lastMotionSend = useRef(0);
+  const sampleClock = useRef<SampleClock>({ last: -1, interval: 1000 / 60 });
   const shakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live mirrors read by sensor callbacks and the connection effect, both of
@@ -753,9 +755,9 @@ export default function ControllerView() {
     const { alpha, beta, gamma } = event;
     if (alpha === null || beta === null || gamma === null) return;
 
-    const sample = trackerRef.current.update(alpha, beta, gamma, performance.now());
-
     const now = performance.now();
+    const sample = trackerRef.current.update(alpha, beta, gamma, sampleTime(sampleClock.current, now));
+
     if (now - lastMotionSend.current < MOTION_INTERVAL) return;
     lastMotionSend.current = now;
 

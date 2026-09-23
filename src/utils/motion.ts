@@ -798,3 +798,32 @@ export class ShakeDetector {
     return 0;
   }
 }
+
+/**
+ * Sensor sample timing, de-bunched.
+ *
+ * Orientation events are stamped when the main thread gets to them. When the
+ * phone drops a frame, readings taken ~16 ms apart arrive together, a few
+ * microseconds apart. The tracker estimates movement speed from those gaps
+ * and picks its precision curve from that speed, so a bunch looked like a
+ * sudden flick: one or two samples on the coarse ratio, which you feel as a
+ * jerk in the middle of a careful letter. Here the sensor's own interval is
+ * learned from ordinary gaps, and a bunched reading is spaced at no less than
+ * ~70% of it. The stamp may run slightly ahead of the wall clock while a
+ * bunch drains (bounded to 40 ms) and never goes backwards.
+ */
+export interface SampleClock {
+  last: number;
+  interval: number;
+}
+export function sampleTime(clock: SampleClock, now: number): number {
+  if (clock.last < 0) {
+    clock.last = now;
+    return now;
+  }
+  const gap = now - clock.last;
+  if (gap > 4 && gap < 100) clock.interval += (gap - clock.interval) * 0.05;
+  const t = Math.min(Math.max(now, clock.last + clock.interval * 0.7), now + 40);
+  clock.last = t;
+  return t;
+}
