@@ -38,6 +38,40 @@ function watch(page, label) {
   });
 }
 
+/**
+ * Every page gets its own browser context (`browser.newPage`), and so its own
+ * empty localStorage. The first-run welcome guides would otherwise open on
+ * each one and swallow every click and drag, so the flags that mark them as
+ * seen are seeded for every page this harness opens, not just the first.
+ */
+async function newPage(options) {
+  const page = await browser.newPage(options);
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('airo:guide:studio', '1');
+      localStorage.setItem('airo:guide:controller', '1');
+    } catch {}
+  });
+  return page;
+}
+
+/**
+ * Switches the studio's object. Wide displays (>= 1280px) list every model in
+ * the right-hand canvas card; compact ones keep them behind the header's
+ * object trigger. Which layout is mounted depends on the viewport, so the
+ * harness asks the page instead of assuming.
+ */
+async function pickObject(page, name) {
+  const row = page.getByRole('option', { name: new RegExp(name) }).first();
+  if (await row.isVisible().catch(() => false)) {
+    await row.click();
+    return;
+  }
+  await page.locator('header button:has(svg.lucide-chevron-down)').first().click();
+  await page.waitForTimeout(800);
+  await page.getByText(name).first().click();
+}
+
 /** Drags a smooth path of viewport-relative points over the canvas. */
 async function dragPath(page, points) {
   const vp = page.viewportSize();
@@ -56,15 +90,7 @@ async function dragPath(page, points) {
 
 /* ---------------- 1. Studio pointer painting ---------------- */
 {
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
-// The first-run welcome guide would cover the stage in a fresh context.
-await page.addInitScript(() => {
-  try {
-    localStorage.setItem('airo:guide:studio', '1');
-    localStorage.setItem('airo:guide:controller', '1');
-  } catch {}
-});
-
+  const page = await newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
   watch(page, 'studio-paint');
   await page.goto(`${BASE}/canvas/VERIFY1`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(12000); // model + shaders
@@ -81,8 +107,11 @@ await page.addInitScript(() => {
   // Second stroke with brush.
   await page.keyboard.press('b'); // toggle to brush
   await page.waitForTimeout(300);
+  // Straight across the deck between the trucks. The deck spans roughly
+  // 40-57% of the height at this viewport; at 60% (where this stroke used to
+  // run) it missed the model and painted nothing.
   await dragPath(page, [
-    [0.34, 0.62], [0.45, 0.6], [0.55, 0.62], [0.66, 0.6],
+    [0.38, 0.465], [0.45, 0.46], [0.53, 0.465], [0.6, 0.46],
   ]);
   await page.waitForTimeout(600);
   await page.screenshot({ path: `${OUT}/verify-brush.png` });
@@ -91,14 +120,11 @@ await page.addInitScript(() => {
 
 /* ---------------- 2. Seam-heavy model (helmet) ---------------- */
 {
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
+  const page = await newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 2 });
   watch(page, 'helmet-paint');
   await page.goto(`${BASE}/canvas/VERIFY2`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(9000);
-  // Switch object to helmet via the picker
-  await page.locator('header button:has(svg.lucide-chevron-down)').first().click();
-  await page.waitForTimeout(800);
-  await page.getByText('Moto Helmet').click();
+  await pickObject(page, 'Moto Helmet');
   await page.waitForTimeout(9000);
 
   await dragPath(page, [
@@ -111,7 +137,7 @@ await page.addInitScript(() => {
 
 /* ---------------- 3. Aim mode: 3D can + sensors ---------------- */
 {
-  const page = await browser.newPage({
+  const page = await newPage({
     viewport: { width: 393, height: 852 },
     deviceScaleFactor: 2,
     isMobile: true,
